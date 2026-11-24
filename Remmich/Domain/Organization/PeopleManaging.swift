@@ -32,7 +32,8 @@ nonisolated enum PeopleManagementError: LocalizedError, Equatable, Sendable {
 }
 
 /// 原仓库提供前台人物读取和窄写入，方法均须绑定同一账号/端点代际；无自动重试写操作。
-protocol PeopleManaging: Sendable {
+/// 与其他读取协议一样显式nonisolated，供后台repo/test actor实现，不依赖应用默认MainActor推断。
+nonisolated protocol PeopleManaging: Sendable {
     /// 返回含隐藏人物的完整新鲜列表，保留官方分页，不消费已完成索引GET。
     func managementPeople() async throws -> [ManagedPerson]
     /// expected是确认时记录；仅修改当前账号姓名，不修改共享用户姓名或生日。

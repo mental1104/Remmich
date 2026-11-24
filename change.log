@@ -103,6 +103,13 @@
 - Extend offline contracts for the actual PATCH/body/Bearer/response, wrong statuses, mismatched/missing/failed membership IDs, invalid restore counts and version/orientation decoding. Scoped SwiftFormat and diff checks passed; NAS has no Swift, so new contracts and app compilation await later unified CI. Search CI is independent; no new CI was started here.
 - Shared client/model ownership stays withroot; editor owns edit UI/preview, management owns batch/album UI and organization owns Library/SDK fresh reads. Rollback this gateway commit independently; media/presets are unchanged. Backup persistence and all larger stages remain unfinished.
 
+## 2026-11-24: Explicit people protocol isolation for the frozen candidate
+
+- Source: codex/fix-organization-compile-review from9428954. Upstream remains672f02e; no upstream sync, server/API/generated schema/Swift, workflow, CI, push or production change.
+- Mark PeopleManaging nonisolated explicitly, matching TimelineReading/OrganizationReading and the background repository/test actors. Do not rely on implicit protocol isolation in the app's MainActor-default build. Existing actor implementations and real flow tests remain the compile checks; no annotation-mirroring test added.
+- Scoped SwiftFormat0.64.5 and diff checks passed. Random generator request fields and native viewer/timeline initializer signatures were statically cross-checked with existing implementations; NAS has no Swift/Xcode, so compilation and test execution remain unverified. In-progress native-stack work remains outside this candidate and this commit.
+- Roll back this narrow protocol annotation/documentation commit if a verified compiler incompatibility requires it; no server data or confirmed user mutations are reversed by rollback.
+
 ## 2026-11-24: Confirmed native personal rename, hide/show and directed people merge
 
 - Source: codex/feature-people-management from309dd5c; upstream remains672f02e. No official sync, server/API/production migration, generated schema/Swift, workflow, push or CI execution.

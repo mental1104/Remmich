@@ -21,6 +21,8 @@ Added tests cover a real Store→repository→SDK GET→person preflight→PUT�
 
 NAS has no Swift/Xcode: scoped SwiftFormat0.64.5 and whitespace checks pass; **compilation, the new Swift tests, simulator UI and real-device/server acceptance have not run**. There is no claim of real face/media processing, physical-device acceptance or completed stage5. No workflow, CI run, push, server/API migration, production setting or private photo changed.
 
+The candidate compile-risk review explicitly marks `PeopleManaging` nonisolated, matching existing reader protocols and its repository/test-actor implementations under the app's default MainActor setting. Generated random request fields and existing viewer/timeline initializer calls were checked against their owning source; this static review does not replace a compiler result. Unfinished native-stack work is isolated outside this candidate.
+
 ## Device/server acceptance still required
 
 | Scenario | Expected result |
