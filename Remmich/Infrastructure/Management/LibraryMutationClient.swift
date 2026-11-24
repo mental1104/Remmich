@@ -136,6 +136,65 @@ final nonisolated class LibraryMutationClient: Sendable {
         return asset
     }
 
+    /// queries为最多64个不重复nonce的本机完整字节摘要；官方precheck只查现有资源，accept仅返回未命中，绝不上传。
+    /// 精确200、逐ID唯一回执及duplicate/isTrashed必须完整；结果仍须调用方fresh owner/版本/编辑状态验证。
+    @concurrent func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
+        guard queries.count <= LocalMediaChecksumQuery.batchLimit,
+              Set(queries.map(\.id)).count == queries.count else { throw LocalPhotoChecksumError.invalidInput }
+        guard !queries.isEmpty else { return [] }
+        // id仅本次nonce，checksum固定十六进制SHA1；不附带文件、Photos标识、metadata或上传参数。
+        struct Body: Encodable { let assets: [Item]; struct Item: Encodable { let id: String; let checksum: String } }
+        // presence区分省略与null，accept不能带冲突duplicate字段，reject不能缺失isTrashed。
+        struct Item: Decodable {
+            let id: String
+            let action: String
+            let reason: String?
+            let assetId: String?
+            let isTrashed: Bool?
+            let hasReason: Bool
+            let hasAssetID: Bool
+            let hasTrash: Bool
+            private enum CodingKeys: String, CodingKey { case id, action, reason, assetId, isTrashed }
+
+            /// decoder是实际单条回执；错误类型拒绝，不把null/缺失默认为false或未命中。
+            init(from decoder: any Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                id = try values.decode(String.self, forKey: .id); action = try values.decode(String.self, forKey: .action)
+                reason = try values.decodeIfPresent(String.self, forKey: .reason); assetId = try values.decodeIfPresent(String.self, forKey: .assetId)
+                isTrashed = try values.decodeIfPresent(Bool.self, forKey: .isTrashed)
+                hasReason = values.contains(.reason); hasAssetID = values.contains(.assetId); hasTrash = values.contains(.isTrashed)
+            }
+        }
+        // 官方根对象；不能用其他数组或空响应冒充所有资源未命中。
+        struct Response: Decodable { let results: [Item] }
+        let body = Body(assets: queries.map { .init(id: $0.id.uuidString.lowercased(), checksum: $0.digest.sha1Hex) })
+        let data = try await send("POST", ["assets", "bulk-upload-check"], body: JSONEncoder().encode(body), expectedStatus: 200)
+        guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
+        let results = try JSONDecoder().decode(Response.self, from: data).results
+        let expected = Set(queries.map { $0.id.uuidString.lowercased() })
+        guard results.count == queries.count, Set(results.map(\.id)) == expected else { throw LibraryWriteError.malformedResponse }
+        var mapped: [String: LocalMediaChecksumLookup.Outcome] = [:]
+        for result in results {
+            guard mapped[result.id] == nil else { throw LibraryWriteError.malformedResponse }
+            switch result.action {
+            case "accept":
+                guard !result.hasReason, !result.hasAssetID, !result.hasTrash else { throw LibraryWriteError.malformedResponse }
+                mapped[result.id] = .noMatch
+            case "reject":
+                guard result.reason == "duplicate", let id = result.assetId, let assetID = UUID(uuidString: id),
+                      assetID.uuid.6 >> 4 == 4, assetID.uuid.8 & 0xC0 == 0x80,
+                      let trashed = result.isTrashed else { throw LibraryWriteError.malformedResponse }
+                mapped[result.id] = trashed ? .trashed(assetID) : .existing(assetID)
+            default: throw LibraryWriteError.malformedResponse
+            }
+        }
+        try Task.checkCancellation()
+        return try queries.map { query in
+            guard let outcome = mapped[query.id.uuidString.lowercased()] else { throw LibraryWriteError.malformedResponse }
+            return .init(id: query.id, outcome: outcome)
+        }
+    }
+
     /// cloudIDs为本机已读到的完整Photos标识；只读取官方同步元数据，不请求任何媒体、不reset也不提交ack。
     /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
     @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {

@@ -5,6 +5,13 @@
 - Add scoped auto-restore/refresh hooks, account settings entry, strict fresh asset-info getter and a viewer source label distinguishing device Photos from Immich resources/cache. Source labels do not claim network byte counts. No upload, original overwrite, backup-completion or cleanup proof is inferred from display association.
 - Six scoped SwiftFormat/diff checks pass on NAS; app compilation, end-to-end routing tests, matching dependencies and device acceptance are unverified. Root continues integration before pushing one candidate CI. Rollback removes display routing without deleting media or server state.
 
+## 2026-11-24: Add local-current SHA1 fallback and read-only checksum lookup
+
+- Source: codex/feature-local-media-checksum-matching fromb79bfa2; upstream remains672f02e, no upstream/server/SDK/workflow/production change, push or CI. Add independent Domain/Photos hash files and one narrow LibraryMutationClient method; MediaLibraryController/Controller/Worker/SQLite/metadata stream/upload stay untouched.
+- Provide full before/after expected-version/permission/context gates, conservative single unadjusted photo/video selection, network=false cancellable streaming SHA1 and explicit insufficient reasons. No private isCurrent/KVC, RAW+JPEG/edited/LivePhoto guessing, iCloud media download, Immich media download, upload or backup confirmation. SHA1/Base64 proof only supports local-display association after caller fresh checks.
+- Use official POST assets/bulk-upload-check with client64 limit, exact200 and complete unique nonce/action/duplicate/assetId/isTrashed checks. accept is noMatch; trashed stays separate, no retries or writes. Existing external-library content/clientChecksum compatibility remains conditional on current server configuration/fingerprint readiness. UI/controller integration is independently owned and not complete from this component alone.
+- Add51 declared source/stream/HTTP scenarios; scoped7-file SwiftFormat0.64.5 lint, bash syntax, independent SHA1/Base64 and3 fixed-JSON checks plus diff pass on NAS. Swift compilation/tests, actual PhotoKit/iCloud-only/device playback/current NAS target remain unexecuted. See docs/local-media-checksum-matching.md for public API evidence/contracts, limits and rollback; no persistent queue or media migration.
+
 ## 2026-11-24: Read official metadata for device-local media matching
 
 - Source: codex/feature-local-media-matching from424a22a; upstream remains672f02e. User clarified cloud means Immich: match device Photos with server assets and prefer local display/playback, not merely iCloud backup deduplication.
