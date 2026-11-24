@@ -41,6 +41,13 @@
 - Add account-generation checks plus namespace retirement serialization across windows/quick same-account return. A new worker waits for previous cancellation/pause cleanup; the management channel is reserved for a run. Temporary exports are removed; no phone or server originals are deleted/overwritten.
 - Added real-SQLite/synthetic-disk worker scenarios for checkpoint order, photos/videos/Live Photo, mismatch/network stop, cancellation/revoked-context late receipts and one-item retry. NAS scoped SwiftFormat and diff checks passed; Swift compilation/test execution, actual PhotoKit/iCloud/HTTP media and device acceptance remain unverified. This work is not yet pushed/CI-tested/merged. See docs/photo-backup-reliability.md for limits and rollback; automatic/background backup and album sync/exclusion remain open.
 
+## 2026-11-24: Fix inaccessible viewer visibility initialization
+
+- Source: codex/fix-viewer-visibility-init afterfb39e4d, for candidate62623eb CI45379628014's exact AssetViewerSession.swift:18 compiler diagnostic. Upstream remains672f02e; no server/API/database/production/workflow change, push or CI trigger here.
+- The libraryIndexValue initializer belongs to a private TimelineVisibility extension in LibraryTimelineBootstrapBuilder.swift and is unavailable across files. Map the already-whitelisted archive/timeline values directly in the viewer, preserving unsupported/hidden/locked rejection without broadening the index API.
+- Reviewed FreshAsset→TimelineAssetSummary complete argument labels and the separate LibraryIndexAssetRecord→summary initializer chain; no additional inaccessible initializer call was found in Editing/viewer. Existing real fresh-GET/session tests cover archive publication but remain unexecuted until replacement CI. Actual NAS scoped SwiftFormat0.64.5 lint and diff check passed; no local Swift compiler.
+- Roll back this narrow client fix independently if superseded; original media, stored edits, indexing and Photos receipts are unchanged. The failed candidate is not declared compiled or device-ready.
+
 ## 2026-11-24: Close the visual editor viewer entry and bounded refresh
 
 - Source: codex/feature-ipad-visual-editing after494bb1c; upstream remains672f02e. Freeze stage3 scope after this slice for the tonight21:00 Asia/Shanghai compilable candidate. No upstream/server/API/schema/database/production/workflow change, push, CI trigger or dev merge here.

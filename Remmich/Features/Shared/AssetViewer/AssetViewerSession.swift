@@ -13,9 +13,11 @@ nonisolated extension AssetViewerFreshAsset {
         } else {
             existing.aspectRatio
         }
+        // 前置白名单只接受这两种可见性；索引文件的private初始化器不属于查看器可调用契约。
+        let freshVisibility: TimelineVisibility = visibility == "archive" ? .archive : .timeline
         return try .init(id: existing.id, ownerID: existing.ownerID, capturedAt: existing.capturedAt, uploadedAt: existing.uploadedAt,
                          localOffsetHours: existing.localOffsetHours, mediaKind: existing.mediaKind, durationMilliseconds: existing.durationMilliseconds,
-                         aspectRatio: ratio, isFavorite: isFavorite, visibility: TimelineVisibility(libraryIndexValue: visibility), livePhotoVideoID: existing.livePhotoVideoID,
+                         aspectRatio: ratio, isFavorite: isFavorite, visibility: freshVisibility, livePhotoVideoID: existing.livePhotoVideoID,
                          stack: existing.stack, projectionType: existing.projectionType, thumbhash: thumbhash, thumbnailRevision: revision(),
                          usesUploadDate: existing.usesUploadDate, place: existing.place)
     }
