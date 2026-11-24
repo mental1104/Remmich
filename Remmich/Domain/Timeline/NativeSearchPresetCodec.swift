@@ -19,6 +19,10 @@ nonisolated enum NativeSearchPresetCodec {
     static func capture(_ query: NativeSearchQuery) throws -> NativeSearchPresetConditions {
         var result = NativeSearchPresetConditions()
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reference = query.queryAssetID {
+            guard query.mode == .smart, text.isEmpty else { throw NativeSearchPresetConversionError.invalid }
+            result.queryAssetId = reference
+        }
         if !text.isEmpty {
             guard text.utf16.count <= 2000 else { throw NativeSearchPresetConversionError.invalid }
             let kind: NativeSearchPresetConditions.TextQuery.Kind = switch query.mode {
@@ -50,7 +54,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.exifConditions = query.exifConditions.isEmpty ? nil : query.exifConditions
         result.takenAfter = query.takenAfter.map { formatter(timeZone: query.timeZone).string(from: $0) }
         result.takenBefore = query.takenBefore.map { formatter(timeZone: query.timeZone).string(from: $0) }
-        guard result.query != nil || result.city != nil || result.country != nil || result.state != nil || result.make != nil || result.model != nil
+        guard result.query != nil || result.queryAssetId != nil || result.city != nil || result.country != nil || result.state != nil || result.make != nil || result.model != nil
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
@@ -64,8 +68,7 @@ nonisolated enum NativeSearchPresetCodec {
     /// conditions为完整登记，timeZone为使用者的日历时区；返回独立查询，调用方一次性替换。
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
-        guard conditions.queryAssetId == nil,
-              conditions.deviceModels == nil
+        guard conditions.deviceModels == nil
         else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
         guard conditions.isArchive != false, conditions.isFavorite != false, conditions.isPanorama != false else { throw NativeSearchPresetConversionError.invalid }
@@ -87,6 +90,12 @@ nonisolated enum NativeSearchPresetCodec {
             query.rating = .stars(value)
         }
         query.timeZone = timeZone
+        if let reference = conditions.queryAssetId {
+            // 登记允许参考图，但不能把文字/参考图冲突或服务器不接受的UUID变成部分复用。
+            guard conditions.query == nil, let uuid = UUID(uuidString: reference),
+                  uuid.uuid.6 & 0xF0 == 0x40, uuid.uuid.8 & 0xC0 == 0x80 else { throw NativeSearchPresetConversionError.invalid }
+            query.useReferenceAsset(reference)
+        }
         if let text = conditions.query {
             guard !text.value.isEmpty, text.value.utf16.count <= 2000 else { throw NativeSearchPresetConversionError.invalid }
             query.text = text.value

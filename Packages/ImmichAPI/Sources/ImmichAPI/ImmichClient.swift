@@ -307,12 +307,12 @@ public actor ImmichClient {
     }
 
     /// 按文件名和已选字段读取非回收站资源；query不变，cursor为上页原始令牌，size为1–1000。
-    /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
+    /// 返回可见时间线资源及下一游标；参考图须调用search，鉴权、条件、网络或响应错误沿用ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
+        guard query.queryAssetID == nil, query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
         let output = try await makeClient().searchAssets(.init(body: .json(.init(
             cursor: cursor,
             filter: structuredSearchFilter(query),
@@ -412,10 +412,14 @@ public actor ImmichClient {
     }
 
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。
-    /// 普通智能模式保留官方页码，高级组合只走独立Fork绑定游标，不删减条件降级。
+    /// 普通智能模式保留官方页码，参考图和高级组合只走独立Fork绑定游标，不删减条件降级。
     public func search(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation? = nil, size: Int = 60) async throws -> ImmichSearchPage {
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.mode != .smart || text.isEmpty {
+        // 参考图不能被metadata分支忽略；错误模式或混合文字必须在发送前完整拒绝。
+        if query.queryAssetID != nil {
+            guard query.mode == .smart, text.isEmpty else { throw ImmichAPIError.invalidResponse }
+        }
+        if query.mode != .smart || (text.isEmpty && query.queryAssetID == nil) {
             var cursor: String?
             if let continuation {
                 guard case let .cursor(value) = continuation else { throw ImmichAPIError.invalidResponse }
@@ -475,20 +479,28 @@ public actor ImmichClient {
         }
     }
 
-    /// 独立Fork只读请求体；不向生成的官方SmartSearchDto加入自定义字段或路径。
+    /// 独立Fork只读请求体；query/queryAssetId必须二选一，缺省Optional由合成编码器省略。
+    /// 不向生成的官方SmartSearchDto加入自定义字段或路径。
     private struct ForkSmartSearchBody: Encodable {
-        let query: String
+        let query: String?
+        let queryAssetId: String?
         let filter: Components.Schemas.SearchFilter
         let size: Int
         let cursor: String?
         let withExif = true
     }
 
-    /// query完整保留筛选，continuation仅接受Fork令牌，size限制页大小；缺路由错误保留给账号范围界面提示。
+    /// query完整保留筛选并验证文字/UUID v4参考图互斥；continuation仅接受Fork令牌，size为1–1000。
+    /// 返回本次结果页；非法来源/令牌发送前失败，缺路由和其他HTTP错误保留给账号范围界面提示。
     private func forkSmartSearch(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation?, size: Int) async throws -> ImmichSearchPage {
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
+        if let reference = query.queryAssetID {
+            guard text.isEmpty, let uuid = UUID(uuidString: reference),
+                  uuid.uuid.6 & 0xF0 == 0x40, uuid.uuid.8 & 0xC0 == 0x80 else { throw ImmichAPIError.invalidResponse }
+        } else {
+            guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
+        }
         var cursor: String?
         if let continuation {
             guard case let .forkCursor(value) = continuation, !value.isEmpty, value.utf16.count <= 4096 else { throw ImmichAPIError.invalidResponse }
@@ -501,7 +513,8 @@ public actor ImmichClient {
             var value = encoder.singleValueContainer()
             try value.encode(transcoder.encode(date))
         }
-        let data = try encoder.encode(ForkSmartSearchBody(query: text, filter: structuredSearchFilter(query), size: size, cursor: cursor))
+        let data = try encoder.encode(ForkSmartSearchBody(query: query.queryAssetID == nil ? text : nil,
+                                                          queryAssetId: query.queryAssetID, filter: structuredSearchFilter(query), size: size, cursor: cursor))
         let operationID = "forkSearchSmart"
         let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/search/smart",
                                   headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])

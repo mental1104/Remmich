@@ -93,6 +93,8 @@ The timeline places upcoming milestones above **Now** and completed work below i
 
 ## Personal fork capabilities
 
+**Search → long-press a result → Find similar photos** uses that server asset as the reference and retains every selected filter. The reference card can return to text search, and saved searches preserve the reference and full conditions. This requires the authenticated Fork smart-search extension; missing routes and reference permissions remain visible errors. This follow-up awaits CI and device acceptance.
+
 **Profile → Account → 照片备份** selects phone albums for foreground original-file backup with checksum deduplication, video and Live Photo pairing. It stops when leaving the page or entering the background. Background automatic backup and persistent queues are not implemented. iCloud downloads require a separate toggle. RAW+JPEG combinations are rejected rather than marked fully backed up.
 
 **Photo viewer → sliders button** opens favorites, archive, caption, recycle-bin and album membership controls. Still images can use official non-destructive rotate/mirror/crop parameters; the current crop form uses pixel coordinates without a live preview. Existing edit parameters are loaded and checked again before replacement. **Albums → options → 相簿管理** creates, renames and deletes albums while retaining media.

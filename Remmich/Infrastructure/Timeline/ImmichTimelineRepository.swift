@@ -439,6 +439,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         // SDK类型仅存在于基础设施层；界面和领域不导入ImmichAPI。
         var dto = ImmichMetadataSearch()
         dto.text = query.text
+        dto.queryAssetID = query.queryAssetID
         dto.mode = switch query.mode {
         case .fileName: .fileName
         case .description: .description

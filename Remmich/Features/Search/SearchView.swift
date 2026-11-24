@@ -9,6 +9,7 @@ struct SearchView: View {
     @State private var query = NativeSearchQuery()
     @State private var store = NativeSearchStore()
     @State private var selection: Selection?
+    @State private var referencePreview: TimelineAssetSummary?
     @State private var people: [LibraryPerson] = []
     @State private var peopleError: String?
     @State private var tagChoices: [NativeSearchTag] = []
@@ -35,10 +36,19 @@ struct SearchView: View {
                     Text("Videos").tag(NativeSearchQuery.Media.video)
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
+                if let reference = query.queryAssetID {
+                    referenceCard(reference)
+                }
                 SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
                 DisclosureGroup("Filters") {
                     VStack {
-                        Picker("Search mode", selection: $query.mode) {
+                        Picker("Search mode", selection: Binding(get: { query.mode }, set: { mode in
+                            query.mode = mode
+                            if mode != .smart {
+                                query.queryAssetID = nil
+                                referencePreview = nil
+                            }
+                        })) {
                             ForEach(NativeSearchQuery.Mode.allCases, id: \.self) { mode in
                                 Text(mode.title).tag(mode)
                             }
@@ -167,6 +177,12 @@ struct SearchView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
+                        .contextMenu {
+                            Button("Find similar photos", systemImage: "photo.on.rectangle.angled") {
+                                referencePreview = asset
+                                query.useReferenceAsset(asset.id)
+                            }
+                        }
                     }
                 }
                 if store.isLoading {
@@ -185,12 +201,16 @@ struct SearchView: View {
             }.padding(.vertical)
         }
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query.text, prompt: Text(query.mode.title))
+        .searchable(text: Binding(get: { query.text }, set: {
+            query.useSearchText($0)
+            referencePreview = nil
+        }), prompt: Text(query.mode.title))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in
             store.invalidate()
             selection = nil
+            referencePreview = nil
             query = .init()
             people = []
             peopleError = nil
@@ -220,7 +240,7 @@ struct SearchView: View {
     private func search() async {
         store.invalidate()
         guard !invalidDateRange,
-              !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
+              query.queryAssetID != nil || !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
               || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.tags != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty
@@ -230,6 +250,27 @@ struct SearchView: View {
             guard let source else { return }
             await store.search(query, source: source)
         } catch { /* 取消防抖无需显示错误。 */ }
+    }
+
+    /// assetID为当前账号的参考图；只在持有已知缩略图版本时显示预览，登记恢复不猜测版本或联网补查。
+    private func referenceCard(_ assetID: String) -> some View {
+        HStack {
+            if let referencePreview, referencePreview.id == assetID {
+                LibraryAssetCover(assetID: assetID, revision: referencePreview.thumbnailRevision, media: media)
+                    .frame(width: 56, height: 56).clipped().accessibilityHidden(true)
+            } else {
+                Image(systemName: "photo.on.rectangle.angled").frame(width: 56, height: 56).accessibilityHidden(true)
+            }
+            Text("Similar photos").font(.headline)
+            Spacer()
+            Button("Use text search") {
+                query.queryAssetID = nil
+                referencePreview = nil
+            }
+            .accessibilityIdentifier("search-clear-reference")
+        }
+        .padding(.horizontal)
+        .accessibilityIdentifier("search-reference")
     }
 
     /// 仅比较用户选择的日历日，不因DatePicker保留小时而误判同一天。
