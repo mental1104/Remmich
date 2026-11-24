@@ -31,6 +31,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public enum Media: String, CaseIterable, Sendable { case all, image, video }
 
     public var text = ""
+    /// 服务端参考图的UUID v4；必须在smart模式与非空text二选一，始终走完整Fork协议。
+    public var queryAssetID: String?
     public var mode: Mode = .fileName
     public var media: Media = .all
     public var country = ""
@@ -57,10 +59,10 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 创建空条件；调用方按用户选择修改值，不自动读取设备照片。
     public init() {}
 
-    /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
+    /// 参考图始终走完整Fork协议；其他旧式smart无法完整表达的组合也走独立Fork分页。
     public var requiresForkSmartSearch: Bool {
-        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+        mode == .smart && (queryAssetID != nil || (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))))
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。

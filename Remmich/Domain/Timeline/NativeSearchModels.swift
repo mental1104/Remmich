@@ -31,6 +31,8 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     enum Media: String, CaseIterable, Sendable { case all, image, video }
 
     var text = ""
+    /// 参考图使用服务端UUID v4；与文字互斥，只在smart模式使用，不包含本地文件或图片字节。
+    var queryAssetID: String?
     var mode: Mode = .fileName
     var media: Media = .all
     var country = ""
@@ -52,10 +54,23 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var takenBefore: Date?
     var timeZone = TimeZone.current
 
-    /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
+    /// 参考图及高级智能条件需要独立Fork分页；不能将参考图静默降级成无文字的metadata。
     var requiresForkSmartSearch: Bool {
-        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+        mode == .smart && (queryAssetID != nil || (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)))
+    }
+
+    /// assetID为已加载结果中的服务端身份；切换为参考图时只替换查询来源，完整保留筛选。
+    mutating func useReferenceAsset(_ assetID: String) {
+        queryAssetID = assetID
+        text = ""
+        mode = .smart
+    }
+
+    /// value为用户输入的文字；输入立即退出参考图模式，其他条件和当前文本模式保持不变。
+    mutating func useSearchText(_ value: String) {
+        queryAssetID = nil
+        text = value
     }
 }
 

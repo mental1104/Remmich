@@ -25,6 +25,69 @@ struct ForkSmartSearchTests {
         #expect(last.continuation == nil)
     }
 
+    /// rating覆盖参考图组合的评分三态；两页都只发送queryAssetId并完整保留原有过滤。
+    @Test(arguments: [ImmichSearchRating.any, .unrated, .stars(0), .stars(5)])
+    func preservesReferenceAndCompleteFilters(_ rating: ImmichSearchRating) async throws {
+        var query = try forkQuery(rating: rating)
+        query.text = ""
+        query.queryAssetID = "22222222-2222-4222-8222-222222222222"
+        let url = try #require(URL(string: "https://example.invalid/immich/api"))
+        let transport = ImmichQueuedReadTransport(searchTransport: ForkWireTransport(rating: rating, referenceID: query.queryAssetID)) { _, _ in
+            Issue.record("Reference search POST must not enter the durable GET queue")
+            throw CancellationError()
+        }
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
+        let first = try await client.search(query)
+        #expect(first.assets.map(\.id) == ["first"])
+        #expect(first.continuation == .forkCursor("fork-next"))
+        let last = try await client.search(query, continuation: first.continuation)
+        #expect(last.assets.map(\.id) == ["last"])
+        #expect(last.continuation == nil)
+    }
+
+    /// 没有其他高级筛选时仍走Fork；服务器参考图读取失败不能退回官方smart或metadata。
+    @Test(arguments: [404, 405, 501, 401, 403, 400])
+    func routesReferenceAloneWithoutFallback(_ status: Int) async throws {
+        var query = ImmichMetadataSearch()
+        query.mode = .smart
+        query.queryAssetID = "22222222-2222-4222-8222-222222222222"
+        #expect(query.requiresForkSmartSearch)
+        let transport = ForkStatusTransport(status: status)
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
+        await #expect(throws: ImmichClient.map(status: status)) { try await client.search(query) }
+        #expect(await transport.calls == 1)
+    }
+
+    /// reference为非法UUID、版本或variant；不能向网络发送，也不能通过metadata忽略参考图。
+    @Test(arguments: ["", "not-an-asset", "00000000-0000-0000-0000-000000000000",
+                      "22222222-2222-5222-8222-222222222222", "22222222-2222-4222-7222-222222222222"])
+    func rejectsInvalidReferencesBeforeSending(_ reference: String) async throws {
+        var query = ImmichMetadataSearch()
+        query.mode = .smart
+        query.queryAssetID = reference
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: ForkNeverSendTransport())
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.metadataSearch(query) }
+    }
+
+    /// 参考图与文字/非smart模式冲突时整组拒绝；参考图分页也不能借用其他协议令牌。
+    @Test func rejectsMixedReferenceSourcesAndContinuations() async throws {
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: ForkNeverSendTransport())
+        var query = ImmichMetadataSearch()
+        query.queryAssetID = "22222222-2222-4222-8222-222222222222"
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
+        query.mode = .smart
+        query.text = "synthetic"
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
+        query.text = ""
+        for token in [ImmichSearchContinuation.cursor("metadata"), .page(2)] {
+            await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: token) }
+        }
+    }
+
     /// condition单独选择旧smart不能表达的条件，不能只有多个高级条件同时存在才使用Fork。
     @Test(arguments: ["iso", "orientation", "albums", "zero"])
     func routesEachAdvancedCondition(_ condition: String) async throws {
@@ -44,12 +107,17 @@ struct ForkSmartSearchTests {
         #expect(await transport.calls == 1)
     }
 
-    /// 取消后即使传输器返回正常响应，也不能发布成功；测试不依赖sleep或实际网络。
-    @Test func rejectsLateResponseAfterCancellation() async throws {
+    /// usesReference选择文字/参考图请求；取消后即使传输器返回正常响应，也不能发布成功。
+    @Test(arguments: [false, true])
+    func rejectsLateResponseAfterCancellation(_ usesReference: Bool) async throws {
         let transport = ForkDelayedTransport()
         let url = try #require(URL(string: "https://example.invalid/api"))
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
-        let query = try forkQuery()
+        var query = try forkQuery()
+        if usesReference {
+            query.text = ""
+            query.queryAssetID = "22222222-2222-4222-8222-222222222222"
+        }
         let task = Task { try await client.search(query) }
         await transport.waitForRequest()
         task.cancel()
@@ -134,6 +202,7 @@ private func forkQuery(rating: ImmichSearchRating = .stars(0)) throws -> ImmichM
 /// 断言完整请求，返回带真实AssetResponseDto形状的两页合成记录。
 private struct ForkWireTransport: ClientTransport {
     let rating: ImmichSearchRating
+    var referenceID: String?
 
     /// request/body是包装器输出；baseURL必须保留API前缀，operationID是唯一Fork只读身份。
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
@@ -144,7 +213,13 @@ private struct ForkWireTransport: ClientTransport {
         let encoded = try #require(body)
         let data = try await Data(collecting: encoded, upTo: 1_000_000)
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(json["query"] as? String == "synthetic")
+        if let referenceID {
+            #expect(json["queryAssetId"] as? String == referenceID)
+            #expect(json["query"] == nil)
+        } else {
+            #expect(json["query"] as? String == "synthetic")
+            #expect(json["queryAssetId"] == nil)
+        }
         #expect(json["page"] == nil && json["orderBy"] == nil && json["rating"] == nil)
         #expect(json["size"] as? Int == 60 && json["withExif"] as? Bool == true)
         let filter = try #require(json["filter"] as? [String: Any])
