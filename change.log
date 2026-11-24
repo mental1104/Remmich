@@ -1,3 +1,10 @@
+## 2026-11-24: Bound the viewer modifier chain's type-checking expressions
+
+- Source: codex/fix-viewer-modifier-boundaries from exact2ff5b8c. CI45383819035 ended failure19:36 with the sole source diagnostic moved to onAppear/beginOpeningAnimation; extracting cleanup alone did not solve the enclosing generic expression. Upstream remains672f02e; no feature/API/data/production/workflow change, push or CI trigger.
+- Split the existing expression at five private some View property boundaries: viewerGeometry→viewerPresentation→viewerLoading→viewerObservation→viewerLifecycle; body returns the last expression. Keep geometry, sheet/state bindings, task identities, observer and lifecycle order unchanged. No new View/state container, AnyView, identity key, cached snapshot, compiler-budget override or test relaxation.
+- Actual NAS checks: SwiftFormat0.64.5 scoped lint and diff checks pass. A direct source reconstruction asserts the five segments' modifier/callback token sequence equals2ff5b8c, all @State declaration lines match, and viewerDidDisappear plus the remainder of the file are byte-identical. Formatter indentation is the only change to the existing modifier bodies. No Swift compiler exists here; replacement CI must establish whether this resolves compilation.
+- Roll back this expression-boundary extraction independently; media/session persistence and event semantics are unchanged. Stage3 remains frozen for the21:00 candidate.
+
 ## 2026-11-24: Isolate viewer disappearance cleanup from SwiftUI type checking
 
 - Source: codex/fix-viewer-cleanup-typecheck from exact candidated21356d, CI45382038782's sole source diagnostic at AssetViewerView.swift:681. Previous two source errors no longer appear; this does not declare the candidate successful. Upstream remains672f02e, no server/API/data/workflow/production change, push or CI trigger.
