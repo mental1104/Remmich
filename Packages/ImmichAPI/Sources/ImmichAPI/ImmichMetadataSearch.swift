@@ -1,5 +1,12 @@
 import Foundation
 
+/// 当前账户可用的搜索候选字段；不是公共地理编码服务。
+public enum ImmichSearchSuggestionKind: String, Sendable {
+    case city
+    case cameraMake = "camera-make"
+    case cameraModel = "camera-model"
+}
+
 /// 原生元数据搜索条件；空值表示不限制，不包含账号范围或客户端计算的分页偏移。
 public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 搜索文本的语义；智能模式走smart，其他模式只走metadata。

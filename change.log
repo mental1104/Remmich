@@ -1,3 +1,11 @@
+## 2026-11-24: Account-scoped search filter choices
+
+- Source: codex/feature-search-suggestions over7182bda; upstream remains672f02e. No server/API/database or production change.
+- Add authenticated official GET search suggestions for city, camera make/model; model choices honor the selected make. Keep free text usable on permission/network failure; candidates never use public Photon or coordinates. SDK types stay in Infrastructure and account/route generations reject late responses.
+- Candidate selection updates the same native query; changing make invalidates model choices without silently discarding selected conditions, preserving future atomic preset restoration. Concurrent choice requests remain outside writes and use the existing GET pipeline.
+- Added synthetic GET/auth/query tests and anonymous denial; local SwiftFormat/diff/import checks pass, new Xcode/test validation pending. Current CI7182bda is a prior revision and cannot validate these new changes. Remaining search work includes Fork EXIF/atomic conditions and saved presets.
+- Rollback: revert this follow-up; no data recovery needed. No real-device or private-photo acceptance performed.
+
 ## 2026-11-24: Search modes and SDK boundary repair
 
 - CI run45326132850 exposed the prepared schema's intentional removal of nextPage, preventing smart wrapper compilation. Updated the preparation source to preserve this used field and regenerated from the original pinned official commit520a70891 (raw hash unchanged). Whole-document comparison confirms nextPage/property requirement is the only schema difference; idempotence, Python3.8 execution/syntax and diff checks passed. New Xcode validation still pending; no generated Swift was manually changed.

@@ -392,6 +392,21 @@ public actor ImmichClient {
         }
     }
 
+    /// kind为账号内候选字段，make仅约束型号；返回可读字符串，不请求null候选。
+    public func searchSuggestions(kind: ImmichSearchSuggestionKind, make: String? = nil) async throws -> [String] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard let field = Components.Schemas.SearchSuggestionType(rawValue: kind.rawValue) else { throw ImmichAPIError.invalidResponse }
+        let output = try await makeClient().getSearchSuggestions(.init(query: .init(
+            includeNull: false,
+            make: kind == .cameraModel ? make : nil,
+            _type: field
+        )))
+        switch output {
+        case let .ok(response): return try response.body.json
+        case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+        }
+    }
+
     public func videoAssets(cursor: String? = nil, size: Int = 100) async throws -> ImmichVideoPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }

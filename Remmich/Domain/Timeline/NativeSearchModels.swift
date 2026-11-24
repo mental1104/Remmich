@@ -1,5 +1,12 @@
 import Foundation
 
+/// 界面允许加载的账号内候选，不暴露SDK枚举。
+nonisolated enum NativeSearchSuggestionKind: String, Sendable {
+    case city
+    case cameraMake = "camera-make"
+    case cameraModel = "camera-model"
+}
+
 /// 界面自己的搜索状态；只有Infrastructure负责转换为网络SDK请求。
 nonisolated struct NativeSearchQuery: Hashable, Sendable {
     /// 界面支持的文本语义，不将SDK DTO泄露到Feature层。

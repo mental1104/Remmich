@@ -11,6 +11,9 @@ struct SearchView: View {
     @State private var selection: Selection?
     @State private var people: [LibraryPerson] = []
     @State private var peopleError: String?
+    @State private var suggestions: [NativeSearchSuggestionKind: [String]] = [:]
+    @State private var suggestionError: String?
+    @State private var loadingSuggestions = false
     @Namespace private var viewerNamespace
 
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
@@ -36,9 +39,14 @@ struct SearchView: View {
                                 Text(mode.title).tag(mode)
                             }
                         }
-                        TextField("City", text: $query.city)
-                        TextField("Camera make", text: $query.cameraMake)
-                        TextField("Camera model", text: $query.cameraModel)
+                        SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
+                        SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
+                        SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
+                        if let suggestionError {
+                            Text(suggestionError).font(.caption)
+                        }
+                        Button(loadingSuggestions ? "Loading choices" : "Load filter choices") { Task { await loadChoices() } }
+                            .disabled(loadingSuggestions)
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
                         DisclosureGroup("People") {
@@ -112,6 +120,12 @@ struct SearchView: View {
             query = .init()
             people = []
             peopleError = nil
+            suggestions = [:]
+            suggestionError = nil
+            loadingSuggestions = false
+        }
+        .onChange(of: query.cameraMake) { _, _ in
+            suggestions[.cameraModel] = nil
         }
         .fullScreenCover(item: $selection) { selected in
             AssetViewerView(route: selected.route, store: selected.timeline, media: media, assetDetails: assetDetails,
@@ -159,6 +173,32 @@ struct SearchView: View {
         }
     }
 
+    /// 读取当前账号候选；只在账号和厂商条件均未变化时发布，不访问公共地名服务。
+    private func loadChoices() async {
+        guard let source, !loadingSuggestions else { return }
+        let owner = media.management.generation
+        let requested = query
+        loadingSuggestions = true
+        suggestionError = nil
+        defer {
+            if owner == media.management.generation {
+                loadingSuggestions = false
+            }
+        }
+        do {
+            async let cities = source.searchSuggestions(.city, query: requested)
+            async let makes = source.searchSuggestions(.cameraMake, query: requested)
+            async let models = source.searchSuggestions(.cameraModel, query: requested)
+            let values = try await (cities, makes, models)
+            try Task.checkCancellation()
+            guard owner == media.management.generation, requested.cameraMake == query.cameraMake else { return }
+            suggestions = [.city: values.0, .cameraMake: values.1, .cameraModel: values.2]
+        } catch {
+            guard owner == media.management.generation, !Task.isCancelled else { return }
+            suggestionError = "Filter choices could not be loaded. You can still enter values manually."
+        }
+    }
+
     /// asset为点击项；创建仅包含已加载结果的查看器快照，不修改主时间线。
     private func open(_ asset: TimelineAssetSummary) {
         let snapshot = NativeSearchSnapshot(assets: store.assets)
@@ -168,6 +208,27 @@ struct SearchView: View {
                                  groupedCatalogs: .init(), isComplete: true))
         selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
                                            origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Search")), timeline: timeline)
+    }
+}
+
+/// 文本输入始终可用；values存在时通过系统原生菜单选择候选。
+private struct SearchChoiceField: View {
+    let title: String
+    @Binding var text: String
+    let values: [String]?
+
+    var body: some View {
+        HStack {
+            TextField(title, text: $text)
+            if let values, !values.isEmpty {
+                Menu {
+                    ForEach(values, id: \.self) { value in Button(value) { text = value } }
+                } label: {
+                    Image(systemName: "list.bullet").frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("Choose \(title)")
+            }
+        }
     }
 }
 

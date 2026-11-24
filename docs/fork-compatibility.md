@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- Search suggestions follow-up adds current-account city/camera choices through official GET suggestions, with manual input fallback and stale-owner rejection. New synthetic request tests and Xcode validation are pending; no public Photon lookup is involved. Fork EXIF and saved conditions remain unfinished.
+
 - Consolidated PR #3 now includes native domain search models plus filename/description/path/OCR/smart modes. PR #2 app checks found two forbidden Feature SDK imports; those checks remain intact, and mapping moved to Infrastructure. This revision awaits new CI. Metadata uses opaque cursors, smart uses official legacy page numbers; no claim that smart V3 has pagination. Fork EXIF, suggestions and saved conditions remain unfinished.
 
 - People/date filter follow-up is implemented on codex/feature-search-people-dates but awaits CI: account-scoped people, optional local calendar boundaries, invalid-range rejection and explicit SDK error messages. Smart search, suggestions, Fork EXIF and saved conditions remain unfinished. Do not use older successful CI for this follow-up.

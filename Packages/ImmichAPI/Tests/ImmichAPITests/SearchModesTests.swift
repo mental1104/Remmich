@@ -13,7 +13,7 @@ struct SearchModesTests {
         var query = ImmichMetadataSearch()
         query.mode = mode
         query.text = "synthetic"
-        let client = try client(mode: mode)
+        let client = try makeClient(mode: mode)
         let result = try await client.search(query, continuation: .cursor("opaque"))
         #expect(result.assets.isEmpty)
         #expect(result.continuation == nil)
@@ -24,7 +24,7 @@ struct SearchModesTests {
         var query = ImmichMetadataSearch()
         query.mode = .smart
         query.text = "synthetic"
-        let result = try await client(mode: .smart).search(query, continuation: .page(2))
+        let result = try await makeClient(mode: .smart).search(query, continuation: .page(2))
         #expect(result.continuation == .page(3))
     }
 
@@ -34,13 +34,13 @@ struct SearchModesTests {
         var query = ImmichMetadataSearch()
         query.mode = .smart
         query.text = "synthetic"
-        let client = try client(mode: .smart, nextPage: raw)
+        let client = try makeClient(mode: .smart, nextPage: raw)
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .page(2)) }
     }
 
     /// 同一请求模式不能接受另一种分页token，不向网络猜测转换。
     @Test func rejectsMixedPaginationKinds() async throws {
-        let client = try client(mode: .smart)
+        let client = try makeClient(mode: .smart)
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(.init(), continuation: .page(2)) }
         var query = ImmichMetadataSearch()
         query.mode = .smart
@@ -49,7 +49,7 @@ struct SearchModesTests {
     }
 
     /// mode选择合成断言，nextPage为可注入的合成响应；返回SDK客户端，GET队列不应被调用。
-    private func client(mode: ImmichMetadataSearch.Mode, nextPage: String = "3") throws -> ImmichClient {
+    private func makeClient(mode: ImmichMetadataSearch.Mode, nextPage: String = "3") throws -> ImmichClient {
         let transport = ImmichQueuedReadTransport(searchTransport: ModeTransport(mode: mode, nextPage: nextPage)) { _, _ in
             Issue.record("Search POST must not enter the GET queue")
             throw CancellationError()
