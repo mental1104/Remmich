@@ -13,7 +13,9 @@ struct SearchSuggestionTests {
             #expect(request.httpMethod == "GET")
             #expect(request.url?.path == "/immich/api/search/suggestions")
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer synthetic")
-            let items = try #require(URLComponents(url: #require(request.url), resolvingAgainstBaseURL: false)?.queryItems)
+            let url = try #require(request.url)
+            let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
+            let items = try #require(components.queryItems)
             #expect(items.contains { $0.name == "type" && $0.value == kind.rawValue })
             #expect(items.contains { $0.name == "includeNull" && $0.value == "false" })
             #expect(items.contains { $0.name == "make" } == (kind == .cameraModel))
@@ -21,8 +23,9 @@ struct SearchSuggestionTests {
                 #expect(items.contains { $0.name == "make" && $0.value == "Synthetic Make" })
             }
             let body = Data(#"["Synthetic A","Synthetic B"]"#.utf8)
-            return try (body, #require(HTTPURLResponse(url: #require(request.url), statusCode: 200,
-                                                       httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
+            let response = try #require(HTTPURLResponse(url: url, statusCode: 200,
+                                                        httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            return (body, response)
         }
         let client = try ImmichClient(apiURL: #require(URL(string: "https://example.com/immich/api")),
                                       credential: .bearer("synthetic"), transport: transport)

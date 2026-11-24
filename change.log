@@ -1,5 +1,7 @@
 ## 2026-11-24: EXIF, orientation and album-state filters
 
+- CI45331713557 compiled the previous app/test bundles, then package-test compilation exposed nested #require macros in candidate tests. Split URL/components/response requirements into separate assertions; no checks removed. Next CI includes this EXIF follow-up. Preset codec work remains local and excluded from this push.
+
 - Source: codex/feature-search-exif from5a4f9f0; upstream base remains672f02e. No server/API/database changes or production operations.
 - Add native ISO/aperture/focal-length/exposure comparisons with independent slots, orientation and album membership filters. Metadata requests preserve other conditions and proper seconds/mm units. Reject duplicate slots, nonfinite/negative values; display unsupported smart/advanced combinations instead of dropping conditions. Reliable smart+advanced pagination remains outstanding, so this is not full search-stage completion.
 - Add a minimal, provenance-recorded schema augmentation from the actual parent Fork: five properties in both filter nodes plus two orientation definitions. Preparation consumes this committed input; no generated Swift edited. Whole-document/source comparison and idempotence passed on Python3.8; existing unrelated schemas remain unchanged.
