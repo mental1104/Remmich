@@ -329,7 +329,7 @@ public actor ImmichClient {
         }
     }
 
-    /// query为完整原生条件；metadata/Fork智能路径共用同一映射，非法日期或原子条件在网络前拒绝。
+    /// query为完整原生条件；metadata/Fork智能共用同一映射，非法日期、设备型号组或原子条件在网络前拒绝。
     private func structuredSearchFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.SearchFilter {
         guard query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
         let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
@@ -346,7 +346,7 @@ public actor ImmichClient {
             isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
             lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
             make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
-            model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
+            model: deviceModelFilter(query),
             ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
             originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
             originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
@@ -363,6 +363,17 @@ public actor ImmichClient {
             exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
             orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
         )
+    }
+
+    /// query包含独立单型号与设备OR组；返回合并的官方model过滤，空条件省略，非法别名集合在网络前拒绝。
+    private func deviceModelFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.StringFilterNullable? {
+        guard query.deviceModels.count <= 50,
+              query.deviceModels.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf16.count <= 256 })
+        else { throw ImmichAPIError.invalidResponse }
+        guard !query.cameraModel.isEmpty || !query.deviceModels.isEmpty else { return nil }
+        // 不将产品名称写入请求，也不以设备组覆盖用户额外选择的单型号。
+        return .init(eq: query.cameraModel.isEmpty ? nil : query.cameraModel,
+                     _in: query.deviceModels.isEmpty ? nil : query.deviceModels)
     }
 
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。

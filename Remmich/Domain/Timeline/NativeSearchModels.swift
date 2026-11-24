@@ -42,6 +42,8 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
+    /// 设备组保存真实型号别名的OR集合；不绑定当前候选缓存或产品显示名。
+    var deviceModels: [String] = []
     var lensModel = ""
     enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
     var orientation: Orientation?
@@ -55,7 +57,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
     var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch || !deviceModels.isEmpty)
     }
 }
 

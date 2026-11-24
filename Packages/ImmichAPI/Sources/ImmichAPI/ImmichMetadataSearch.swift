@@ -42,6 +42,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    /// 当前账号真实设备型号的OR集合；与单型号和其他条件组合时仍是AND，不自动改媒体类型。
+    public var deviceModels: [String] = []
     public var lensModel = ""
     /// 横竖构图来自Fork扩展；未选择则不限制。
     public enum Orientation: String, Sendable { case landscape, portrait }
@@ -60,7 +62,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
     public var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0) || !deviceModels.isEmpty)
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。

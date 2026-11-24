@@ -1,3 +1,11 @@
+## 2026-11-24: Account-scoped capture-device groups and saved-condition reuse
+
+- Source: codex/feature-search-device-models over9969913; upstream remains672f02e. No upstream sync, server/API/schema/database/production change, workflow edit, or generated Swift modification.
+- Match the owning Fork Web capture-devices aliases against authenticated official camera-model suggestions. Group actual iPhone/DJI/Insta360/other devices, excluding camera/software entries; never add absent aliases or products. Raw aliases stay intact, and owner/endpoint-generation changes clear candidates and reject late results. Selecting/clearing a device group changes only that OR group.
+- Send official structured model.in alongside any independent model.eq. Device-filtered smart text uses the existing separate Fork smart cursor route, preserving other conditions and explicit missing-extension errors. Saved deviceModels conditions round-trip fully, including device-only queries; reject invalid/empty/over-limit specified groups instead of partially reusing or truncating them.
+- Added two-page SDK metadata/Fork wire assertions, authenticated unconstrained candidates and invalid-before-send tests; native alias provenance/grouping/exclusion and full saved-query boundary tests. Scoped SwiftFormat0.64.5 and diff checks passed locally. NAS has no Swift toolchain: compilation, test execution, synthetic UI and physical iPhone15Pro/iPadPro2022 acceptance remain unverified pending root-managed CI. No private media accessed.
+- Contract evidence and rollback: docs/capture-device-search.md. Revert this client follow-up; keep all server registrations/media. Other first-stage search work continues independently; this does not complete the long goal.
+
 ## 2026-11-24: Native advanced smart search through the Fork cursor contract
 
 - Source: codex/feature-search-advanced-smart from dev293c3e8; upstream remains672f02e, no upstream sync. No server/API/schema/database change in this client commit and no production deployment. Owning server implementation aa9aa667f is local and not deployed.

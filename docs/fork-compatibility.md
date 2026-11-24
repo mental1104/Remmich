@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Capture-device follow-up: native account-scoped device groups and complete `deviceModels` preset reuse now use the official structured `filter.model.in` contract. Product aliases match the existing Web grouping without inventing absent candidates; other filters and single-model `eq` remain intact. Device-filtered smart text uses the independent Fork cursor route, with explicit unsupported behavior when unavailable. No server/schema/generated source change. Scoped formatting and diff checks passed; new SDK/native tests and app compilation await macOS CI, and real-device acceptance remains unverified. See [capture-device search](capture-device-search.md).
+
 Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
 
 Server: mental1104/immich, local feature baseline `aa9aa667f` (official stable v3.4.2); new smart pagination is not deployed.
