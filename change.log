@@ -1,3 +1,9 @@
+## 2026-11-24: Isolate Live Photo audio activation ownership
+
+- Source: codex/feature-live-photo-audio-controller from2a712c2; upstream remains672f02e, no sync. Add one MainActor observable controller and focused async tests only; host wiring is independently owned. Existing ViewerAudioSessionControlling/system audio policy, Media/Photos/server/API/schema/production/workflow remain unchanged.
+- Each activation owns a UUID/Task and checks generation, cancellation and host context before the protocol call and after success/error. Only the current activation can set ready/report failure. Stale completions returnfalse without deactivating newer audio; explicit deactivate retires synchronously then calls the existing session. Generation-checked defer retains a task created reentrantly by failure callbacks.
+- Add10 functions/16 cases using real controller→protocol continuations, deliberately non-cooperative cancellation and ordered old/new success/failure, context retirement, direct/explicit cancel, ready reset and failure reentrancy. Gates have bounded actual-entry waits and cleanup releases continuations outside locks. Two-file SwiftFormat0.64.5 format/lint and whitespace/static checks pass on NAS; no Swift/Xcode means compilation/cases UNEXECUTED. No actual AVAudioSession/Photos/media/device proof; see docs/live-photo-playback-audio-controller.md. No push/new CI; rollback removes additive source/tests/docs after host dependency is removed.
+
 ## 2026-11-24: Validate independent remote Live Photo pair identities
 
 - Source: codex/feature-local-live-media from44dbafd; upstream remains672f02e. Existing local-first candidate44dbafd still preloads remote Live Photo motion, so a separate native-motion integration is required before claiming full local Live Photo playback.
