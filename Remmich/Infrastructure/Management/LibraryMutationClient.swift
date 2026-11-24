@@ -126,6 +126,35 @@ final nonisolated class LibraryMutationClient: Sendable {
         session.invalidateAndCancel()
     }
 
+    /// cloudIDs为本机已读到的完整Photos标识；只读取官方同步元数据，不请求任何媒体、不reset也不提交ack。
+    /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
+    @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
+        guard !cloudIDs.isEmpty else { return [] }
+        var decoder = try LocalMediaMetadataStreamDecoder(cloudIDs: cloudIDs)
+        let acknowledgements = try await send("GET", ["sync", "ack"], expectedStatus: 200)
+        try LocalMediaMetadataStreamDecoder.requireFullMetadataSnapshot(acknowledgements)
+        struct Body: Encodable { let types: [String] }
+        var streamRequest = try request("POST", ["sync", "stream"])
+        streamRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        streamRequest.setValue("application/jsonlines+json", forHTTPHeaderField: "Accept")
+        streamRequest.httpBody = try JSONEncoder().encode(Body(types: ["AssetMetadataV1"]))
+        let (bytes, response) = try await session.bytes(for: streamRequest)
+        guard let response = response as? HTTPURLResponse else { throw LocalMediaMetadataStreamError.invalidResponse }
+        guard response.statusCode == 200 else { throw LibraryWriteError.http(response.statusCode) }
+        guard response.mimeType?.lowercased() == "application/jsonlines+json" else { throw LocalMediaMetadataStreamError.invalidResponse }
+        var untilCancellationCheck = 65536
+        for try await byte in bytes {
+            try decoder.append(byte)
+            untilCancellationCheck -= 1
+            if untilCancellationCheck == 0 {
+                try Task.checkCancellation()
+                untilCancellationCheck = 65536
+            }
+        }
+        try Task.checkCancellation()
+        return try decoder.finish()
+    }
+
     private func validID(_ value: String) throws -> String {
         guard UUID(uuidString: value) != nil else { throw LibraryWriteError.invalidID }
         return value

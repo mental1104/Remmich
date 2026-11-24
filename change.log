@@ -1,3 +1,10 @@
+## 2026-11-24: Read official metadata for device-local media matching
+
+- Source: codex/feature-local-media-matching from424a22a; upstream remains672f02e. User clarified cloud means Immich: match device Photos with server assets and prefer local display/playback, not merely iCloud backup deduplication.
+- Add bounded, atomic JSONL metadata decoding and a read-only GET sync/ack plus POST sync/stream AssetMetadataV1 path in the existing authenticated client. Preserve opaque cloud IDs and ambiguous candidates; reject incomplete/incremental/reset-required snapshots. Do not request media, reset session progress, send acknowledgements or claim backup completion.
+- Eleven test functions/seventeen cases are written for complete versus partial streams, UTF8, duplicate candidates, exact filtering, protocol/bounds and checkpoint behavior. Scoped SwiftFormat/diff checks passed on NAS; new Swift compilation/tests and HTTP/UI/device validation are unexecuted. The prior424 candidate CI does not validate this independent code. No server/API/schema/workflow/production changes.
+- Actual local Photos matching, fresh asset validation and MediaLibraryController routing remain integration work. See docs/local-media-matching.md. Rollback reverts this read-only slice; no asset or recovery-data deletion is needed.
+
 ## 2026-11-24: Make new management HTTP fixture captures explicitly Sendable
 
 - Source: candidatea207b3b; upstream remains672f02e. CI45392189009/job138438516772 ended compilation failure with one source diagnostic at AlbumDirectoryManagementTests.swift:481: sending a Task closure risks a race. The previous batch macro errors are absent. App linking is not combined build/test success; API/app/UI execution remains incomplete.
