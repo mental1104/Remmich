@@ -297,6 +297,35 @@ public actor ImmichClient {
         }
     }
 
+    /// 按文件名和已选字段读取真实资源；query 不变，cursor 为上页原始令牌，size 为1–1000。
+    /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
+    public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = try await makeClient().searchAssets(.init(body: .json(.init(
+            cursor: cursor,
+            filter: .init(
+                city: query.city.isEmpty ? nil : .init(eq: query.city),
+                make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
+                model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
+                originalFileName: text.isEmpty ? nil : .init(like: text),
+                _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
+                visibility: .init(eq: .timeline)
+            ),
+            orderBy: .init(direction: .desc, field: .fileCreatedAt),
+            size: size,
+            withExif: true
+        ))))
+        switch output {
+        case let .ok(response):
+            let page = try response.body.json.assets
+            return ImmichMetadataSearchPage(assets: page.items.map(Self.timelineAsset), nextCursor: page.nextCursor)
+        case let .undocumented(statusCode, _):
+            throw Self.map(status: statusCode)
+        }
+    }
+
     public func videoAssets(cursor: String? = nil, size: Int = 100) async throws -> ImmichVideoPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }

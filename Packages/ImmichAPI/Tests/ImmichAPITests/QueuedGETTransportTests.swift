@@ -40,6 +40,19 @@ struct QueuedGETTransportTests {
         }
     }
 
+    /// 操作ID不能把任意POST伪装成合法搜索，错误路径不能进入持久队列。
+    @Test func rejectsSearchWithMutationPath() async throws {
+        let transport = ImmichQueuedReadTransport { _, _ in
+            Issue.record("Invalid POST must not enter the durable queue")
+            throw CancellationError()
+        }
+        await #expect(throws: ImmichAPIError.invalidResponse) {
+            try await transport.send(HTTPRequest(method: .post, scheme: "https", authority: "photos.example", path: "/assets"),
+                                     body: HTTPBody("{}"), baseURL: #require(URL(string: "https://photos.example/api")),
+                                     operationID: "searchAssets")
+        }
+    }
+
     @Test func preservesCancellationForTheCallingPipeline() async throws {
         let transport = ImmichQueuedGETTransport { _, _ in throw CancellationError() }
         await #expect(throws: CancellationError.self) {

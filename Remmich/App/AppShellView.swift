@@ -336,7 +336,8 @@ struct AppShellView: View {
                     activationState: tabContentActivationState
                 ) {
                     NavigationStack(path: $searchPath) {
-                        SearchView(assets: PreviewFixtures.assets, showAccount: showAccount)
+                        SearchView(source: albumSource as? ImmichTimelineRepository, media: media,
+                                   assetDetails: assetDetails, showAccount: showAccount)
                     }
                 }
             ),

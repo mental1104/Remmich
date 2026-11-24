@@ -58,7 +58,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         if let transfers {
             let owner = LibraryTransferOwner(session: session, endpoint: endpoint)
             client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
-                                  transport: ImmichQueuedGETTransport { request, operation in
+                                  transport: ImmichQueuedReadTransport { request, operation in
                                       let isAlbum = operation == "getAllAlbums" || operation == "getAlbumInfo"
                                           || request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems?.contains(where: { $0.name == "albumId" }) == true
                                       let kind: LibraryTransferKind = isAlbum ? .albumIndex : operation == "getAssetInfo" ? .metadata : .index
@@ -429,6 +429,20 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
                 "Memories failed generation=\(requestGeneration) elapsedMs=\(Self.elapsedMilliseconds(since: startedAt)) error=\(Self.errorSummary(error), privacy: .public)"
             )
             try requireCurrent(requestGeneration)
+            throw Self.map(error)
+        }
+    }
+
+    /// query 为本次条件，cursor 为原始服务端令牌；返回当前代际的媒体结果，迟到响应拒绝发布。
+    func metadataSearch(_ query: ImmichMetadataSearch, cursor: String?) async throws -> NativeSearchPage {
+        let (client, owner) = try requestContext()
+        do {
+            let page = try await client.metadataSearch(query, cursor: cursor)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return NativeSearchPage(assets: page.assets.map(Self.map), nextCursor: page.nextCursor)
+        } catch {
+            try requireCurrent(owner)
             throw Self.map(error)
         }
     }
