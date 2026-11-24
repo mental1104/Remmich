@@ -148,6 +148,8 @@ struct LivePhotoPlaybackView: View {
     @State private var localContextGeneration: UUID?
     @State private var playbackToken = UUID()
     @State private var localPlaybackReady = false
+    // 异步任务不能依赖被旧View值捕获的let偏好；声音意图由当前onChange同步发布。
+    @State private var currentSoundIntent = false
     @State private var retryGeneration = 0
     @State private var playTask: Task<Void, Never>?
     @State private var audioSession = LivePhotoPlaybackAudioController()
@@ -159,7 +161,7 @@ struct LivePhotoPlaybackView: View {
             if let photo = localLivePhoto, let contextGeneration = localContextGeneration {
                 LocalLivePhotoPlaybackView(livePhoto: photo, assetID: assetID, contextGeneration: playbackToken,
                                            isHeld: localPlaybackReady && playbackState.isHeld && playbackState.phase == .playing,
-                                           soundEnabled: playsWithSound && audioSession.ready,
+                                           soundEnabled: currentSoundIntent && audioSession.ready,
                                            playbackEnded: { finishedID, finishedContext in
                                                // 原生delegate可能迟到；只允许当前payload/账号/页面状态报告自然结束。
                                                guard finishedID == assetID, finishedContext == playbackToken,
@@ -181,7 +183,8 @@ struct LivePhotoPlaybackView: View {
         .onChange(of: isHeld, initial: true) { _, held in
             handle(playbackState.setHeld(held))
         }
-        .onChange(of: playsWithSound) { _, enabled in
+        .onChange(of: playsWithSound, initial: true) { _, enabled in
+            currentSoundIntent = enabled
             player?.isMuted = true
             audioSession.deactivate()
             guard enabled, playbackState.phase == .playing else { return }
@@ -343,7 +346,7 @@ struct LivePhotoPlaybackView: View {
             Self.logger.info(
                 "Live Photo playback started asset=\(motionAssetID.prefix(8), privacy: .private)"
             )
-            if playsWithSound {
+            if currentSoundIntent {
                 await activateSoundIfPossible()
             }
             guard !Task.isCancelled,
@@ -369,7 +372,7 @@ struct LivePhotoPlaybackView: View {
         playTask = Task { @MainActor in
             guard !Task.isCancelled, playbackState.phase == .playing, playbackState.isHeld, localLivePhoto === photo,
                   playbackToken == token, media.management.generation == contextGeneration, localContextGeneration == contextGeneration else { return }
-            if playsWithSound {
+            if currentSoundIntent {
                 await activateSoundIfPossible()
             }
             guard !Task.isCancelled, playbackState.phase == .playing, playbackState.isHeld, localLivePhoto === photo,
@@ -421,11 +424,12 @@ struct LivePhotoPlaybackView: View {
     /// 捕获当前播放和账号身份，等待独立音频controller；只有仍有效的成功请求才unmute当前AVPlayer。
     @MainActor
     private func activateSoundIfPossible() async {
+        guard !Task.isCancelled, currentSoundIntent else { return }
         let token = playbackToken
         let contextGeneration = media.management.generation
         let activation = audioSession.activate(validateContext: {
             playbackToken == token && media.management.generation == contextGeneration
-                && scenePhase == .active && playbackState.phase == .playing && playbackState.isHeld && playsWithSound
+                && scenePhase == .active && playbackState.phase == .playing && playbackState.isHeld && currentSoundIntent
         }, failure: {
             // controller仅允许当前音频请求报告失败，迟到失败不能关闭新一轮的声音设置。
             Self.logger.error("Live Photo audio session activation failed")
@@ -433,7 +437,7 @@ struct LivePhotoPlaybackView: View {
         })
         let activated = await activation.value
         guard activated, !Task.isCancelled, scenePhase == .active, playbackToken == token, media.management.generation == contextGeneration,
-              playbackState.phase == .playing, playbackState.isHeld, playsWithSound else { return }
+              playbackState.phase == .playing, playbackState.isHeld, currentSoundIntent else { return }
         player?.isMuted = false
         Self.logger.info("Live Photo audio session activated asset=\(motionAssetID.prefix(8), privacy: .private)")
     }
