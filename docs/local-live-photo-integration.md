@@ -1,6 +1,6 @@
 # 本机Live Photo动态配对与宿主整合
 
-这是从本地优先候选44dbafd独立继续的工作。当前候选a7138e0的CI45418380493已联合编译，API步骤通过并进入App测试；本文native动态整合不在该受测提交中，不能复用其收据宣称编译或验收通过。
+这是从本地优先候选44dbafd继续的工作，已保留a7138e0原始提交历史。a7138e0的CI45418380493已终态failure：应用和测试包编译成功，API93项/23suite、App925项/118suite通过；phone5项中2过3失败，tablet准备180秒超时，未执行测试。该轮不含本文native动态整合，不能复用其收据宣称新代码通过。
 
 远端配对领域/详情DTO、专用PhotoKit proof与native reader、PHLivePhotoView组件、音频请求controller、严格Live still SHA1政策及实际查看器/MediaLibraryController桥接现已整合。宿主在任何原有远端motion准备之前等待已验证本机结果；账号/版本/来源失效或退后台取消准备，只有当前合法miss才回退。
 
@@ -10,8 +10,8 @@
 
 远端配对先验证fresh still仍等于当前精确版本关联，且livePhotoVideoId明确等于界面motion UUID；fresh motion必须同owner、VIDEO、明确非trash/offline/edited、已知有限版本与canonical20字节Base64 SHA1。LocalLivePhotoRemotePair只表达这些已验证身份/版本，尚不证明本机motion字节。新LocalMediaRemoteAsset字段可缺失/null，但错误UUID解码失败。
 
-后续宿主必须将独立本机pairedVideo字节证明与motion checksum相等后，才请求PhotoKit current PHLivePhoto（network=false）；本机源/权限、账号/端点代际、关联及远端pair版本均需前后复核。首版仅支持可证明未调整的唯一photo+pairedVideo；已编辑/复合/资源不明走原有安全回退。目标是避免Immich媒体下载，允许必要fresh元数据，不导出原片或写设备照片。
+宿主已将独立本机pairedVideo字节证明与motion checksum比较，一致后才请求PhotoKit current PHLivePhoto（network=false）；本机源/权限、账号/端点代际、关联及远端pair版本均需前后复核。首版仅支持可证明未调整的唯一photo+pairedVideo；已编辑/复合/资源不明走原有安全回退。目标是避免Immich媒体下载，允许必要fresh元数据，不导出原片或写设备照片。
 
-领域、reader、真实Media路由、native组件命令、音频非合作取消及Live still流式SHA1均有对应新增测试；格式与diff检查通过。NAS无Swift/Xcode，native分支测试仍未编译/执行，真实PHLivePhoto成功对象、Photos授权及系统动画/音频仍未验；当前nil回调/命令与取消测试不能证明真实播放或最终非nil后的双fresh分支通过。不会用PHLivePhoto()伪造可播放正例；公开重建API的本地合成pair格式仍需独立实验证据。
+领域、reader、真实Media路由、native组件命令、音频非合作取消及Live still流式SHA1均有对应新增测试；NAS全仓375个Swift文件格式、脚本语法与diff检查通过。另新增真实JPEG/MOV合成工厂，要求公开PhotoKit重建返回非degraded、非nil对象；三条路由依次检查同对象成功、最终motion版本变化及摘要变化，并断言四次fresh读取和来源标签。工厂失败必须硬失败，不能skip或伪造对象。NAS无Swift/Xcode，这些新增代码仍未编译/运行，Photos授权及系统动画/音频也未验，下一轮统一macOS CI须实际执行。
 
-无服务端/API/SDK/数据库/生产/当前PR头或workflow变更；现有CLI契约编译输入新增两个纯Foundation领域文件。回退独立源码/宿主桥接不删除媒体或恢复资料。本文候选须在旧CI终态后整合进PR，再跑唯一新验证链。
+一并整合a713已暴露的搜索测试宿主媒体管线、手机账号入口与可访问性修复；tablet脚本仅在CI首次准备计时超时后重启同一选定设备一次，不重试UI测试。无服务端/API/SDK/数据库/生产或workflow变更；现有CLI契约编译输入新增两个纯Foundation领域文件。回退源码/宿主桥接不删除媒体或恢复资料。旧CI已确认终态，本文候选整合进PR8后只跑一条新的验证链；完整通过前不更新子dev或父gitlink。
