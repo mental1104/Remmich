@@ -668,29 +668,7 @@ struct AssetViewerView: View {
             beginOpeningAnimation()
         }
         .onDisappear {
-            viewerRefresh.cancel()
-            interactiveMapFrame = nil
-            returnSource?.stop()
-            logMemoryPlayback("disappear")
-            videoPlaybackSession?.close()
-            openingTask?.cancel()
-            openingGeneration += 1
-            dismissalLandingTask?.cancel()
-            dismissalThumbnailRevealTask?.cancel()
-            nativeDismissalController.reset()
-            let requestedFullSizeAssets = session.assets.filter {
-                fullResolutionRequestIDs[$0.id] != nil
-            }
-            neighborLoadTask?.cancel()
-            pagerSelectionTask?.cancel()
-            memoryAutoAdvanceTask?.cancel()
-            memoryWrapTask?.cancel()
-            memoryAutoStartedAt = nil
-            livePhotoPlaybackAssetID = nil
-            livePhotoSoundEnabled = false
-            visibilityChanged(false)
-            returningTimelineThumbnailChanged(nil)
-            media.endViewerSession(id: mediaViewerID, originalAssets: requestedFullSizeAssets)
+            viewerDidDisappear()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
@@ -721,6 +699,35 @@ struct AssetViewerView: View {
         .onChange(of: voiceOverEnabled) {
             resetMemoryAutoRotation()
         }
+    }
+
+    /// 宿主实际消失时按原顺序收尾；在长SwiftUI表达式外确定数组类型，不改变状态所有权或视图identity。
+    /// 原片列表在调用时从实时session/ID字典读取，先固定再取消其余任务，不能捕获构建body时的旧快照。
+    private func viewerDidDisappear() {
+        viewerRefresh.cancel()
+        interactiveMapFrame = nil
+        returnSource?.stop()
+        logMemoryPlayback("disappear")
+        videoPlaybackSession?.close()
+        openingTask?.cancel()
+        openingGeneration += 1
+        dismissalLandingTask?.cancel()
+        dismissalThumbnailRevealTask?.cancel()
+        nativeDismissalController.reset()
+        var requestedFullSizeAssets: [TimelineAssetSummary] = []
+        for asset in session.assets where fullResolutionRequestIDs[asset.id] != nil {
+            requestedFullSizeAssets.append(asset)
+        }
+        neighborLoadTask?.cancel()
+        pagerSelectionTask?.cancel()
+        memoryAutoAdvanceTask?.cancel()
+        memoryWrapTask?.cancel()
+        memoryAutoStartedAt = nil
+        livePhotoPlaybackAssetID = nil
+        livePhotoSoundEnabled = false
+        visibilityChanged(false)
+        returningTimelineThumbnailChanged(nil)
+        media.endViewerSession(id: mediaViewerID, originalAssets: requestedFullSizeAssets)
     }
 
     private func viewerContent(

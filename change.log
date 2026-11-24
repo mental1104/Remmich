@@ -1,3 +1,10 @@
+## 2026-11-24: Isolate viewer disappearance cleanup from SwiftUI type checking
+
+- Source: codex/fix-viewer-cleanup-typecheck from exact candidated21356d, CI45382038782's sole source diagnostic at AssetViewerView.swift:681. Previous two source errors no longer appear; this does not declare the candidate successful. Upstream remains672f02e, no server/API/data/workflow/production change, push or CI trigger.
+- Move only onDisappear cleanup into private viewerDidDisappear() with explicit Void behavior. Derive [TimelineAssetSummary] with a typed for loop from the current session and fullResolutionRequestIDs at callback time, preserving every cleanup statement and sequence through endViewerSession. The other identical filter already sits inside a separate non-builder method and has no reported diagnostic, so it remains untouched.
+- Preserve the view tree, @State ownership, event attachment/order, original asset selection, cancel and visibility callbacks; no AnyView, identity key, compiler-limit or test-gate changes. Actual NAS SwiftFormat0.64.5 scoped lint and diff checks passed; no Swift compiler here, replacement CI execution remains pending.
+- Revert this narrow extraction independently if superseded; no persistent state or media recovery required. Stage3 scope stays frozen for the21:00 candidate.
+
 ## 2026-11-24: Make the backup coordinator's captured UI state explicit
 
 - Source: candidate62623eb; upstream remains672f02e. CI45379628014 failed compilation at19:05 with an explicit-self requirement in PhotoBackupController.swift:137 and a separate viewer-summary initializer mismatch. No API/app/UI execution or compiled artifact was produced.
