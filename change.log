@@ -1,3 +1,11 @@
+## 2026-11-24: Saved-search data and API contracts
+
+- Source: codex/feature-search-presets over8ab2e53; upstream remains672f02e. Adds client contracts for existing fork/search-presets only; no server/API/database/production change.
+- Model every existing preset field, including fields not yet supported by controls. Preserve missing/null/value distinctions for rating/tags and reject unknown condition keys rather than overwrite a lossy decode. Numeric conditions encode server operator names.
+- Add authenticated GET/POST/PATCH/DELETE methods to the explicit mutation client with exact200/201/204 response validation and UUID/name checks. Only GET404/405/501 marks unsupported;401/403/network/schema errors do not. Never automatically retry a preset POST, never change photo data.
+- Extend offline contract compilation with native models; add synthetic CRUD/status/permission/null tests plus Codable unknown/null/zero tests. Local SwiftFormat, shell syntax and diff checks passed; Swift execution awaits CI.
+- Not wired into SearchView yet: query capture/restoration and native preset management UI are next. No claim saved searches are usable in the client. Revert this follow-up to roll back; no media recovery needed.
+
 ## 2026-11-24: EXIF, orientation and album-state filters
 
 - CI45331713557 compiled the previous app/test bundles, then package-test compilation exposed nested #require macros in candidate tests. Split URL/components/response requirements into separate assertions; no checks removed. Next CI includes this EXIF follow-up. Preset codec work remains local and excluded from this push.

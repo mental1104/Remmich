@@ -34,7 +34,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
-    enum Orientation: String, CaseIterable, Sendable { case landscape, portrait }
+    enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
     var orientation: Orientation?
     var hasAlbums: Bool?
     var exifConditions: [NativeSearchNumericCondition] = []
@@ -45,8 +45,8 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
 }
 
 /// 可独立编辑的EXIF条件；相同字段/运算符只有一个稳定槽位。
-nonisolated struct NativeSearchNumericCondition: Hashable, Identifiable, Sendable {
-    enum Field: String, CaseIterable, Sendable {
+nonisolated struct NativeSearchNumericCondition: Codable, Hashable, Identifiable, Sendable {
+    enum Field: String, Codable, CaseIterable, Sendable {
         case iso, fNumber, focalLength, exposureTime
 
         /// 可见名称包含单位，快门按秒、焦距按毫米输入。
@@ -60,7 +60,7 @@ nonisolated struct NativeSearchNumericCondition: Hashable, Identifiable, Sendabl
         }
     }
 
-    enum Comparison: String, CaseIterable, Sendable {
+    enum Comparison: String, Codable, CaseIterable, Sendable {
         case equal = "eq", greaterThan = "gt", atLeast = "gte", lessThan = "lt", atMost = "lte"
 
         /// 返回可见比较符号。
@@ -78,6 +78,7 @@ nonisolated struct NativeSearchNumericCondition: Hashable, Identifiable, Sendabl
     let field: Field
     let comparison: Comparison
     let value: Double
+    enum CodingKeys: String, CodingKey { case field, comparison = "operator", value }
 
     /// 槽位标识不包含查询值，便于原子更新与移除。
     var id: String {
