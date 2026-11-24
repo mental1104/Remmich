@@ -208,6 +208,7 @@ struct AssetLocationTests {
         let store = AssetLocationStore(defaults: defaults, client: client, store: fixture.store)
         try await fixture.seed(scope: scope("first"), latitude: 31.2167366667, longitude: 121.5484183333)
         store.configure(scope: scope("first"))
+        try enablePublicLookup(store)
         let coordinate = try #require(PlaceCoordinate(latitude: 31.2167366667, longitude: 121.5484183333))
         #expect(try await store.resolve(coordinate, assetID: "asset")?.title == "Century Park")
         #expect(try await store.resolve(coordinate, assetID: "asset")?.title == "Century Park")
@@ -234,14 +235,17 @@ struct AssetLocationTests {
         try await fixture.seed(scope: second)
         let coordinate = try #require(PlaceCoordinate(latitude: 31, longitude: 121))
         store.configure(scope: first)
+        try enablePublicLookup(store)
         var settings = store.preferences
         settings.localCountries = ["CN"]
         try store.save(settings)
         #expect(try await store.resolve(coordinate, assetID: "asset")?.language == .local)
         store.configure(scope: second)
+        try enablePublicLookup(store)
         #expect(store.preferences.localCountries.isEmpty)
         #expect(try await store.resolve(coordinate, assetID: "asset")?.language == .english)
         store.configure(scope: first)
+        try enablePublicLookup(store)
         #expect(store.preferences.localCountries == ["CN"])
         #expect(try await store.resolve(coordinate, assetID: "asset")?.language == .local)
         #expect(await client.calls == [.english, .local, .english])
@@ -250,6 +254,7 @@ struct AssetLocationTests {
         try await fixture.seed(scope: first)
         AssetLocationStore.remove(defaults: defaults, namespace: first.cacheNamespace)
         store.configure(scope: first)
+        try enablePublicLookup(store)
         #expect(store.preferences.localCountries.isEmpty)
         #expect(try await store.resolve(coordinate, assetID: "asset")?.language == .english)
         #expect(await client.calls == [.english, .local, .english, .english])
@@ -262,12 +267,14 @@ struct AssetLocationTests {
         try await fixture.seed(scope: scope("first"))
         let store = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)), client: client, store: fixture.store)
         store.configure(scope: scope("first"))
+        try enablePublicLookup(store)
         let coordinate = try #require(PlaceCoordinate(latitude: 31, longitude: 121))
         let task = Task { try await store.resolve(coordinate, assetID: "asset") }
         while await client.calls.isEmpty {
             await Task.yield()
         }
         store.configure(scope: scope("second"))
+        try enablePublicLookup(store)
         await client.resume()
         do {
             _ = try await task.value
@@ -290,6 +297,7 @@ struct AssetLocationTests {
         let client = LocationTestClient(paused: true)
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)), client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         let coordinate = try #require(PlaceCoordinate(latitude: 31, longitude: 121))
         let first = Task { try await locations.resolve(coordinate, assetID: "asset") }
         while await client.calls.isEmpty {
@@ -314,6 +322,7 @@ struct AssetLocationTests {
         let client = LocationTestClient()
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)), client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         await locations.refreshCachedPlaces(retryFailed: true) { true }
         #expect(await client.calls.isEmpty)
         var preferences = locations.preferences
@@ -352,6 +361,7 @@ struct AssetLocationTests {
         let locations = AssetLocationStore(defaults: defaults, client: client, store: fixture.store)
         try await fixture.seed(scope: actualScope)
         locations.configure(scope: actualScope)
+        try enablePublicLookup(locations)
         var settings = locations.preferences
         settings.endpoint = "https://places.example"
         try locations.save(settings)
@@ -395,6 +405,7 @@ struct AssetLocationTests {
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)),
                                                client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         let work = Task { await locations.refreshCachedPlaces(retryFailed: false) { true } }
         defer { work.cancel() }
@@ -453,6 +464,7 @@ struct AssetLocationTests {
         let client = CacheLifecyclePlaceClient(paused: true)
         let locations = AssetLocationStore(defaults: defaults, client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         let details = CacheLifecycleAssetDetails()
         let controller = LibraryIndexController(source: EmptyPlaceTimeline(), store: fixture.store,
@@ -516,6 +528,7 @@ struct AssetLocationTests {
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)),
                                                client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         let work = Task { await locations.refreshCachedPlaces(retryFailed: false) { true } }
         defer {
@@ -564,6 +577,7 @@ struct AssetLocationTests {
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)),
                                                client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example", localCountries: ["CN"]))
         let work = Task { await locations.refreshCachedPlaces(retryFailed: false) { true } }
         defer { work.cancel() }
@@ -605,6 +619,7 @@ struct AssetLocationTests {
         let client = LocationTestClient()
         let locations = AssetLocationStore(defaults: defaults, client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         await locations.refreshCachedPlaces(retryFailed: false) { true }
         #expect(await client.calls == [.local])
         #expect(locations.progress.resolved == 1)
@@ -620,6 +635,7 @@ struct AssetLocationTests {
         try await fixture.seed(scope: account)
         let locations = AssetLocationStore(defaults: defaults, client: LocationTestClient(), store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         await locations.refreshCachedPlaces(retryFailed: false) { true }
         let lastSync = try #require(locations.cacheRun.lastSyncedAt)
@@ -643,6 +659,7 @@ struct AssetLocationTests {
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)),
                                                client: LocationTestClient(), store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         let beforeSetup = locations.cachedMetadataRevision
         let checkedRevision = await locations.refreshCachedPlaces(retryFailed: false, completionAllowed: { false }) { true }
@@ -666,6 +683,7 @@ struct AssetLocationTests {
         let client = CacheLifecyclePlaceClient(paused: true)
         let locations = AssetLocationStore(defaults: defaults, client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         let controller = LibraryIndexController(source: EmptyPlaceTimeline(), store: fixture.store,
                                                 locations: locations, cacheRootURL: fixture.directory.appending(path: "images"),
@@ -707,6 +725,7 @@ struct AssetLocationTests {
         let client = DelayedPlaceActivityClient()
         let locations = try AssetLocationStore(defaults: #require(UserDefaults(suiteName: UUID().uuidString)), client: client, store: fixture.store)
         locations.configure(scope: account)
+        try enablePublicLookup(locations)
         try locations.save(.init(endpoint: "https://places.example"))
         await locations.refreshCachedPlaces(retryFailed: false) { true }
         #expect(locations.progress.resolved == 1)
@@ -922,4 +941,11 @@ private actor LocationTestClient: PlaceLookingUp {
         continuation?.resume()
         continuation = nil
     }
+}
+
+@MainActor
+private func enablePublicLookup(_ store: AssetLocationStore) throws {
+    var preferences = store.preferences
+    preferences.allowPublicLookup = true
+    try store.save(preferences)
 }

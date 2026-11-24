@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Remmich needs access to create and reuse the Remmich album, save selected media, and browse and verify your saved photos and videos.</string>
+	<string>Remmich uses photo access to back up the albums you select, preserve original photos, videos and Live Photos, and save or browse downloaded media. Uploads start only when you choose to back up.</string>
 	<key>MLNIdeographicFontFamilyName</key>
 	<array>
 		<string>PingFang SC</string>

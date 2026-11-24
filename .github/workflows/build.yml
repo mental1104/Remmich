@@ -2,7 +2,9 @@ name: Build
 
 on:
   push:
+    branches: [dev]
   pull_request:
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
@@ -18,20 +20,21 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 45
     env:
-      IPHONE_DESTINATION: platform=iOS Simulator,name=iPhone 17e,OS=27.0
+      IPHONE_DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro
       DERIVED_DATA_PATH: ${{ github.workspace }}/.ci/DerivedData
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install latest SwiftFormat
+      - name: Install verified SwiftFormat 0.64.5
         run: |
-          swiftformat_archive="$RUNNER_TEMP/swiftformat-latest.zip"
-          swiftformat_directory="$RUNNER_TEMP/swiftformat-latest"
+          swiftformat_archive="$RUNNER_TEMP/swiftformat-0.64.5.zip"
+          swiftformat_directory="$RUNNER_TEMP/swiftformat-0.64.5"
           curl -fL --retry 3 --retry-all-errors \
             --output "$swiftformat_archive" \
-            "https://github.com/nicklockwood/SwiftFormat/releases/latest/download/swiftformat.zip"
+            "https://github.com/nicklockwood/SwiftFormat/releases/download/0.64.5/swiftformat.zip"
+          echo "ec017c91fdd46233e5a22dc43ff9564a3cc4b37023d3b4681b6c7d7b781de113  $swiftformat_archive" | shasum -a 256 -c -
           mkdir -p "$swiftformat_directory"
           unzip -q "$swiftformat_archive" -d "$swiftformat_directory"
           chmod +x "$swiftformat_directory/swiftformat"
@@ -50,6 +53,9 @@ jobs:
             RemmichTests \
             Packages/ImmichAPI/Sources \
             Packages/ImmichAPI/Tests
+
+      - name: Check fork contracts without production access
+        run: bash Scripts/check-fork-contracts.sh
 
       - name: Build app and test bundles
         run: |
@@ -79,7 +85,7 @@ jobs:
             tested-revision
 
       - name: Upload test products
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remmich-test-products
           path: ${{ runner.temp }}/remmich-test-products.tar.gz

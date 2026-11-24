@@ -2,7 +2,9 @@
 
 <b><font>Remmich</font></b>
 
- Your **re**ad-only I**mmich** library, native on iPhone and iPad.
+ Personal Immich client for iPhone and iPad: browsing, backup, editing and management.
+
+This is [mental1104/Remmich](https://github.com/mental1104/Remmich), forked from [Ender-Wang/Remmich](https://github.com/Ender-Wang/Remmich). Develop and build on `dev`; `main` follows upstream. See [client/server contracts and current limitations](docs/fork-compatibility.md).
 
 <br clear="all" />
 
@@ -10,12 +12,11 @@
   <a href="https://github.com/Ender-Wang/Remmich/releases/latest"><img src="https://img.shields.io/github/v/release/Ender-Wang/Remmich?label=version&amp;color=blue" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/Swift-6-orange?logo=swift" alt="Swift 6" />
   <img src="https://img.shields.io/badge/iOS-26.6%2B-black?logo=apple" alt="iOS 26.6+" />
-  <img src=".github/assets/immich-read-only-badge.svg" alt="Read-only Immich" />
-  <a href="https://github.com/Ender-Wang/Remmich/actions/workflows/build.yml"><img src="https://github.com/Ender-Wang/Remmich/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
-  <a href="https://github.com/Ender-Wang/Remmich/actions/workflows/test.yml"><img src="https://github.com/Ender-Wang/Remmich/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
+  <a href="https://github.com/mental1104/Remmich/actions/workflows/build.yml"><img src="https://github.com/mental1104/Remmich/actions/workflows/build.yml/badge.svg" alt="Build" /></a>
+  <a href="https://github.com/mental1104/Remmich/actions/workflows/test.yml"><img src="https://github.com/mental1104/Remmich/actions/workflows/test.yml/badge.svg" alt="Tests" /></a>
 </p>
 
-Remmich is a SwiftUI, UIKit, and AVKit client for your self-hosted Immich library. Browse photos, watch videos, revisit memories, and keep thumbnails and asset information available offline without changing your server library.
+Remmich is a SwiftUI, UIKit, and AVKit client for your self-hosted Immich library. Browse photos, watch videos, revisit memories, and keep thumbnails and asset information available offline with explicit backup, non-destructive editing and management actions.
 
 Browse Photos, Videos, Albums, and Library collections from your Immich account, with offline indexing, interactive album layouts, Sharing and Save to Photos. Search still shows demo data.
 
@@ -29,15 +30,7 @@ See the **[Roadmap](#roadmap)** for current and planned work.
 
 Requires an iPhone or iPad running iOS/iPadOS 26.6 or later and an account on your Immich server.
 
-Download an optimized, unsigned IPA from the [latest GitHub release](https://github.com/Ender-Wang/Remmich/releases/latest) and install it with a compatible sideloading tool, such as AltStore Classic, which signs it using your Apple ID.
-
-**SideStore:** add this source in **Sources → +** to browse releases and receive updates:
-
-```text
-https://raw.githubusercontent.com/Ender-Wang/Remmich/main/source.json
-```
-
-The source follows stable releases automatically. SideStore signs installations using your Apple ID.
+This fork is currently installed from a local signed Xcode build. No downstream IPA has been released yet. Fork releases are manual and require a successful tested `dev` revision; the SideStore catalog intentionally has no versions until the first downstream release. Upstream releases contain the upstream product and are not builds of this fork.
 
 You can also follow [Build and run](CONTRIBUTING.md#build-and-run) to build from source. After installing, sign in with your Immich server address and credentials. Add a Primary address and optional Fallback addresses in **Profile → Connection** if needed.
 
@@ -98,9 +91,13 @@ The timeline places upcoming milestones above **Now** and completed work below i
 | M9 | Wider native polish and resilience | Planned | Broader iPad, accessibility, interruption, offline and performance coverage across the completed workflows. |
 | M10 | Release verification and distribution | Planned | Broader real-device verification and sideloading distribution; AltStore remains under consideration. |
 
-## Read-only by design
+## Personal fork capabilities
 
-Remmich does not upload, edit, archive, favorite, or delete Immich assets. Saved sign-in sessions are stored in Keychain, and local indexes and media caches are scoped to the account. Cache maintenance changes device data only.
+**Profile → Account → 照片备份** selects phone albums for foreground original-file backup with checksum deduplication, video and Live Photo pairing. It stops when leaving the page or entering the background. Background automatic backup and persistent queues are not implemented. iCloud downloads require a separate toggle. RAW+JPEG combinations are rejected rather than marked fully backed up.
+
+**Photo viewer → sliders button** opens favorites, archive, caption, recycle-bin and album membership controls. Still images can use official non-destructive rotate/mirror/crop parameters; the current crop form uses pixel coordinates without a live preview. Existing edit parameters are loaded and checked again before replacement. **Albums → options → 相簿管理** creates, renames and deletes albums while retaining media.
+
+Saved sessions stay in Keychain; local indexes and caches remain account scoped. Writes use a separate explicit API channel; the generated browsing SDK retains its read-only policy. No permanent media deletion or original replacement is provided. Server permissions remain authoritative. Public Photon coordinate lookup requires explicit consent under Maps & Places.
 
 Sharing, Download and Save to Photos operate on local copies without changing the Immich server's library.
 
@@ -119,7 +116,7 @@ Remmich connects to [Immich](https://github.com/immich-app/immich) through the l
 Build and development tools:
 
 - [Swift OpenAPI Generator](https://github.com/apple/swift-openapi-generator) **1.13.1** generates the client during the build.
-- [SwiftFormat](https://github.com/nicklockwood/SwiftFormat) checks source formatting. CI uses the latest release; no specific version is required locally.
+- [SwiftFormat](https://github.com/nicklockwood/SwiftFormat) checks source formatting. CI pins version 0.64.5 and verifies its archive SHA-256; use the same version locally.
 - Artwork regeneration uses **Python 3** and **librsvg's `rsvg-convert`**; see [Schema and artwork updates](CONTRIBUTING.md#schema-and-artwork-updates).
 
 Swift packages resolve through Xcode. The [app lockfile](Remmich.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved) and [API package lockfile](Packages/ImmichAPI/Package.resolved) record the complete resolved dependency graph, including transitive packages. SwiftUI, UIKit, AVKit/AVFoundation, and SQLite are provided by the operating system.

@@ -52,6 +52,7 @@ struct AssetViewerView: View {
     @State private var mediaViewerID = UUID()
     @State private var zoomedAssetID: String?
     @State private var chromeVisible = true
+    @State private var showsManagement = false
     @State private var showsInfo = false
     @State private var detailStates: [String: AssetViewerDetailState] = [:]
     @State private var selectedPlace: PlaceLocation?
@@ -544,6 +545,14 @@ struct AssetViewerView: View {
         .interactiveDismissDisabled(true)
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
+        .sheet(isPresented: $showsManagement) {
+            if let asset = session.selectedAsset {
+                AssetManagementView(assetID: asset.id, controller: media.management) {
+                    refreshedDetailAssetIDs.remove(asset.id)
+                    Task { await loadAssetDetail(asset.id) }
+                }
+            }
+        }
         .task {
             await session.start()
             updateViewerPrefetch()
@@ -1713,12 +1722,10 @@ struct AssetViewerView: View {
 
                 Spacer(minLength: 12)
 
-                glassActionButton(
-                    systemImage: "square.grid.2x2",
-                    label: "Locate in Timeline",
-                    identifier: "asset-viewer-locate",
-                    enabled: false
-                ) {}
+                if media.management.client != nil {
+                    glassActionButton(systemImage: "slider.horizontal.3", label: "编辑与管理",
+                                      identifier: "asset-viewer-manage", enabled: true) { showsManagement = true }
+                }
             }
         }
     }

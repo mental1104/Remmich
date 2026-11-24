@@ -507,6 +507,14 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         return albums.map(Self.map)
     }
 
+    func forkAlbumDirectory() async throws -> ForkAlbumDirectory? {
+        let (_, requestGeneration) = try requestContext()
+        guard let session, let activeEndpoint else { throw TimelineReadError.routeUnavailable }
+        let result = try await ForkServerReader(apiURL: activeEndpoint, token: session.accessToken).albumDirectory()
+        try requireCurrent(requestGeneration)
+        return result
+    }
+
     func album(id: String) async throws -> AlbumSummary {
         let (client, requestGeneration) = try requestContext()
         let album = try await client.album(id: id)

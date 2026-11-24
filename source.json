@@ -1,121 +1,84 @@
 {
-  "name": "Remmich",
-  "identifier": "io.github.ender-wang.Remmich.source",
-  "sourceURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/source.json",
-  "subtitle": "Your read-only Immich library, native on iPhone and iPad.",
-  "website": "https://github.com/Ender-Wang/Remmich",
-  "iconURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/sidestore-icon.png",
+  "name": "Remmich Personal",
+  "identifier": "io.github.espeonblue.Remmich.source",
+  "sourceURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/source.json",
+  "subtitle": "Personal Immich client: backup, editing and management.",
+  "website": "https://github.com/mental1104/Remmich",
+  "iconURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/sidestore-icon.png",
   "tintColor": "6366F1",
   "apps": [
     {
       "name": "Remmich",
-      "bundleIdentifier": "io.github.ender-wang.Remmich",
-      "developerName": "Ender Wang",
-      "subtitle": "Your read-only Immich library.",
-      "localizedDescription": "Browse your Immich photos and videos with native timelines, Live Photos, quick previews, maps, offline browsing, sharing and Save to Photos. Albums, Search and Library collections currently show demo data. Requires your Immich server, or try the built-in demo sign-in.",
-      "iconURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/sidestore-icon.png",
+      "bundleIdentifier": "io.github.espeonblue.Remmich",
+      "developerName": "mental1104 (fork of Ender Wang)",
+      "subtitle": "Personal Immich client: backup, editing and management.",
+      "localizedDescription": "Personal fork with foreground original-file backup, Live Photo pairing, non-destructive edits and library management. Search still contains demo data. See repository documentation for limitations and verification.",
+      "iconURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/sidestore-icon.png",
       "tintColor": "6366F1",
       "category": "photo-video",
       "screenshots": [
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/onboarding.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/onboarding.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/photos-timeline.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/photos-timeline.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/photo-viewer.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/photo-viewer.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/info-panel.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/info-panel.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/map-view.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/map-view.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/date-cards.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/date-cards.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/profile.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/profile.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/albums.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/albums.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/library.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/library.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/library-recently-added.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/library-recently-added.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/library-memories.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/library-memories.webp",
           "width": 660,
           "height": 1348
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Ender-Wang/Remmich/main/.github/assets/screenshots/library-places.webp",
+          "imageURL": "https://raw.githubusercontent.com/mental1104/Remmich/dev/.github/assets/screenshots/library-places.webp",
           "width": 660,
           "height": 1348
         }
       ],
-      "versions": [
-        {
-          "version": "0.7.0",
-          "buildVersion": "4",
-          "date": "2026-11-23T16:22:52Z",
-          "localizedDescription": "**Your read-only Immich library, native on iPhone and iPad.**\n\nYour Immich collections now appear in Remmich’s Library tab. Revisit memories, find photos on an interactive map, and reopen indexed collections offline.\n\n### 🎯 What this release focuses on\n\nVersion 0.7.0 completes M7, Library collections. The Library tab brings together your Immich collections, media saved to Apple Photos, and save history. The new Library Index keeps collection data available between launches and gives Library its own sync controls.\n\n### 🧭 Current status\n\nPhotos, Videos, Albums, Library collections, and account settings use your Immich account. Search still shows demo data. Remmich keeps your Immich library read-only.\n\n### ✨ Highlights\n\n#### 📚 Library collections\n\n- 🗓️ **Recently taken and Recently added** let you browse camera captures by capture date or browse media by upload date. Favorites, Archive, and Trash open their own timelines. Trash uses its newest capture as its cover.\n- 🖼️ The **Memories** cover rotates through dated previews. **People** opens a timeline of photos and videos for each person.\n- 📂 **Shared Links, Partners, and Folders** let you revisit share links, browse libraries shared with you, and navigate media by folder.\n- 📥 **Save History and On Device** show your transfer history and the contents of the Remmich album in Apple Photos. Save History previews the latest completed save when its cover is available.\n- 👁️ **Card visibility** follows your Immich feature settings for Memories, People, Shared Links, and Folders. Library hides cards once their contents are confirmed empty, including Save History and On Device. On Device stays visible when you need to grant or manage Photos access.\n\n#### 🗺️ Places & offline browsing\n\n- 🌍 **Places** previews your library’s geographic footprint on a heatmap. Open the card to pan or zoom the map, or tap a locality to zoom in and browse its media. Cached Photon names follow your language preferences where available.\n- 💾 **Library Index** adds a third section under **Profile → Index**, alongside Timelines and Albums. It shows progress and offers Sync, Pause, Resume, and Rebuild. Incremental sync reuses indexed months where possible. Indexed collections can reopen offline with the data and thumbnails available on your device.\n- 🖼️ **Indexed Memories and Places** load their full grids on opening while thumbnails load as needed.\n\n#### 🗂️ Albums & navigation\n\n- 🔎 **Albums** combines inline search, All and Shared, and sorting controls in one header.\n- 👆 **Albums and Library** go back one page when you tap the active tab again.\n\n### 🚧 Known limitations\n\n- 🗺️ **Places and maps** need valid GPS and an enabled map source. With default Photon, place names are fetched as you view assets. Automatic bulk place caching requires a custom Photon instance, and iOS controls background execution.\n- 💾 **Offline media** uses cached thumbnails and accessible Apple Photos resources. Originals and video playback depend on accessible saved media or a reachable server.\n- 📤 **Sharing** handles one asset at a time. Shared files retain available GPS metadata. Live Photo sharing uses the displayed still, and Save to Photos preserves the Live Photo pair.\n- 🔄 **Download recovery** can restart a transfer when iOS or the server cannot resume it.\n- 🔄 **Upgrading from 0.5.0** leaves the old shared database on the device. Reindexing restores server-derived indexes. Older save history, Photos receipts, and place results stay in the old database.\n\n### 📦 Installation\n\n- 📱 **Requires iOS or iPadOS 26.6 or later.** Connect to your Immich server or use the built-in demo sign-in to try the official Immich demo server.\n- 📦 **Install the optimized unsigned IPA** by signing it with your own Apple ID using SideStore, AltStore Classic, or another compatible sideloading tool.\n\n",
-          "downloadURL": "https://github.com/Ender-Wang/Remmich/releases/download/v0.7.0/Remmich-v0.7.0-unsigned.ipa",
-          "size": 25449036,
-          "minOSVersion": "26.6"
-        },
-        {
-          "version": "0.6.1",
-          "buildVersion": "3",
-          "date": "2026-11-18T09:59:27Z",
-          "localizedDescription": "### 🚀 Remmich 0.6.1\n\n**Your read-only Immich library, native on iPhone and iPad.**\n\nPlace names cache faster, offline controls are easier to manage, and album covers are ready earlier as you scroll.\n\n### 🎯 What this release focuses on\n\nVersion 0.6.1 (build 3) improves offline caching and polishes the Albums and Settings experience from 0.6.0. You can manage thumbnails and place names separately and see storage estimates while sync is still running.\n\n### 🧭 Current status\n\nPhotos, Videos, Albums, account settings, and the viewer, sharing and download features use your Immich account. Search and the server collections in Library still show demo data. Remmich keeps your Immich library read-only.\n\n### ✨ Highlights\n\n#### 💾 Offline browsing & account storage\n\n- 🗺️ **Faster place caching:** Custom Photon lookups run alongside thumbnail and metadata caching and can continue through iOS background transfers.\n- 📍 **Steadier place progress:** Completed tags are retained when switching Photon addresses for the same lookup settings. When a place needs a local-language name, its lookup follows country discovery before the worker moves on, so the completed count advances during sync.\n- 🎛️ **Separate cache controls:** Swipe between **Asset Cache** and **Place Cache** or choose a section with the picker. Each has its own Sync, Pause, Resume, progress and automatic caching setting. Rebuild and Clear apply to both caches.\n- 📊 **Live storage estimates:** Timeline Index, Album Index, Asset Cache and Place Cache show estimates per 10,000 assets from the data already stored, including during sync. Opening the page uses your existing cache. A rebuild is unnecessary.\n- 🔄 **Cleaner cache restoration:** Reopening the app clears a fulfilled Asset Sync request when the thumbnails and metadata are already cached. Pending Place work can still resume on its own.\n\n#### 🗂️ Albums & navigation\n\n- 🖼️ **Smoother scrolling:** Album covers load just before they enter view, reducing flicker as cards appear at the edge of the screen.\n- 📱 **Landscape header:** The Albums search and scope controls span the full width consistently in both landscape orientations.\n- ↔️ **Tidier section swipes:** Sync buttons and cache switches stay inside their own section as you swipe through Index and Cache & Storage.\n\n#### 🌐 Connections\n\n- ✏️ **Connection drafts:** Leaving Connection without tapping **Save** discards edits to Primary and Fallback addresses.\n\n### 🚧 Known limitations\n\n- 🗺️ **Default Photon:** Place names are fetched as you view assets. Automatic bulk caching requires a custom Photon instance, and iOS controls background execution.\n- 🔄 **Upgrading from 0.5.0:** The old shared database stays on the device. Reindexing restores server-derived indexes. Older Downloads history, Photos receipts and cached place results stay in the old database.\n- 🚧 **Demo destinations:** Search and Library collections still show demo data. Albums are read-only.\n- 💾 **Offline media:** Album indexing saves metadata. Originals and video playback depend on existing caches, accessible Photos resources or a reachable server.\n- 📤 **Sharing scope:** Share one asset at a time. Shared files retain available GPS metadata. Live Photo sharing uses the displayed still, and Save to Photos preserves the Live Photo pair.\n- 🔄 **Download recovery:** A download may restart when iOS or the server cannot resume it.\n\n### 📦 Installation\n\n- 📱 **Requirements:** iOS/iPadOS 26.6 or later. Connect to your own Immich server, or use Remmich’s built-in demo sign-in to try it with the official Immich demo server.\n- 📦 **IPA installation:** Sign the optimized unsigned IPA with your own Apple ID through AltStore Classic or another compatible sideloading tool.\n\n",
-          "downloadURL": "https://github.com/Ender-Wang/Remmich/releases/download/v0.6.1/Remmich-v0.6.1-unsigned.ipa",
-          "size": 24654282,
-          "minOSVersion": "26.6"
-        },
-        {
-          "version": "0.6.0",
-          "buildVersion": "2",
-          "date": "2026-11-15T05:00:40Z",
-          "localizedDescription": "### 🚀 Remmich 0.6.0\n\n**Your read-only Immich library, native on iPhone and iPad.**\n\nAlbums now join Photos and Videos as a real part of your Immich library in Remmich. Browse your albums, keep their index available offline and move between layouts and timelines without losing your place.\n\n### 🎯 What this release focuses on\n\nVersion 0.6.0 focuses on Albums: finding an album, opening its timeline and returning to where you were. Interactive pinch, animated sorting and consistent page transitions bring Albums into the native viewing experience introduced in 0.5.0.\n\n### 🧭 Current status\n\nThis is an early release. Photos, Videos, Albums, account settings and the implemented viewer/export features use your real Immich account. Search and Library collections still show demo data. Uploading, editing albums and modifying the Immich server library remain outside Remmich's read-only scope.\n\n### ✨ Highlights\n\n#### 🗂️ Albums & navigation\n\n- 🗂️ **Real Albums:** Browse owned and shared albums with search, Cards and List, plus six sorting options with ascending/descending direction.\n- ↔️ **All & Shared:** Switch with the same sliding animation as the main pages while search and tab controls stay in place. Both views start from the bottom, with consistent spacing above the navigation bar—even below wrapped album titles.\n- 🤏 **Interactive layouts:** Pinch between Cards and List around the album under your fingers. Reverse the gesture or interrupt settling without opening the album on release.\n- ✨ **Cleaner rearranging:** Sorting keeps your view in place while albums move. Card/List transitions animate long titles between their wrapping layouts, and sorting large album collections uses less memory.\n- 🖼️ **Album timelines:** Open from the cover with a zoom transition and return to the album's saved browsing position, using the shared timeline and viewer.\n- 🧭 **More consistent navigation:** Long-press Back retains your asset context. Tab retaps scroll Photos, Videos and the current album timeline to their latest items with interruptible spring motion. Page swipes no longer accidentally open albums, and tab switches keep animating with the Library profile open.\n\n#### 💾 Offline browsing & account storage\n\n- 💾 **Album Index:** Automatically save album lists, memberships and date groups for offline metadata browsing. Unchanged album contents are reused by revision.\n- 📊 **Clearer progress:** Separate Timeline/Album Index controls show percentages, item counts, elapsed/estimated time and storage statistics. Swipe between sections or use the picker.\n- 👆 **Easier Index controls:** Scroll from the status area in both Index sections. Sync/Pause/Resume and **Rebuild index** sit directly below the statistics, with cleaner spacing in Album Index.\n- 🔐 **Account separation:** Per-account catalog/cache databases improve storage accounting and local-data deletion safeguards. Timeline and Albums reuse asset records and cached media, with independent index rebuilds.\n\n#### ✨ Viewing & connections\n\n- 🖼️ **Info spacing:** The photo now resizes together with the Info panel, removing the extra gap seen on first opening.\n- 🌐 **Custom endpoints:** User-configured HTTP Immich and Photon endpoints are now permitted alongside HTTPS.\n\n### 🚧 Known limitations\n\n- 🔄 **Upgrading from 0.5.0:** The old shared database is not migrated or automatically removed. Reindexing restores server-derived indexes, but not old Downloads history, Photos receipts or cached place results.\n- 🚧 **Demo destinations:** Search and Library collections still show demo data. Albums are read-only; creation, editing and membership changes are not included.\n- 💾 **Offline media:** Album indexing saves metadata. Originals and video playback still depend on existing caches, saved Photos resources or a reachable server.\n- 📤 **Sharing scope:** Share one asset at a time; shared files retain available GPS metadata.\n- 📸 **Live Photo sharing:** Shares the displayed still; Save to Photos preserves the Live Photo pair.\n- 🔄 **Download recovery:** Partial-data reuse still depends on iOS and server support; a download may restart when resuming is unavailable.\n\n### 📦 Installation\n\n- 📱 **Requirements:** iOS/iPadOS 26.6 or later. Connect to your own Immich server, or use Remmich’s built-in demo sign-in to try it with the official Immich demo server.\n- 📦 **IPA installation:** Sign the optimized unsigned IPA with your own Apple ID through AltStore Classic or another compatible sideloading tool.\n\n",
-          "downloadURL": "https://github.com/Ender-Wang/Remmich/releases/download/v0.6.0/Remmich-v0.6.0-unsigned.ipa",
-          "size": 24579037,
-          "minOSVersion": "26.6"
-        },
-        {
-          "version": "0.5.0",
-          "buildVersion": "1",
-          "date": "2026-11-10T08:47:20Z",
-          "localizedDescription": "First release: native timelines and media viewing, previews, Photon places and maps, offline browsing, sharing, and Save to Photos with background downloads and Pause/Resume.",
-          "downloadURL": "https://github.com/Ender-Wang/Remmich/releases/download/v0.5.0/Remmich-v0.5.0-unsigned.ipa",
-          "size": 24236266,
-          "minOSVersion": "26.6"
-        }
-      ],
+      "versions": [],
       "appPermissions": {
         "entitlements": [],
         "privacy": {

@@ -1,0 +1,10 @@
+## 2026-11-24: Establish coupled client/server maintenance
+
+- Upstream main: 672f02e; downstream branch: dev. Parent server dev baseline: e69e65fba (Immich v3.4.2). Active NAS media-AI worktree is deliberately untouched.
+- Fork: mental1104/Remmich. Local team and unique bundle identifier retained for developer builds.
+- Native Albums options now read account-scoped fork album categories and group assignments, filter by category/group and include directory names in album search. Standard servers fall back on absent routes; endpoint/account generations are checked. Requests are GET only and redirects are rejected.
+- Added explicitly authorized write capabilities: foreground album backup with chunked original upload/SHA1 checks, video/Live Photo pairing; favorites, archive, captions, trash/restore; album create/rename/delete and membership; official non-destructive crop/rotate/mirror/reset. No permanent media delete or original replacement.
+- Public Photon coordinate lookups default off, including migrated preferences. GitHub Actions and formatter versions/checksum are pinned. Downstream SideStore catalog cannot advertise upstream binaries. See docs/fork-security.md for audit scope and limitations.
+- No server API, database, migration or production deployment changes. Official client contracts remain unchanged.
+- Initial unsigned app build and eight offline contract groups passed. Full signed/test verification is in progress.
+- Tests/build and remaining gaps are recorded in docs/fork-compatibility.md. Revert this feature commit and parent gitlink to roll back; no server data needs restoring.

@@ -1,9 +1,6 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [Tests]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tests_run_id:
@@ -23,9 +20,7 @@ jobs:
   release-plan:
     name: Verify tests and release version
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     outputs:
       tested-revision: ${{ steps.context.outputs.tested-revision }}
@@ -57,7 +52,7 @@ jobs:
           PY
 
       - name: Download successful test context
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: remmich-release-context
           path: ${{ runner.temp }}/RemmichReleaseContext
@@ -98,7 +93,7 @@ jobs:
           eligible = (
               build["head_repository"]["full_name"] == os.environ["GH_REPO"]
               and build["event"] in ("push", "workflow_dispatch")
-              and build["head_branch"] in ("main", "develop")
+              and build["head_branch"] == "dev"
           )
           if eligible and os.environ["RELEASE_EVENT"] == "workflow_dispatch":
               assert build["head_branch"] == os.environ["RELEASE_BRANCH"], "Select the branch matching the Tests run."
@@ -113,7 +108,7 @@ jobs:
 
       - name: Check out tested revision
         if: steps.context.outputs.eligible == 'true'
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ steps.context.outputs.tested-revision }}
           fetch-depth: 0
@@ -152,7 +147,7 @@ jobs:
           version="$(<"$RUNNER_TEMP/release-version")"
           prerelease=false
           tag="v$version"
-          if [[ "$SOURCE_BRANCH" == "develop" ]]; then
+          if [[ "$SOURCE_BRANCH" == "dev" ]]; then
             prerelease=true
             beta=1
             while git rev-parse --verify "refs/tags/v${version}-beta.${beta}" >/dev/null 2>&1; do
@@ -177,7 +172,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out tested revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-plan.outputs.tested-revision }}
           persist-credentials: false
@@ -232,7 +227,7 @@ jobs:
           done
 
       - name: Upload release files
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remmich-release-${{ needs.release-plan.outputs.tested-revision }}
           path: ${{ runner.temp }}/RemmichRelease/*
@@ -252,7 +247,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Download release files
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: remmich-release-${{ needs.release-plan.outputs.tested-revision }}
           path: release-files
@@ -291,7 +286,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Check out current source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false

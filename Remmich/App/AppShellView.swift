@@ -351,6 +351,7 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
+        .onChange(of: media.management.revision) { _, _ in sessionController?.libraryIndex.syncNow() }
         .onAppear { media.logShellPresented() }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }
         .onChange(of: exportScenePhase, initial: true) { _, phase in

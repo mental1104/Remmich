@@ -1,0 +1,25 @@
+name: Prepare upstream sync
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Merge upstream into main and prepare dev integration
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          bash Scripts/sync-upstream.sh
+          if git diff --quiet origin/dev HEAD; then exit 0; fi
+          branch=$(git branch --show-current)
+          git push -u origin "$branch"
+          gh pr create --base dev --head "$branch" --title 'Merge upstream main into dev' --body 'Normal merge preserving downstream features. Build and tests must pass before merging. No production deployment.'

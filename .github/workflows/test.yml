@@ -3,6 +3,7 @@ name: Tests
 on:
   workflow_run:
     workflows: [Build]
+    branches: [dev]
     types: [completed]
 
 permissions:
@@ -19,7 +20,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 120
     env:
-      IPHONE_DESTINATION: platform=iOS Simulator,name=iPhone 17e,OS=27.0
+      IPHONE_DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro
 
     steps:
       - name: Require a successful build
@@ -32,7 +33,7 @@ jobs:
           fi
 
       - name: Download test products
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: remmich-test-products
           path: ${{ runner.temp }}/RemmichBuildArtifact
@@ -66,7 +67,7 @@ jobs:
           echo "XCTESTRUN_PATH=$xctestrun_path" >> "$GITHUB_ENV"
 
       - name: Check out tested revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ steps.test-products.outputs.tested-revision }}
 
@@ -75,8 +76,8 @@ jobs:
 
       - name: Boot iPhone simulator
         run: |
-          xcrun simctl boot "iPhone 17e" || true
-          xcrun simctl bootstatus "iPhone 17e" -b
+          xcrun simctl boot "iPhone 17 Pro" || true
+          xcrun simctl bootstatus "iPhone 17 Pro" -b
 
       - name: Test app logic
         run: |
@@ -107,7 +108,7 @@ jobs:
           PY
 
       - name: Upload release context
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remmich-release-context
           path: ${{ runner.temp }}/RemmichReleaseContext/release-context.json
@@ -130,7 +131,7 @@ jobs:
 
       - name: Upload test results
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remmich-test-results-${{ github.event.workflow_run.id }}
           path: ${{ runner.temp }}/Remmich*.xcresult

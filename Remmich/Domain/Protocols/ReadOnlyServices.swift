@@ -77,6 +77,13 @@ nonisolated protocol AssetReading: Sendable {
 nonisolated protocol AlbumReading: Sendable {
     func albums() async throws -> [AlbumSummary]
     func album(id: String) async throws -> AlbumSummary
+    func forkAlbumDirectory() async throws -> ForkAlbumDirectory?
+}
+
+extension AlbumReading {
+    nonisolated func forkAlbumDirectory() async throws -> ForkAlbumDirectory? {
+        nil
+    }
 }
 
 nonisolated protocol LibraryReading: Sendable {

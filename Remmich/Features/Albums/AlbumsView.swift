@@ -78,6 +78,9 @@ struct AlbumsView: View {
     @State private var scope: AlbumScope = .all
     @State private var contentScope: AlbumScope = .all
     @State private var query = ""
+    @State private var showsAlbumManagement = false
+    @State private var forkCategory: String?
+    @State private var forkGroup: String?
     @State private var sort: AlbumSort = .mostRecentPhoto
     @State private var sortDirection: AlbumSortDirection = .ascending
     @State private var isReordering = false
@@ -131,7 +134,10 @@ struct AlbumsView: View {
 
     private var filtered: [AlbumSummary] {
         sort.sorted(store.albums.filter {
-            (contentScope == .all || $0.isShared) && (query.isEmpty || $0.title.localizedStandardContains(query))
+            (contentScope == .all || $0.isShared)
+                && (store.forkDirectory?.includes(albumID: $0.id, category: forkCategory, group: forkGroup) ?? true)
+                && (query.isEmpty || $0.title.localizedStandardContains(query)
+                    || (store.forkDirectory?.searchText(albumID: $0.id).localizedStandardContains(query) ?? false))
         }, direction: sortDirection)
     }
 
@@ -208,6 +214,10 @@ struct AlbumsView: View {
                             tabSelectionState: tabSelectionState, tabBarTop: $tabBarTop, showAccount: showAccount)
                 .cardNavigationDestination(id: album.id, in: albumTransition)
         }
+        .sheet(isPresented: $showsAlbumManagement, onDismiss: { Task { await store.load() } }) {
+            AlbumManagementView(controller: media.management)
+        }
+        .onChange(of: media.management.revision) { _, _ in Task { await store.load() } }
         .accessibilityIdentifier("albums-root")
         .background { CardNavigationRootAnchor(root: navigationRoot).allowsHitTesting(false) }
         .onChange(of: tabSelectionState.selection) { _, current in
@@ -473,6 +483,28 @@ struct AlbumsView: View {
 
     private func albumOptions(metrics: AlbumReflowMetrics) -> some View {
         Menu {
+            if media.management.client != nil {
+                Button("创建、重命名或删除相簿") { showsAlbumManagement = true }
+                Divider()
+            }
+            if let directory = store.forkDirectory {
+                Picker("相簿大组", selection: $forkCategory) {
+                    Text("全部大组").tag(String?.none)
+                    Text("默认").tag(Optional(ForkAlbumDirectory.defaultCategory))
+                    ForEach(directory.categories) { Text($0.name).tag(Optional($0.id)) }
+                }
+                Picker("相簿分组", selection: $forkGroup) {
+                    Text("全部分组").tag(String?.none)
+                    ForEach(directory.groupNames, id: \.self) { name in
+                        Text(name.isEmpty ? "未分组" : name).tag(Optional(name))
+                    }
+                }
+                Button("清除目录筛选") { forkCategory = nil; forkGroup = nil }
+                Divider()
+            }
+            if let message = store.forkErrorMessage {
+                Text(message)
+            }
             Picker("Sort Albums", selection: Binding(get: { sort }, set: { updateAlbumLayout(sort: $0, direction: sortDirection, metrics: metrics) })) {
                 ForEach(AlbumSort.allCases) { Text($0.rawValue).tag($0) }
             }

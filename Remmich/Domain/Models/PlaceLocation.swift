@@ -93,6 +93,7 @@ nonisolated struct MapsPlacesPreferences: Codable, Equatable, Sendable {
     static let defaultEndpoint = "https://photon.komoot.io"
     var endpoint = defaultEndpoint
     var localCountries: Set<String> = []
+    var allowPublicLookup: Bool? = nil
 
     func language(countryCode: String) -> PlaceLanguage {
         localCountries.contains(countryCode.uppercased()) ? .local : .english

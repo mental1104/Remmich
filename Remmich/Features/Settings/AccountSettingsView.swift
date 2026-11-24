@@ -125,6 +125,7 @@ struct AccountSettingsView: View {
     @State private var primaryAddress: String
     @State private var fallbackAddresses: [String]
     @State private var connectionLatency = ConnectionLatencyMonitor()
+    @State private var showsBackup = false
     @State private var isSaving = false
     @State private var saveError: String?
     @State private var pendingAccountDeletion: StoredLibraryAccount?
@@ -278,6 +279,11 @@ struct AccountSettingsView: View {
         .modifier(AccountSettingsGlassBackground(enabled: drawsGlassBackground))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("account-settings")
+        .sheet(isPresented: $showsBackup) {
+            if let sessionController {
+                PhotoBackupView(controller: sessionController.media.management)
+            }
+        }
         .alert("Cannot Save Profile", isPresented: Binding(
             get: { saveError != nil },
             set: {
@@ -748,7 +754,7 @@ struct AccountSettingsView: View {
                 .accessibilityAction(named: "Change app icon") { navigate(to: .appearance) }
             VStack(spacing: 4) {
                 Text("Remmich").font(stacked ? .title2.bold() : .title.bold()).lineLimit(1).minimumScaleFactor(0.8)
-                Text("Your \(Text("Re").fontWeight(.heavy))adonly I\(Text("mmich").fontWeight(.heavy)) Library")
+                Text("照片备份 · 无损编辑 · 图库管理")
                     .fontWeight(.medium)
                     .font(.system(.callout, design: .rounded))
                     .multilineTextAlignment(.center)
@@ -954,6 +960,13 @@ struct AccountSettingsView: View {
                 profileValueRow("Maps & Places", value: "", symbol: "map", showsChevron: true)
             }
             .buttonStyle(.plain)
+            if sessionController != nil {
+                sectionCaption("照片备份").padding(.top, 24)
+                Button { showsBackup = true } label: {
+                    profileValueRow("备份手机照片与视频", value: "手动", symbol: "icloud.and.arrow.up", showsChevron: true)
+                }
+                .buttonStyle(.plain)
+            }
             sectionCaption("SESSION").padding(.top, 24)
             Text("Your Immich server data stays unchanged.")
                 .font(.footnote).foregroundStyle(.secondary)

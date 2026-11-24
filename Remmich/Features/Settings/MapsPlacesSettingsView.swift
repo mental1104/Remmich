@@ -12,6 +12,17 @@ struct MapsPlacesSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Place-name Service").font(.headline)
+                Toggle("允许向公共 Photon 发送照片坐标以查询地名", isOn: Binding(
+                    get: { locations?.preferences.allowPublicLookup == true },
+                    set: { value in
+                        guard let locations else { return }
+                        var settings = locations.preferences
+                        settings.allowPublicLookup = value
+                        try? locations.save(settings)
+                    }
+                ))
+                Text("默认关闭公共坐标查询。地图瓦片仍按服务器配置的地图源加载。")
+                    .font(.footnote).foregroundStyle(.secondary)
                 TextField("Photon URL", text: $endpoint, axis: .vertical)
                     .keyboardType(.URL)
                     .textContentType(.URL)

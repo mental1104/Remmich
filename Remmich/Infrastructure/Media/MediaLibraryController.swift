@@ -36,6 +36,7 @@ final class MediaLibraryController {
     let timelineResidency = TimelineThumbnailResidency()
 
     private var session: AccountSession?
+    let management = LibraryManagementController()
     let exports: MediaExportController
     @ObservationIgnored private var exportRequestIDs: [String: [String]] = [:]
     @ObservationIgnored private var exportManifestLoad: Task<[String: [String]], Never>?
@@ -127,6 +128,7 @@ final class MediaLibraryController {
         }
         self.session = session
         activeAPIURL = activeEndpoint
+        management.configure(session: session, endpoint: activeEndpoint)
         exports.configure(media: self, scope: nextScope)
         let profileStartedAt = Date()
         prepareProfileImageCache(scope: nextScope, session: session, endpoint: activeEndpoint)
@@ -137,6 +139,7 @@ final class MediaLibraryController {
 
     func updateRoute(_ endpoint: URL?) {
         activeAPIURL = endpoint
+        management.configure(session: session, endpoint: endpoint)
         guard let scope, let session else { return }
         prepareProfileImageCache(scope: scope, session: session, endpoint: endpoint)
         if endpoint != nil {
@@ -1006,6 +1009,7 @@ final class MediaLibraryController {
     }
 
     func clearAll() {
+        management.configure(session: nil, endpoint: nil)
         resumeOpeningPhotosHydration()
         exports.reset()
         exportManifestSave?.cancel()

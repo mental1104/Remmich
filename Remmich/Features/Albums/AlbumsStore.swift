@@ -5,6 +5,8 @@ import Observation
 @Observable
 final class AlbumsStore {
     private(set) var albums: [AlbumSummary] = []
+    private(set) var forkDirectory: ForkAlbumDirectory?
+    private(set) var forkErrorMessage: String?
     private(set) var isLoading = false
     private(set) var hasLoaded = false
     private(set) var errorMessage: String?
@@ -85,7 +87,17 @@ final class AlbumsStore {
         async let cached: Void = prepareOpening()
         do {
             guard !Task.isCancelled, request == generation else { return }
+            async let directory = reader.forkAlbumDirectory()
             let values = try await reader.albums()
+            let forkResult: ForkAlbumDirectory?
+            let forkError: String?
+            do {
+                forkResult = try await directory
+                forkError = nil
+            } catch {
+                forkResult = nil
+                forkError = "Server album extensions could not be loaded."
+            }
             guard !Task.isCancelled, request == generation else { return }
             var seen: Set<String> = []
             let next = values.filter { seen.insert($0.id).inserted }
@@ -97,6 +109,8 @@ final class AlbumsStore {
                     coverRevisions[album.id] = nil
                 }
             }
+            forkErrorMessage = forkError
+            forkDirectory = forkResult
             albums = next
             hasLoaded = true
             if let persistence, let scope {

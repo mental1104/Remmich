@@ -102,6 +102,9 @@ import SwiftUI
             completedTransferIntervals = []
             persistCacheRun(force: true)
         }
+        if normalized.allowPublicLookup != true {
+            requests.values.forEach { $0.task.cancel() }
+        }
         preferences = normalized
         revision &+= 1
         try defaults.set(JSONEncoder().encode(normalized), forKey: "maps-places-preferences-\(namespace)")
@@ -393,6 +396,9 @@ import SwiftUI
     }
 
     private func fetch(_ key: PlaceCacheKey, scope: MediaAccountScope, token: String, automatic: Bool) async throws -> PlaceLocation? {
+        guard try !PlaceCacheKey.isPublicService(MapsPlacesPreferences.endpointURL(preferences.endpoint)) || preferences.allowPublicLookup == true else {
+            return try await store.cachedPlace(key, scope: scope)?.location
+        }
         let lookupRevision = revision
         let generation = metricsGeneration
         let requestID = "\(scope.cacheNamespace)|\(key.id)"
