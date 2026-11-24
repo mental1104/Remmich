@@ -446,6 +446,74 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try (title, JSONEncoder().encode(Body(name: title)))
     }
 
+    /// 返回真实个人标签树；只有精确200且合法身份列表才可使用，鉴权/能力缺失/错误响应不能返回空成功。
+    func managedTags() async throws -> [ManagedTag] {
+        let data = try await send("GET", ["tags"], expectedStatus: 200)
+        return try ManagedTag.catalog(JSONDecoder().decode([ManagedTag].self, from: data))
+    }
+
+    /// id指定当前资源；标签字段必须实际存在，返回同ID的真实单资源关系，永不复用搜索/索引缓存。
+    func taggedAsset(_ id: String) async throws -> TaggedAssetSnapshot {
+        let id = try validID(id)
+        let data = try await send("GET", ["assets", id], expectedStatus: 200)
+        let asset = try JSONDecoder().decode(TaggedAssetSnapshot.self, from: data)
+        guard asset.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return asset
+    }
+
+    /// name为单叶名，parent来自fresh个人树或nil创建根标签；只接受201和匹配的name/parent/path回执。
+    func createManagedTag(name: String, parent: ManagedTag?) async throws -> ManagedTag {
+        let name = try ManagedTag.leafName(name)
+        if let parent {
+            try ManagedTag.requireID(parent.id)
+        }
+        // 创建体不发送颜色默认值，避免把其他客户端管理的色彩意图覆盖为空。
+        struct Body: Encodable { let name: String; let parentId: String? }
+        let data = try await send("POST", ["tags"], body: JSONEncoder().encode(Body(name: name, parentId: parent?.id)), expectedStatus: 201)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.name == name, result.parentId == parent?.id,
+              result.value == (parent.map { $0.value + "/" + name } ?? name) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// tag来自fresh树，name是新叶名；官方PUT200会递归改后代路径，颜色与父级不进入请求体。
+    func renameManagedTag(_ tag: ManagedTag, name: String) async throws -> ManagedTag {
+        try ManagedTag.requireID(tag.id)
+        let name = try ManagedTag.leafName(name)
+        // 只有明确新名称，不附带color:null或不支持的重父级字段。
+        struct Body: Encodable { let name: String }
+        let data = try await send("PUT", ["tags", tag.id], body: JSONEncoder().encode(Body(name: name)), expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.id == tag.id, result.parentId == tag.parentId, result.name == name,
+              result.value == String(tag.value.dropLast(tag.name.count)) + name else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id是已确认删除的个人标签；204只确认命令，调用方仍须fresh树验证整个后代闭包已移除；照片保留。
+    func deleteManagedTag(_ id: String) async throws {
+        try ManagedTag.requireID(id)
+        _ = try await send("DELETE", ["tags", id], expectedStatus: 204)
+    }
+
+    /// attached选择PUT/DELETE；只发送一个assetID并要求200唯一同ID成功，明确成员错误不冒充全成功。
+    func setAssetTag(_ assetID: String, tagID: String, attached: Bool) async throws {
+        try ManagedTag.requireID(assetID); try ManagedTag.requireID(tagID)
+        // 官方BulkIdsDto单项调用，不使用无身份的bulk count回执。
+        struct Body: Encodable { let ids: [String] }
+        // 只解码稳定错误枚举；不把服务端errorMessage带到UI/日志。
+        struct Result: Decodable { let id: String; let success: Bool; let error: AssetTagMembershipFailure? }
+        let data = try await send(attached ? "PUT" : "DELETE", ["tags", tagID, "assets"],
+                                  body: JSONEncoder().encode(Body(ids: [assetID])), expectedStatus: 200)
+        let results = try JSONDecoder().decode([Result].self, from: data)
+        guard results.count == 1, let result = results.first, result.id.lowercased() == assetID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        if !result.success, let failure = result.error {
+            throw AssetTagError.membership(failure)
+        }
+        guard result.success, result.error == nil else { throw LibraryWriteError.malformedResponse }
+    }
+
     /// id为当前管理资源；每次真实GET200并核对响应身份，元数据DTO不复用编辑/备份解码字段。
     func assetMetadata(_ id: String) async throws -> AssetMetadataSnapshot {
         let id = try validID(id)

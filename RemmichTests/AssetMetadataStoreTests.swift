@@ -414,7 +414,7 @@ private nonisolated func metadataSession(endpoint: URL, user: String = metadataO
 }
 
 /// 一次固定HTTP响应，held仅控制在途时序，authorization用于换账号后的真实新Bearer断言。
-private nonisolated struct MetadataExchange: Sendable {
+nonisolated struct MetadataExchange: Sendable {
     let method: String
     let path: String
     let status: Int
@@ -424,7 +424,8 @@ private nonisolated struct MetadataExchange: Sendable {
 }
 
 /// 有限JSON请求快照；不把Foundation输入流跨actor共享。
-private nonisolated struct MetadataRequest: Sendable {
+nonisolated struct MetadataRequest: Sendable {
+    let id = UUID()
     let method: String
     let url: URL
     let authorization: String?
@@ -461,7 +462,7 @@ private nonisolated struct MetadataRequest: Sendable {
 }
 
 /// 每个随机host独立的响应顺序/等待门；业务提前失败也唤醒观察者，不靠sleep推进场景。
-private actor MetadataHTTPScript {
+actor MetadataHTTPScript {
     private let exchanges: [MetadataExchange]
     private var captured: [MetadataRequest] = []
     private var pending: CheckedContinuation<Void, Never>?
@@ -469,6 +470,9 @@ private actor MetadataHTTPScript {
     private var held = false
     private var finished = false
     private var stopped = false
+    private var heldRequestID: UUID?
+    private var responderExits = Set<UUID>()
+    private var exitObserver: CheckedContinuation<Void, Never>?
 
     /// exchanges是独立响应剧本，不从Store/patch反推成功值。
     init(_ exchanges: [MetadataExchange]) {
@@ -485,6 +489,7 @@ private actor MetadataHTTPScript {
               request.authorization == exchange.authorization, request.cookie == nil,
               request.contentType == (request.body == nil ? nil : "application/json") else { throw URLError(.badServerResponse) }
         if exchange.held {
+            heldRequestID = request.id
             await withCheckedContinuation { continuation in
                 pending = continuation; held = true; observer?.resume(returning: true); observer = nil
             }
@@ -520,14 +525,29 @@ private actor MetadataHTTPScript {
         pending?.resume(); pending = nil
     }
 
+    /// requestID由真实URLProtocol任务结束路径报告；只唤醒对应被hold的响应退出观察者。
+    func responderExited(_ requestID: UUID) {
+        responderExits.insert(requestID)
+        if requestID == heldRequestID {
+            exitObserver?.resume(); exitObserver = nil
+        }
+    }
+
+    /// 等待实际hold响应任务结束，而非仅业务任务结束；提前失败/清理时无不可达等待。
+    func waitForHeldResponderExit() async {
+        guard let heldRequestID, !responderExits.contains(heldRequestID), !stopped else { return }
+        await withCheckedContinuation { exitObserver = $0 }
+    }
+
     /// 失败/超时清理同时释放响应和观察者；清理先于请求到门时也不再新建不可唤醒的continuation。
     func stop() {
-        stopped = true; finished = true; observer?.resume(returning: false); observer = nil; release()
+        stopped = true; finished = true; observer?.resume(returning: false); observer = nil
+        exitObserver?.resume(); exitObserver = nil; release()
     }
 }
 
 /// 每例自己的真实manager和随机.invalid host，仅会话内安装协议，不改变生产构造或全局URLSession。
-@MainActor private struct MetadataHTTPFixture {
+@MainActor struct MetadataHTTPFixture {
     let endpoint: URL
     let manager: LibraryManagementController
     let script: MetadataHTTPScript
@@ -596,19 +616,20 @@ private final nonisolated class MetadataURLProtocol: URLProtocol, @unchecked Sen
     /// 捕获请求并异步回传固定响应；实际取消后不再交付字节，异常使真正URLSession失败。
     override func startLoading() {
         do {
-            let request = try MetadataRequest(request)
-            guard let entry = Self.scripts.withLock({ $0[request.url.host ?? ""] }) else { throw URLError(.badURL) }
-            let task = Task { @Sendable [weak self, entry, request] in
+            let capturedRequest = try MetadataRequest(request)
+            guard let entry = Self.scripts.withLock({ $0[capturedRequest.url.host ?? ""] }) else { throw URLError(.badURL) }
+            let task = Task { @Sendable [weak self, entry, capturedRequest] in
+                defer { Task { @Sendable [script = entry.script, requestID = capturedRequest.id] in await script.responderExited(requestID) } }
                 do {
-                    let exchange = try await entry.script.response(request, endpoint: entry.endpoint)
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
-                    guard let response = HTTPURLResponse(url: request.url, statusCode: exchange.status, httpVersion: nil,
+                    let exchange = try await entry.script.response(capturedRequest, endpoint: entry.endpoint)
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
+                    guard let response = HTTPURLResponse(url: capturedRequest.url, statusCode: exchange.status, httpVersion: nil,
                                                          headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                     client?.urlProtocol(self, didLoad: Data(exchange.json.utf8))
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
                     client?.urlProtocol(self, didFailWithError: error)
                 }
             }

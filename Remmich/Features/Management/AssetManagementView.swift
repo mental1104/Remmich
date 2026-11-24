@@ -21,6 +21,7 @@ struct AssetManagementView: View {
     @State private var confirmsReset = false
     @State private var editing = false
     @State private var managingMetadata = false
+    @State private var managingTags = false
 
     /// assetID/controller保留原管理契约，media/revision来自查看器；editsChanged可区分需有限读取派生版本的编辑。
     /// 缺省媒体仍可管理但不盲保存可视编辑，缺省专用回调继续使用changed，保留原有管理宿主兼容。
@@ -52,6 +53,8 @@ struct AssetManagementView: View {
                         LabeledContent("文件", value: asset.originalFileName)
                         if asset.ownerId == controller.client?.userID {
                             Button("Date, location and rating") { managingMetadata = true }
+                                .disabled(asset.isTrashed)
+                            Button("Tags") { managingTags = true }
                                 .disabled(asset.isTrashed)
                             Button(asset.isFavorite ? "取消收藏" : "收藏") {
                                 run { try await $0.update(assetID, favorite: !asset.isFavorite) }
@@ -121,6 +124,9 @@ struct AssetManagementView: View {
         // 元数据页自行门控写入；挂在未禁用的NavigationStack上，确保保存中仍可点击停止等待。
         .sheet(isPresented: $managingMetadata, onDismiss: { Task { await load() } }) {
             AssetMetadataView(assetID: assetID, controller: controller, changed: changed)
+        }
+        .sheet(isPresented: $managingTags, onDismiss: { Task { await load() } }) {
+            AssetTagManagementView(assetID: assetID, controller: controller, changed: changed)
         }
     }
 
