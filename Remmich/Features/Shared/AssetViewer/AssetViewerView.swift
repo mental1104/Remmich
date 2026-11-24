@@ -956,6 +956,8 @@ struct AssetViewerView: View {
                         contentHeightChanged: { updateInfoContentHeight($0, for: asset.id) },
                         retry: { retryDetail(for: asset.id) },
                         loadFullResolution: { requestFullResolution(for: asset.id) },
+                        mediaReadOrigin: media.mediaReadOrigin(assetID: asset.id, revision: asset.thumbnailRevision)
+                            ?? (media.savedPhotosLibrary != nil ? .devicePhotos : .immichResource),
                         place: asset.id == session.selectedAssetID ? currentPlace : nil,
                         showsMap: showsInfo && !openingIsActive,
                         mapViewportSize: CGSize(width: infoWidth, height: viewerRect.height),
@@ -997,6 +999,8 @@ struct AssetViewerView: View {
                         contentHeightChanged: { updateInfoContentHeight($0, for: asset.id) },
                         retry: { retryDetail(for: asset.id) },
                         loadFullResolution: { requestFullResolution(for: asset.id) },
+                        mediaReadOrigin: media.mediaReadOrigin(assetID: asset.id, revision: asset.thumbnailRevision)
+                            ?? (media.savedPhotosLibrary != nil ? .devicePhotos : .immichResource),
                         place: asset.id == session.selectedAssetID ? currentPlace : nil,
                         showsMap: showsInfo && !openingIsActive,
                         bottomContentInset: mapUnderlap,

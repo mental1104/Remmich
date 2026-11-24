@@ -1,3 +1,10 @@
+## 2026-11-24: Wire matched local media into native image and video entry points
+
+- Source: local-media-matching2ca52a6; upstream remains672f02e. Connect the parallel matching controller/PhotoKit reader contracts to MediaLibraryController and VideoPlaybackSession, without server/API/schema or original-download changes. Matching-controller/checksum dependencies are still being integrated; this commit alone is not a buildable/validated delivery.
+- Display thumbnail/preview/fullsize requests try confirmed same-version Photos current first; actual local success avoids the existing remote pipeline. Local miss or revoked local access falls back only while the original account/context remains valid. Cancellation/account changes throw and do not start old-account remote fallback. Explicit original/export paths remain separate. Ordinary video uses a matched local AVPlayerItem before saved/export/remote paths.
+- Add scoped auto-restore/refresh hooks, account settings entry, strict fresh asset-info getter and a viewer source label distinguishing device Photos from Immich resources/cache. Source labels do not claim network byte counts. No upload, original overwrite, backup-completion or cleanup proof is inferred from display association.
+- Six scoped SwiftFormat/diff checks pass on NAS; app compilation, end-to-end routing tests, matching dependencies and device acceptance are unverified. Root continues integration before pushing one candidate CI. Rollback removes display routing without deleting media or server state.
+
 ## 2026-11-24: Read official metadata for device-local media matching
 
 - Source: codex/feature-local-media-matching from424a22a; upstream remains672f02e. User clarified cloud means Immich: match device Photos with server assets and prefer local display/playback, not merely iCloud backup deduplication.

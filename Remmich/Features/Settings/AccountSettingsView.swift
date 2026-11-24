@@ -126,6 +126,7 @@ struct AccountSettingsView: View {
     @State private var fallbackAddresses: [String]
     @State private var connectionLatency = ConnectionLatencyMonitor()
     @State private var showsBackup = false
+    @State private var showsLocalMediaMatching = false
     @State private var isSaving = false
     @State private var saveError: String?
     @State private var pendingAccountDeletion: StoredLibraryAccount?
@@ -282,6 +283,11 @@ struct AccountSettingsView: View {
         .sheet(isPresented: $showsBackup) {
             if let sessionController {
                 PhotoBackupView(controller: sessionController.media.management)
+            }
+        }
+        .sheet(isPresented: $showsLocalMediaMatching) {
+            if let sessionController {
+                LocalMediaMatchingView(controller: sessionController.media.localMediaMatches, manager: sessionController.media.management)
             }
         }
         .alert("Cannot Save Profile", isPresented: Binding(
@@ -961,6 +967,11 @@ struct AccountSettingsView: View {
             }
             .buttonStyle(.plain)
             if sessionController != nil {
+                sectionCaption("本机优先浏览").padding(.top, 24)
+                Button { showsLocalMediaMatching = true } label: {
+                    profileValueRow("匹配本机照片与视频", value: "优先本机", symbol: "iphone.and.arrow.forward", showsChevron: true)
+                }
+                .buttonStyle(.plain)
                 sectionCaption("照片备份").padding(.top, 24)
                 Button { showsBackup = true } label: {
                     profileValueRow("备份手机照片与视频", value: "手动", symbol: "icloud.and.arrow.up", showsChevron: true)

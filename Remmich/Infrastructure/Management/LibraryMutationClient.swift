@@ -126,6 +126,16 @@ final nonisolated class LibraryMutationClient: Sendable {
         session.invalidateAndCancel()
     }
 
+    /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
+    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
+        let expected = try validID(id)
+        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
+        return asset
+    }
+
     /// cloudIDs为本机已读到的完整Photos标识；只读取官方同步元数据，不请求任何媒体、不reset也不提交ack。
     /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
     @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {

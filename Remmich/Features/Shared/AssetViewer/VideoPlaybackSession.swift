@@ -172,6 +172,8 @@ final class VideoPlaybackSession {
         do {
             let local: AVPlayerItem? = if let library = media.savedPhotosLibrary {
                 try await savedVideoItem(in: library)
+            } else if let revision, let item = try await media.localPhotoPlayerItem(assetID: assetID, revision: revision) {
+                item
             } else if let revision {
                 try await media.exports.localVideoAsset(assetID: assetID, revision: revision, tier: .playback)
                     .map { AVPlayerItem(asset: $0) }
