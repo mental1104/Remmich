@@ -1,3 +1,10 @@
+## 2026-11-24: Match generated date contract fixture to application configuration
+
+- Source: codex/feature-search-rating over8825298; upstream remains672f02e. No upstream sync or application/server/API/database/production behavior change.
+- CI45343739181 compiled app/test bundles and passed formatting/offline contracts. API testing ran59 tests in17 suites; one date test failed five strict timestamp assertions because its raw generated Client used the SDK default date transcoder instead of the application's ImmichDateTranscoder. The default emits whole seconds; the application emits milliseconds. Simulator app tests were skipped after this failure.
+- Configure the fixture with the same date transcoder used by ImmichClient.makeClient. Keep all exact timestamp/null/operator assertions; do not alter production serialization or generated code. Local SwiftFormat and diff checks passed; repaired Swift tests require a new CI run before merge.
+- Parent gitlink remains verified67ec731. PR #4 is ready but must not merge until the repaired head passes; PR #5 stays draft. Real-device acceptance remains unverified. Rollback: revert this test-only repair; no media recovery required.
+
 ## 2026-11-24: Nullable dates preserve default non-trash search scope
 
 - Source: codex/feature-search-rating overb962351; upstream remains672f02e. No upstream sync, server/API/database/production change.
@@ -127,10 +134,3 @@
 - Signed app/test build succeeded; v0.7.1 (5) installed and launched on iPhone 15 Pro. Eight offline contract groups and formatting lint passed. Device-focused run: 35 tests passed; one parameterized location route-change test failed (two assertions in its custom-endpoint case). New privacy/account-generation suites passed.
 - Fixed the regression: only cancel pending public-coordinate requests when withdrawing previously granted public-service consent, not on every unrelated place-endpoint configuration save. Full rerun of that fix is pending; do not mark all tests green. No additional phone tests will interrupt the user while they try the app.
 - Tests/build and remaining gaps are recorded in docs/fork-compatibility.md. Revert this feature commit and parent gitlink to roll back; no server data needs restoring.
-## 2026-11-24: Match generated date contract fixture to application configuration
-
-- Source: codex/feature-search-rating over8825298; upstream remains672f02e. No upstream sync or application/server/API/database/production behavior change.
-- CI45343739181 compiled app/test bundles and passed formatting/offline contracts. API testing ran59 tests in17 suites; one date test failed five strict timestamp assertions because its raw generated Client used the SDK default date transcoder instead of the application's ImmichDateTranscoder. The default emits whole seconds; the application emits milliseconds. Simulator app tests were skipped after this failure.
-- Configure the fixture with the same date transcoder used by ImmichClient.makeClient. Keep all exact timestamp/null/operator assertions; do not alter production serialization or generated code. Local SwiftFormat/diff checks are recorded below after execution; repaired Swift tests require a new CI run before merge.
-- Parent gitlink remains verified67ec731. PR #4 is ready but must not merge until the repaired head passes; PR #5 stays draft. Real-device acceptance remains unverified. Rollback: revert this test-only repair; no media recovery required.
-
