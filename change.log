@@ -1,3 +1,9 @@
+## 2026-11-24: Direct native pagination mutex and continuation-cycle acceptance
+
+- Source: codex/feature-search-completion over6ed6568; upstream remains672f02e. No server/API/database, production behavior or workflow change.
+- Add direct NativeSearchStore scenarios for a genuinely pending continuation plus a second load request, and A→B→A continuation cycles under metadata, legacy and Fork tokens. Verify one request in flight, one append, previously accepted assets retained, repeated-token pages not published and no requests after the cycle error. Actor gates establish ordering without sleeps and do not overwrite the original waiter on a mutex regression.
+- Focused SwiftFormat0.64.5 lint and diff checks passed; no Swift runtime is available on NAS, so these new tests await the same integrated PR CI. PR6 post-merge Build45361549041 passed and Tests45363349761 is live; PR7 stays draft until that chain ends. No physical-device or private-media operations. Rollback: remove this isolated test file/record, preserving business behavior and existing tests.
+
 ## 2026-11-24: Integrate parallel native search work for unified CI
 
 - Source: codex/feature-search-completion normally merges independent media6d0b8e1, tagsaa90693d, reference090824c, devicese1af999, UIaf0d776/cadf191 and verified deva521360. Preserve every query source/filter, complete preset conversion, candidate generation guards and all tests when resolving overlapping hunks; no published history rewritten.
