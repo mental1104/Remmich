@@ -46,6 +46,35 @@ import Testing
         #expect(calls == ["metadata"])
     }
 
+    /// metadata检查点、旧服务端、半截流或单条坏字段不能阻断独立本机SHA1；坏流不交出任何元数据关联。
+    @Test(arguments: ["checkpoint", "unsupported", "incomplete", "bad-record"])
+    func unavailableMetadataStillUsesIndependentLocalProof(_ mode: String) async throws {
+        let directory = temporaryMatchDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let snapshot = matchSnapshot()
+        let checksum = try MatchChecksum(proof: matchProof(snapshot))
+        let remote = MatchRemote(records: [], asset: matchAsset(), metadataMode: mode)
+        let fixture = try matchFixture(directory: directory, snapshot: snapshot, remote: remote, checksum: checksum)
+        let operation = try #require(fixture.controller.scan(using: fixture.manager)); await operation.value
+        let association = try #require(fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision))
+        #expect(association.source == .checksum && fixture.controller.metadataMatches == 0 && fixture.controller.checksumMatches == 1)
+        #expect(fixture.controller.metadataFailures == 1 && fixture.controller.status.contains("元数据不可用"))
+        let calls = await remote.calls
+        #expect(calls == ["metadata", "checksum", "asset"] && checksum.requests == 1)
+        let document = try await fixture.store.load(scope: fixture.scope)
+        #expect(document?.associations == [association])
+    }
+
+    /// 取消错误必须传播到停止状态，不能伪装成metadata不可用后额外读取本机字节或继续远端查询。
+    @Test func cancelledMetadataNeverFallsThroughToChecksum() async throws {
+        let directory = temporaryMatchDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let remote = MatchRemote(records: [], asset: matchAsset(), metadataMode: "cancelled")
+        let fixture = try matchFixture(directory: directory, remote: remote)
+        let operation = try #require(fixture.controller.scan(using: fixture.manager)); await operation.value
+        #expect(fixture.controller.metadataFailures == 0 && fixture.checksum.requests == 0 && fixture.controller.status.contains("已停止"))
+        let calls = await remote.calls
+        #expect(calls == ["metadata"] && fixture.controller.metadataMatches == 0 && fixture.controller.checksumMatches == 0)
+    }
+
     /// 无CloudID仍可读本机严格current证明并查SHA1；结果ID对应、fresh checksum和状态都要确认。
     @Test(arguments: ["existing", "wrong-checksum", "trashed", "no-match", "wrong-query"])
     func checksumFallbackRequiresProofAndFreshIdentity(_ mode: String) async throws {
@@ -351,6 +380,7 @@ private actor MatchRemote: LocalMediaMatchingReading {
     private let records: [LocalMediaRemoteMetadataRecord]
     private let asset: LocalMediaRemoteAsset
     private let lookupMode: String
+    private let metadataMode: String
     private let holdAsset: Bool
     private var gate: CheckedContinuation<Void, Never>?
     private var released = false
@@ -358,13 +388,22 @@ private actor MatchRemote: LocalMediaMatchingReading {
     private(set) var calls: [String] = []
     private(set) var digests: [LocalPhotoByteDigest] = []
     /// records/asset为固定响应，holdAsset只控制fresh await，不绕过真实Controller。
-    init(records: [LocalMediaRemoteMetadataRecord], asset: LocalMediaRemoteAsset, lookupMode: String = "existing", holdAsset: Bool = false) {
-        self.records = records; self.asset = asset; self.lookupMode = lookupMode; self.holdAsset = holdAsset
+    init(records: [LocalMediaRemoteMetadataRecord], asset: LocalMediaRemoteAsset, lookupMode: String = "existing", holdAsset: Bool = false, metadataMode: String = "valid") {
+        self.records = records; self.asset = asset; self.lookupMode = lookupMode; self.holdAsset = holdAsset; self.metadataMode = metadataMode
     }
 
     /// cloudIDs实际请求被记录，返回已准备的完整metadata候选。
     func localMediaMetadata(cloudIDs _: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
-        calls.append("metadata"); return records
+        calls.append("metadata")
+        switch metadataMode {
+        case "checkpoint": throw LocalMediaMetadataStreamError.metadataCheckpointExists
+        case "unsupported": throw LibraryWriteError.http(404)
+        case "incomplete": throw LocalMediaMetadataStreamError.incomplete
+        case "cancelled": throw CancellationError()
+        case "bad-record":
+            return try [.init(assetID: matchRemoteID, value: JSONSerialization.data(withJSONObject: ["iCloudId": "synthetic-cloud:complete", "createdAt": "bad-date"]))]
+        default: return records
+        }
     }
 
     /// 正常/迟到fresh读取均返回同一资料，取消不会替fixture自动过滤响应。

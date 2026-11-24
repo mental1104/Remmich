@@ -20,6 +20,11 @@ struct LocalMediaMatchingView: View {
                 LabeledContent("元数据关联", value: "\(controller.metadataMatches)")
                 LabeledContent("本机校验和关联", value: "\(controller.checksumMatches)")
                 LabeledContent("未确认本机项目", value: "\(controller.unmatched)")
+                if controller.metadataFailures > 0 {
+                    LabeledContent("元数据读取问题", value: "\(controller.metadataFailures)")
+                    Text("部分Immich元数据不可用；仅用独立本机校验和继续尝试，不会下载原片或把未命中当成上传。")
+                        .font(.footnote).foregroundStyle(.orange)
+                }
                 if controller.running {
                     ProgressView()
                     Button("停止扫描", role: .cancel) { controller.cancel() }.accessibilityIdentifier("local-media-cancel")

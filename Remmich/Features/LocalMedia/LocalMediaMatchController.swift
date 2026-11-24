@@ -21,6 +21,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
     private(set) var metadataMatches = 0
     private(set) var checksumMatches = 0
     private(set) var unmatched = 0
+    private(set) var metadataFailures = 0
     private(set) var enabled = false
     private(set) var revision = 0
     private(set) var permission = LocalPhotoLibraryAccess.unknown
@@ -70,7 +71,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         self.manager = manager; managerGeneration = manager.generation; scope = nextScope
         if changedScope {
             associations = [:]; revision += 1; enabled = false; access = nil; restoredNamespace = nil
-            total = 0; scanned = 0; metadataMatches = 0; checksumMatches = 0; unmatched = 0
+            total = 0; scanned = 0; metadataMatches = 0; checksumMatches = 0; unmatched = 0; metadataFailures = 0
             automaticGeneration = nil; monitor?.stop(); monitor = nil
         }
         permission = inventory.authorization
@@ -149,6 +150,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
     @discardableResult func setEnabled(_ value: Bool, using manager: LibraryManagementController) -> Task<Void, Never>? {
         guard self.manager === manager, let scope else { return nil }
         invalidateRun(); enabled = value; associations = [:]; revision += 1; publishCounts()
+        metadataFailures = 0
         access = nil; automaticGeneration = manager.generation
         if value {
             startMonitoringIfNeeded()
@@ -192,7 +194,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         let run = UUID(); generation = run; running = true
         permit.invalidate(); permit = LocalMediaSavePermit(); let writePermit = permit
         // 保留已确认映射供当前窗口/离线使用；本轮发现的变更由实际媒体reader复核，不把扫描进度当作完成。
-        total = 0; scanned = 0; unmatched = 0
+        total = 0; scanned = 0; unmatched = 0; metadataFailures = 0
         status = "正在确认照片访问权限…"
         let operation = Task {
             defer {
@@ -237,14 +239,34 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                     await Task.yield(); try validateContext()
                 }
                 status = "只读匹配Immich元数据…"
-                let records: [LocalMediaRemoteMetadataRecord] = if cloudIDs.isEmpty {
-                    []
-                } else {
-                    try await remote.localMediaMetadata(cloudIDs: cloudIDs)
+                var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
+                if !cloudIDs.isEmpty {
+                    do {
+                        let records = try await remote.localMediaMetadata(cloudIDs: cloudIDs)
+                        try validateContext()
+                        let decoded = try await metadataCandidates(records, validateContext: validateContext)
+                        try validateContext()
+                        candidates = decoded.candidates
+                        metadataFailures = decoded.rejected
+                    } catch {
+                        // metadata只是独立证明来源；半截/不可用流不提供任何候选，当前合法上下文仍可用本机字节证明。
+                        try validateContext()
+                        if error is CancellationError {
+                            throw error
+                        }
+                        if case LibraryWriteError.changedAccount = error {
+                            throw error
+                        }
+                        if case LocalMediaMetadataError.sourceChanged = error {
+                            throw error
+                        }
+                        if case LocalMediaMetadataError.permission = error {
+                            throw error
+                        }
+                        metadataFailures += 1
+                        status = "Immich元数据暂不可用，继续仅用本机校验和匹配。"
+                    }
                 }
-                try validateContext()
-                let candidates = try await metadataCandidates(records, validateContext: validateContext)
-                try validateContext()
                 var confirmedRemoteIDs = Set<UUID>()
                 for start in stride(from: 0, to: ids.count, by: 64) {
                     let batch = Array(ids[start ..< min(start + 64, ids.count)])
@@ -314,6 +336,9 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 guard saved else { throw CancellationError() }
                 restoredNamespace = scope.cacheNamespace
                 status = permission == .limited ? "已完成当前授权范围匹配并保存；未授权照片未扫描。" : "已完成匹配并保存；下次启动自动恢复，本机优先显示和播放。"
+                if metadataFailures > 0 {
+                    status += " 部分元数据不可用，已独立尝试本机校验和。"
+                }
             } catch {
                 guard generation == run, manager.generation == owner, manager.backupScope == scope else { return }
                 self.permission = inventory.authorization
@@ -343,9 +368,10 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
     }
 
     /// 同CloudID的坏metadata阻止其元数据路径；重复候选保留供领域层拒绝，每128条yield后由validateContext核验代际。
-    private func metadataCandidates(_ records: [LocalMediaRemoteMetadataRecord], validateContext: @MainActor () throws -> Void) async throws -> [String: [LocalMediaRemoteCandidate]] {
+    private func metadataCandidates(_ records: [LocalMediaRemoteMetadataRecord], validateContext: @MainActor () throws -> Void) async throws -> (candidates: [String: [LocalMediaRemoteCandidate]], rejected: Int) {
         var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
         var blocked = Set<String>()
+        var rejected = 0
         for (index, record) in records.enumerated() {
             if index.isMultiple(of: 128) {
                 await Task.yield(); try validateContext()
@@ -355,14 +381,14 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 candidates[metadata.cloudId, default: []].append(.init(assetID: record.assetID, metadata: metadata))
             } catch {
                 guard let object = try JSONSerialization.jsonObject(with: record.value) as? [String: Any], let id = object["iCloudId"] as? String else { throw LocalMediaMetadataError.invalidMetadata }
-                blocked.insert(id)
+                blocked.insert(id); rejected += 1
             }
         }
         for id in blocked {
             candidates[id] = []
         }
         try validateContext()
-        return candidates
+        return (candidates, rejected)
     }
 
     /// 同远端对象保留最新确认版本；按变化增减来源计数，避免每确认一项都全库重算。
@@ -419,6 +445,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
     private func sourcesChanged() {
         guard enabled, let manager, let scope else { return }
         invalidateRun(); associations = [:]; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
+        metadataFailures = 0
         permission = inventory.authorization
         status = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
         let run = generation; let owner = manager.generation; let writePermit = permit
