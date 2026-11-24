@@ -151,22 +151,38 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
 /// 当前账号的备份日志；不含凭据/文件字节，资源在真正执行时从授权PhotoKit重新读取。
 nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 不含任务数组的日志头；热路径只检查版本/账号，完整任务由SQLite独立行保存。
-    struct Header: Codable, Sendable {
+    nonisolated struct Header: Codable, Sendable {
         let version: Int
         let namespace: String
         let selectedAlbumIDs: [String]
         let allowCloud: Bool
+        let excludedAlbumIDs: [String]?
+
+        /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
+        init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil) {
+            self.version = version
+            self.namespace = namespace
+            self.selectedAlbumIDs = selectedAlbumIDs
+            self.allowCloud = allowCloud
+            self.excludedAlbumIDs = excludedAlbumIDs
+        }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
         func validate(namespace expected: String) throws {
-            guard version == 1, namespace == expected else { throw PhotoBackupStateError.invalidJournal }
+            let exclusions = excludedAlbumIDs ?? []
+            let validIncludes = !selectedAlbumIDs.isEmpty && selectedAlbumIDs.allSatisfy { !$0.isEmpty }
+                && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
+            guard [1, 2].contains(version), namespace == expected,
+                  exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
+                  version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
         }
     }
 
-    let version: Int
+    private(set) var version: Int
     let namespace: String
     var selectedAlbumIDs: [String]
     var allowCloud: Bool
+    private(set) var excludedAlbumIDs: [String]?
     private(set) var jobs: [PhotoBackupJob]
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
@@ -175,6 +191,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         self.namespace = namespace
         selectedAlbumIDs = []
         allowCloud = false
+        excludedAlbumIDs = nil
         jobs = []
     }
 
@@ -184,12 +201,34 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         namespace = header.namespace
         selectedAlbumIDs = header.selectedAlbumIDs
         allowCloud = header.allowCloud
+        excludedAlbumIDs = header.excludedAlbumIDs
         self.jobs = jobs
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
-        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud)
+        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs)
+    }
+
+    /// scan已验证完整包含/排除集合，allowCloud来自本轮用户选择；原子保存前取消不再属于本轮选择的未完成项。
+    /// 首次启用排除升级到格式2，让旧版本明确拒绝而非忽略规则后上传；清空规则也不自动降级格式。
+    @discardableResult mutating func applyAlbumScan(_ scan: PhotoBackupAlbumScan, allowCloud: Bool) throws -> Int {
+        try validate(namespace: namespace)
+        guard !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        guard scan.selection.included.union(scan.selection.excluded).allSatisfy({ !$0.isEmpty }) else {
+            throw PhotoBackupStateError.invalidJournal
+        }
+        selectedAlbumIDs = scan.selection.included.sorted()
+        if !scan.selection.excluded.isEmpty {
+            version = 2
+        }
+        excludedAlbumIDs = version == 1 ? nil : scan.selection.excluded.sorted()
+        self.allowCloud = allowCloud
+        let eligibleSources = Set(scan.sources)
+        for index in jobs.indices where !eligibleSources.contains(jobs[index].source) {
+            jobs[index].cancel()
+        }
+        return try enqueue(scan.sources)
     }
 
     /// expected为当前认证账号namespace；拒绝跨账号、未知版本或重复任务ID的日志，不静默清空。
