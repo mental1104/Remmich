@@ -1040,13 +1040,21 @@ struct AssetViewerView: View {
         .frame(width: pageSize.width, height: pageSize.height)
         .animation(infoAnimation, value: showsInfo)
         .animation(infoAnimation, value: targetInfoHeight)
-        .accessibilityIdentifier(
-            isLandscape
-                ? (infoProgress > 0.5
-                    ? "asset-viewer-landscape-split"
-                    : "asset-viewer-landscape")
-                : "asset-viewer-portrait"
-        )
+        .background {
+            if asset.id == session.selectedAssetID {
+                layoutAccessibilityMarker(isLandscape: isLandscape, infoVisible: infoProgress > 0.5)
+            }
+        }
+    }
+
+    /// 当前选中页的方向标记单独成为AX叶子，避免容器identifier传播覆盖照片页/实际像素标记。
+    /// isLandscape与infoVisible只描述当前布局；返回禁止命中的明确元素，不替代真实照片的可见性证明。
+    private func layoutAccessibilityMarker(isLandscape: Bool, infoVisible: Bool) -> some View {
+        Color.clear
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Viewer layout")
+            .accessibilityIdentifier(isLandscape ? (infoVisible ? "asset-viewer-landscape-split" : "asset-viewer-landscape") : "asset-viewer-portrait")
+            .allowsHitTesting(false)
     }
 
     private func mediaPage(

@@ -107,6 +107,14 @@ final class MediaLibraryController {
         savedPhotosLibrary = nil
     }
 
+    #if DEBUG
+        /// searchUITestPipeline是宿主独立内存/拒绝网络的管线；exports仍为隔离临时依赖，不配置真实账号或队列。
+        convenience init(searchUITestPipeline: ImagePipeline, exports: MediaExportController) {
+            self.init(exports: exports)
+            pipeline = searchUITestPipeline
+        }
+    #endif
+
     /// Saved Photos仍由独立库和scope提供媒体；专用远端配对helper在此模式直接miss，不复用原片导出。
     init(savedPhotosLibrary: SavedPhotosLibrary, scope: MediaAccountScope) {
         self.savedPhotosLibrary = savedPhotosLibrary

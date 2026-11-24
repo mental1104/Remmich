@@ -1,11 +1,27 @@
 #if DEBUG
     import Foundation
+    import Nuke
     import Testing
+    import UIKit
     @testable import Remmich
 
     /// 实际DEBUG读取器必须给出可观察的进入屏障，并在忽略取消的迟到响应下保留真实Store发布隔离。
     @Suite("Search UI fixture lifecycle")
     @MainActor struct SearchUIFixtureLifecycleTests {
+        /// 真实搜索宿主必须有独立内存pipeline；否则格子可见但原生Viewer会在pipeline guard永久停留加载态。
+        @Test func fixturePipelineDecodesNativePreviewWithoutAccountScope() async throws {
+            let fixture = SearchUIFixtureHarness()
+            defer { fixture.media.clearAll() }
+            let pipeline = try #require(fixture.media.pipeline)
+            #expect(fixture.media.scope == nil && fixture.media.activeAPIURL == nil)
+            #expect(pipeline.configuration.dataCache == nil)
+            let data = PreviewMediaFixtures.data(for: "search-alpha-1", derivative: .preview)
+            let request = ImageRequest(id: "isolated-search-preview", data: { data })
+            #expect(request.url == nil)
+            let result = try await pipeline.imageTask(with: request).response
+            #expect(result.image.size == CGSize(width: 300, height: 600))
+        }
+
         /// started回调内释放比continuation安装更早；该信号必须保留，不能挂起或伪造一个完成页。
         @Test func releaseDuringStartedCallbackIsNotLost() async throws {
             let probe = SearchFixtureProbe(releaseDuringReport: true)

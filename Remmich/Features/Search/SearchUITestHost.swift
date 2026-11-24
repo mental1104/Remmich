@@ -1,7 +1,9 @@
 #if DEBUG
     import Foundation
+    import Nuke
     import Observation
     import SwiftUI
+    import UIKit
 
     /// 仅DEBUG且两个明确参数同时存在才启用；正常/发布版搜索不能读取这些合成资产。
     enum SearchUIFixtureLaunch {
@@ -31,6 +33,17 @@
                                searchCompletion: { fixture.searchFinished($0) })
                 }
                 .navigationTitle("Search")
+                .toolbar {
+                    // 正式账号toolbar默认只在iPad显示；phone合成宿主需要自己的明确切号入口。
+                    if UIDevice.current.userInterfaceIdiom == .phone {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button { fixture.switchAccount() } label: {
+                                Label("Account", systemImage: "person.crop.circle")
+                            }
+                            .accessibilityIdentifier("account-button")
+                        }
+                    }
+                }
             }
         }
     }
@@ -53,7 +66,11 @@
             let transfers = LibraryTransferQueue(rootURL: root.appending(path: "transfers"), nativeTasksProvider: { [] },
                                                  sessionIdentifier: "io.github.espeonblue.Remmich.search-ui-unused")
             let exports = MediaExportController(store: .init(databaseURL: root.appending(path: "unused.sqlite")), transfers: transfers)
-            media = MediaLibraryController(exports: exports)
+            var configuration = ImagePipeline.Configuration()
+            configuration.imageCache = ImageCache(costLimit: 8 * 1024 * 1024, countLimit: 32)
+            configuration.dataCache = nil
+            configuration.dataLoader = SearchUIFixtureDataLoader()
+            media = MediaLibraryController(searchUITestPipeline: ImagePipeline(configuration: configuration), exports: exports)
             configure(account: "alpha")
         }
 
@@ -93,6 +110,23 @@
                 }
             }
         }
+    }
+
+    /// 合成宿主的媒体数据边界只拒绝URL请求；真实预览来自既有内存data闭包，绝不转发HTTP。
+    private final nonisolated class SearchUIFixtureDataLoader: DataLoading, Sendable {
+        /// request保持原值且不连接网络；若Viewer误入URL通道，明确失败而非生成假成功像素。
+        func loadData(with _: URLRequest, didReceiveData _: @escaping @Sendable (Data, URLResponse) -> Void,
+                      completion: @escaping @Sendable (Error?) -> Void) -> any Cancellable
+        {
+            completion(URLError(.unsupportedURL))
+            return SearchUIFixtureCancellation()
+        }
+    }
+
+    /// 同步拒绝的数据源没有底层会话或延迟工作。
+    private nonisolated struct SearchUIFixtureCancellation: Cancellable {
+        /// 不操作任何真实Photos、网络或导出任务。
+        func cancel() {}
     }
 
     /// 合成读取器可控地产生结果/空态/分页失败和迟到响应，不执行HTTP或媒体写入。

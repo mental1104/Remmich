@@ -261,10 +261,11 @@ struct SearchView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .scrollDismissesKeyboard(.interactively)
+        // 固定原生导航栏字段，避免自动底部搜索工具栏在横屏键盘动画中失去可访问性命中。
         .searchable(text: Binding(get: { query.text }, set: {
             query.useSearchText($0)
             referencePreview = nil
-        }), prompt: Text(query.mode.title))
+        }), placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in

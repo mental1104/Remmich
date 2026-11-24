@@ -77,10 +77,7 @@ final class SearchAcceptanceUITests: XCTestCase {
         let app = launch()
         submit("late", in: app)
         assertLabel("started late", identifier: "search-test-request", in: app)
-        // 部分系统在搜索激活时隐藏导航栏账号按钮；退出输入不释放旧请求的fixture gate。
-        if !app.buttons["account-button"].isHittable, app.buttons["Cancel"].exists {
-            app.buttons["Cancel"].tap()
-        }
+        dismissSearchIfAccountHidden(in: app)
         app.buttons["account-button"].tap()
         assertLabel("Synthetic account beta", identifier: "search-test-account", in: app)
         submit("synthetic", in: app)
@@ -148,6 +145,17 @@ final class SearchAcceptanceUITests: XCTestCase {
             field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
         }
         field.typeText(query + "\n")
+    }
+
+    /// 搜索激活可隐藏导航栏账号入口；同时识别旧Cancel和本轮真实AX中的close，不释放late响应gate。
+    /// app仍是合成宿主；调用后保留原account按钮点击与所有账号代际断言，缺入口照常失败。
+    @MainActor private func dismissSearchIfAccountHidden(in app: XCUIApplication) {
+        guard !app.buttons["account-button"].isHittable else { return }
+        if app.buttons["Cancel"].exists {
+            app.buttons["Cancel"].tap()
+        } else if app.buttons["close"].exists {
+            app.buttons["close"].tap()
+        }
     }
 
     /// 在有限次数滚动内露出指定元素；无限滚动会掩盖布局回归，因此失败即报告。
