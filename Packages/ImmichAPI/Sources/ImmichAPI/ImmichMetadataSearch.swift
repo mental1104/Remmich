@@ -2,6 +2,7 @@ import Foundation
 
 /// 当前账户可用的搜索候选字段；不是公共地理编码服务。
 public enum ImmichSearchSuggestionKind: String, Sendable {
+    case country, state
     case city
     case cameraMake = "camera-make"
     case cameraModel = "camera-model"
@@ -31,6 +32,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var text = ""
     public var mode: Mode = .fileName
     public var media: Media = .all
+    public var country = ""
+    public var state = ""
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""

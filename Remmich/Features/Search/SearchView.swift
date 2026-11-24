@@ -40,6 +40,8 @@ struct SearchView: View {
                                 Text(mode.title).tag(mode)
                             }
                         }
+                        SearchChoiceField(title: "Country", text: $query.country, values: suggestions[.country])
+                        SearchChoiceField(title: "State or province", text: $query.state, values: suggestions[.state])
                         SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
                         SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
                         SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
@@ -157,7 +159,7 @@ struct SearchView: View {
         store.invalidate()
         guard !invalidDateRange, !invalidSmartCombination,
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
-              || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty
+              || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
               || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
@@ -211,12 +213,14 @@ struct SearchView: View {
         }
         do {
             async let cities = source.searchSuggestions(.city, query: requested)
+            async let countries = source.searchSuggestions(.country, query: requested)
+            async let states = source.searchSuggestions(.state, query: requested)
             async let makes = source.searchSuggestions(.cameraMake, query: requested)
             async let models = source.searchSuggestions(.cameraModel, query: requested)
-            let values = try await (cities, makes, models)
+            let values = try await (cities, makes, models, countries, states)
             try Task.checkCancellation()
             guard owner == media.management.generation, requested.cameraMake == query.cameraMake else { return }
-            suggestions = [.city: values.0, .cameraMake: values.1, .cameraModel: values.2]
+            suggestions = [.city: values.0, .cameraMake: values.1, .cameraModel: values.2, .country: values.3, .state: values.4]
         } catch {
             guard owner == media.management.generation, !Task.isCancelled else { return }
             suggestionError = "Filter choices could not be loaded. You can still enter values manually."

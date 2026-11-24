@@ -313,6 +313,7 @@ public actor ImmichClient {
             cursor: cursor,
             filter: .init(
                 city: query.city.isEmpty ? nil : .init(eq: query.city),
+                country: query.country.isEmpty ? nil : .init(eq: query.country),
                 description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
                 hasAlbums: query.hasAlbums.map { .init(eq: $0) },
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
@@ -321,6 +322,7 @@ public actor ImmichClient {
                 originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
                 originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
                 personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+                state: query.state.isEmpty ? nil : .init(eq: query.state),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
                 visibility: .init(eq: .timeline),
@@ -371,12 +373,14 @@ public actor ImmichClient {
         }
         let output = try await makeClient().searchSmart(.init(body: .json(.init(
             city: query.city.isEmpty ? nil : query.city,
+            country: query.country.isEmpty ? nil : query.country,
             make: query.cameraMake.isEmpty ? nil : query.cameraMake,
             model: query.cameraModel.isEmpty ? nil : query.cameraModel,
             page: pageNumber,
             personIds: query.personIDs.isEmpty ? nil : query.personIDs,
             query: text,
             size: size,
+            state: query.state.isEmpty ? nil : query.state,
             takenAfter: after,
             takenBefore: before,
             _type: query.media == .all ? nil : query.media == .image ? .IMAGE : .VIDEO,

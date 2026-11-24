@@ -31,6 +31,8 @@ nonisolated enum NativeSearchPresetCodec {
             result.query = .init(value: text, type: kind)
         }
         result.city = query.city.isEmpty ? nil : query.city
+        result.country = query.country.isEmpty ? nil : query.country
+        result.state = query.state.isEmpty ? nil : query.state
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
         result.personIds = query.personIDs.isEmpty ? nil : query.personIDs
@@ -40,7 +42,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.exifConditions = query.exifConditions.isEmpty ? nil : query.exifConditions
         result.takenAfter = query.takenAfter.map { formatter(timeZone: query.timeZone).string(from: $0) }
         result.takenBefore = query.takenBefore.map { formatter(timeZone: query.timeZone).string(from: $0) }
-        guard result.query != nil || result.city != nil || result.make != nil || result.model != nil
+        guard result.query != nil || result.city != nil || result.country != nil || result.state != nil || result.make != nil || result.model != nil
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
         else { throw NativeSearchPresetConversionError.empty }
@@ -51,7 +53,7 @@ nonisolated enum NativeSearchPresetCodec {
     /// conditions为完整登记，timeZone为使用者的日历时区；返回独立查询，调用方一次性替换。
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
-        guard conditions.queryAssetId == nil, conditions.country == nil, conditions.state == nil,
+        guard conditions.queryAssetId == nil,
               conditions.lensModel == nil, conditions.deviceModels == nil, conditions.isArchive == nil,
               conditions.isFavorite == nil, conditions.isPanorama == nil, conditions.mediaCategory == nil,
               conditions.resolution == nil, conditions.rating == .missing, conditions.tagIds == .missing
@@ -69,10 +71,12 @@ nonisolated enum NativeSearchPresetCodec {
             case .smart: .smart
             }
         }
-        for value in [conditions.city, conditions.make, conditions.model].compactMap(\.self) {
+        for value in [conditions.country, conditions.state, conditions.city, conditions.make, conditions.model].compactMap(\.self) {
             guard !value.isEmpty, value.utf16.count <= 256 else { throw NativeSearchPresetConversionError.invalid }
         }
         query.city = conditions.city ?? ""
+        query.country = conditions.country ?? ""
+        query.state = conditions.state ?? ""
         query.cameraMake = conditions.make ?? ""
         query.cameraModel = conditions.model ?? ""
         if let people = conditions.personIds {

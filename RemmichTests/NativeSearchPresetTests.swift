@@ -53,6 +53,8 @@ struct NativeSearchPresetTests {
         var conditions = NativeSearchPresetConditions()
         conditions.query = .init(value: "Synthetic", type: .ocr)
         conditions.city = "Synthetic City"
+        conditions.country = "Synthetic Country"
+        conditions.state = "Synthetic State"
         conditions.make = "Synthetic Make"
         conditions.model = "Synthetic Model"
         conditions.personIds = ["11111111-1111-4111-8111-111111111111"]
@@ -71,6 +73,8 @@ struct NativeSearchPresetTests {
         #expect(captured.takenAfter == "2026-03-08")
         #expect(captured.takenBefore == "2026-11-01")
         #expect(captured.city == conditions.city)
+        #expect(captured.country == conditions.country)
+        #expect(captured.state == conditions.state)
         #expect(captured.make == conditions.make)
         #expect(captured.model == conditions.model)
         #expect(captured.orientation == .landscape)

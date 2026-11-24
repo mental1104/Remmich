@@ -6,7 +6,7 @@ import Testing
 @Suite("Search suggestions")
 struct SearchSuggestionTests {
     /// kind为可选字段；只有型号候选带厂商，鉴权与API根路径必须保留。
-    @Test(arguments: [ImmichSearchSuggestionKind.city, .cameraMake, .cameraModel])
+    @Test(arguments: [ImmichSearchSuggestionKind.country, .state, .city, .cameraMake, .cameraModel])
     func readsAccountScopedChoices(_ kind: ImmichSearchSuggestionKind) async throws {
         let transport = ImmichQueuedReadTransport { request, operation in
             #expect(operation == "getSearchSuggestions")

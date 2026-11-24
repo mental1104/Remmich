@@ -28,6 +28,17 @@ struct SearchModesTests {
         #expect(result.continuation == .page(3))
     }
 
+    /// 地点字段在旧式smart使用官方平铺请求，不因更换模式丢掉国家、省州筛选。
+    @Test func smartSearchPreservesRegions() async throws {
+        var query = ImmichMetadataSearch()
+        query.mode = .smart
+        query.text = "synthetic"
+        query.country = "Synthetic Country"
+        query.state = "Synthetic State"
+        let result = try await makeClient(mode: .smart, expectRegions: true).search(query, continuation: .page(2))
+        #expect(result.continuation == .page(3))
+    }
+
     /// raw为异常服务器页码，重复/倒退/非数字必须拒绝，避免无限重取。
     @Test(arguments: ["2", "1", "invalid"])
     func rejectsInvalidSmartPage(_ raw: String) async throws {
@@ -48,9 +59,9 @@ struct SearchModesTests {
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .cursor("opaque")) }
     }
 
-    /// mode选择合成断言，nextPage为可注入的合成响应；返回SDK客户端，GET队列不应被调用。
-    private func makeClient(mode: ImmichMetadataSearch.Mode, nextPage: String = "3") throws -> ImmichClient {
-        let transport = ImmichQueuedReadTransport(searchTransport: ModeTransport(mode: mode, nextPage: nextPage)) { _, _ in
+    /// mode选择合成断言，nextPage为合成响应，expectRegions要求保留地点；返回客户端，GET队列不应被调用。
+    private func makeClient(mode: ImmichMetadataSearch.Mode, nextPage: String = "3", expectRegions: Bool = false) throws -> ImmichClient {
+        let transport = ImmichQueuedReadTransport(searchTransport: ModeTransport(mode: mode, nextPage: nextPage, expectRegions: expectRegions)) { _, _ in
             Issue.record("Search POST must not enter the GET queue")
             throw CancellationError()
         }
@@ -62,6 +73,7 @@ struct SearchModesTests {
 private struct ModeTransport: ClientTransport {
     let mode: ImmichMetadataSearch.Mode
     let nextPage: String
+    let expectRegions: Bool
 
     /// request/body是SDK输出，baseURL是验证过的API根；按模式验证operationID并返回合成响应。
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL _: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
@@ -75,6 +87,10 @@ private struct ModeTransport: ClientTransport {
             #expect(json["query"] as? String == "synthetic")
             #expect(json["page"] as? Int == 2)
             #expect(json["filter"] == nil && json["cursor"] == nil)
+            if expectRegions {
+                #expect(json["country"] as? String == "Synthetic Country")
+                #expect(json["state"] as? String == "Synthetic State")
+            }
         } else {
             #expect(operationID == "searchAssets")
             #expect(request.path == "/search/metadata")

@@ -448,6 +448,8 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
         dto.media = switch query.media { case .all: .all; case .image: .image; case .video: .video }
         dto.city = query.city
+        dto.country = query.country
+        dto.state = query.state
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }

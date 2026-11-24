@@ -2,6 +2,7 @@ import Foundation
 
 /// 界面允许加载的账号内候选，不暴露SDK枚举。
 nonisolated enum NativeSearchSuggestionKind: String, Sendable {
+    case country, state
     case city
     case cameraMake = "camera-make"
     case cameraModel = "camera-model"
@@ -31,6 +32,8 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var text = ""
     var mode: Mode = .fileName
     var media: Media = .all
+    var country = ""
+    var state = ""
     var city = ""
     var cameraMake = ""
     var cameraModel = ""

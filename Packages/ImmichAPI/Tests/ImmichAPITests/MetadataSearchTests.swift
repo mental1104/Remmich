@@ -13,6 +13,8 @@ struct MetadataSearchTests {
         query.text = " synthetic "
         query.media = .image
         query.city = "Test City"
+        query.country = "Test Country"
+        query.state = "Test State"
         query.cameraMake = "Test Make"
         query.cameraModel = "Test Model"
         query.personIDs = ["11111111-1111-4111-8111-111111111111"]
@@ -74,6 +76,8 @@ private struct SearchTransport: ClientTransport {
         #expect((filter["originalFileName"] as? [String: String])?["like"] == "synthetic")
         #expect((filter["type"] as? [String: String])?["eq"] == "IMAGE")
         #expect((filter["city"] as? [String: String])?["eq"] == "Test City")
+        #expect((filter["country"] as? [String: String])?["eq"] == "Test Country")
+        #expect((filter["state"] as? [String: String])?["eq"] == "Test State")
         #expect((filter["make"] as? [String: String])?["eq"] == "Test Make")
         #expect((filter["model"] as? [String: String])?["eq"] == "Test Model")
         #expect((filter["personIds"] as? [String: [String]])?["any"] == ["11111111-1111-4111-8111-111111111111"])
