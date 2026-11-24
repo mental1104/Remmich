@@ -5,7 +5,7 @@ import Testing
 /// 真实SQLite与合成磁盘资源经过实际worker，检查上传副作用前的检查点、完整配对、未知结果停止及取消。
 @Suite("Persistent foreground backup worker")
 struct PhotoBackupWorkerTests {
-    /// Live Photo两次上传和最终回读分别只能看到已落盘的motion/primary/verifying阶段。
+    /// Live Photo两次上传和主体/动态最终回读分别只能看到已落盘的motion/primary/verifying阶段。
     @Test @MainActor func persistsEachCheckpointAndVerifiesTheCompletePair() async throws {
         let fixture = try await BackupWorkerFixture(kind: .livePhoto)
         defer { fixture.removeFiles() }
@@ -15,10 +15,41 @@ struct PhotoBackupWorkerTests {
         let restored = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
         #expect(result.completed == 1 && result.failed == 0 && !result.stopped)
         #expect(restored.jobs.first?.stage == .completed)
-        #expect(await transport.observedStages == [.uploadingMotion, .uploadingPrimary, .verifying])
+        #expect(await transport.observedStages == [.uploadingMotion, .uploadingPrimary, .verifying, .verifying])
+        #expect(await transport.assetReads == [fixture.primaryID.uuidString, fixture.motionID.uuidString])
         #expect(await transport.hiddenFlags == [true, false])
         #expect(await transport.primaryPair == fixture.motionID.uuidString)
         #expect(!FileManager.default.fileExists(atPath: fixture.exportDirectory.path))
+    }
+
+    /// 主体已确认正确配对，但动态资源最后回读已回收/身份/类型/拥有者错误，不能完成或重试上传。
+    @Test(arguments: [BackupMotionResponse.trashed, .wrongID, .wrongType, .wrongOwner])
+    @MainActor func rejectsInvalidMotionAtFinalRead(_ response: BackupMotionResponse) async throws {
+        let fixture = try await BackupWorkerFixture(kind: .livePhoto, secondJob: true)
+        defer { fixture.removeFiles() }
+        let transport = fixture.transport(motionResponse: response)
+        let result = try await fixture.worker.run(scope: fixture.scope, userID: "synthetic", allowCloud: false,
+                                                  client: transport, validateContext: {}, progress: { _, _ in })
+        let journal = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+        #expect(result.completed == 0 && result.failed == 1 && result.stopped)
+        #expect(journal.jobs.map(\.stage) == [.failed, .paused])
+        #expect(journal.jobs.first?.failure == .unconfirmedResponse)
+        #expect(journal.jobs.first?.primaryAssetID == fixture.primaryID && journal.jobs.first?.motionAssetID == fixture.motionID)
+        #expect(await transport.uploads == 2)
+        #expect(await transport.assetReads == [fixture.primaryID.uuidString, fixture.motionID.uuidString])
+        #expect(await transport.observedStages == [.uploadingMotion, .uploadingPrimary, .verifying, .verifying])
+    }
+
+    /// 归档的有效动态资源仍可完成既有配对；备份验证不擅自将其改为hidden或timeline。
+    @Test @MainActor func acceptsAnArchivedVerifiedMotion() async throws {
+        let fixture = try await BackupWorkerFixture(kind: .livePhoto)
+        defer { fixture.removeFiles() }
+        let transport = fixture.transport(motionResponse: .archived)
+        let result = try await fixture.worker.run(scope: fixture.scope, userID: "synthetic", allowCloud: false,
+                                                  client: transport, validateContext: {}, progress: { _, _ in })
+        #expect(result.completed == 1 && result.failed == 0 && !result.stopped)
+        #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.first?.stage == .completed)
+        #expect(await transport.assetReads == [fixture.primaryID.uuidString, fixture.motionID.uuidString])
     }
 
     /// 主体重复但关联不符，或连接失败时只保留部分回执并暂停后续任务，均不能计为完成或自动重发。
@@ -143,9 +174,11 @@ struct PhotoBackupWorkerTests {
     }
 
     /// 参数选择当前例的故障点；仅传Sendable值给actor构造，不跨Actor传递整个主线程fixture。
-    func transport(mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false) -> BackupWorkerTransport {
+    func transport(mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false,
+                   motionResponse: BackupMotionResponse = .valid) -> BackupWorkerTransport
+    {
         .init(store: store, scope: scope, motionID: motionID, primaryID: primaryID, kind: kind,
-              mismatch: mismatch, networkFailure: networkFailure, held: held)
+              mismatch: mismatch, networkFailure: networkFailure, held: held, motionResponse: motionResponse)
     }
 }
 
@@ -173,6 +206,9 @@ struct PhotoBackupWorkerTests {
     }
 }
 
+/// 动态资源仅在最终GET中改变状态，模拟上传/查重之后的变化，不伪造主体关联或绕过真实worker。
+nonisolated enum BackupMotionResponse: Equatable, Sendable { case valid, archived, trashed, wrongID, wrongType, wrongOwner }
+
 /// 注入上传回执/网络失败和等待门；真实worker、SQLite及状态转换都不替换。
 private actor BackupWorkerTransport: PhotoBackupUploading {
     let store: SQLiteLibraryIndexStore
@@ -183,6 +219,7 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
     let networkFailure: Bool
     let held: Bool
     let kind: PhotoBackupSource.Kind
+    let motionResponse: BackupMotionResponse
     private var gate: CheckedContinuation<Void, Never>?
     private var observers: [CheckedContinuation<Bool, Never>] = []
     private var didHold = false
@@ -191,13 +228,15 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
     private(set) var observedStages: [PhotoBackupJob.Stage] = []
     private(set) var hiddenFlags: [Bool] = []
     private(set) var primaryPair: String?
+    private(set) var assetReads: [String] = []
 
     /// store/scope为隔离账号数据库，两个ID是合成回执，kind指定主体类型；其余参数选择明确故障。
     init(store: SQLiteLibraryIndexStore, scope: MediaAccountScope, motionID: UUID, primaryID: UUID, kind: PhotoBackupSource.Kind,
-         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false)
+         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false, motionResponse: BackupMotionResponse = .valid)
     {
         self.store = store; self.scope = scope; self.motionID = motionID; self.primaryID = primaryID; self.kind = kind
         self.mismatch = mismatch; self.networkFailure = networkFailure; self.held = held
+        self.motionResponse = motionResponse
     }
 
     /// 与生产上传签名一致；读取SQLite证明检查点先于网络，按hidden区分动态/主体回执。
@@ -223,10 +262,18 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
         return .init(id: (hidden ? motionID : primaryID).uuidString, status: "duplicate")
     }
 
-    /// id保持真实主体身份，mismatch仅改变关联；核对前持久阶段必须是verifying。
+    /// id区分主体与动态请求；动态故障只影响最终GET，核对前持久阶段始终为verifying。
     func asset(_ id: String) async throws -> ManagedAsset {
+        assetReads.append(id)
         if let stage = try await store.loadPhotoBackups(scope: scope).jobs.first?.stage {
             observedStages.append(stage)
+        }
+        if UUID(uuidString: id) == motionID {
+            return .init(id: (motionResponse == .wrongID ? UUID() : motionID).uuidString,
+                         ownerId: motionResponse == .wrongOwner ? "other-synthetic" : "synthetic",
+                         isFavorite: false, visibility: motionResponse == .archived ? "archive" : "hidden",
+                         isTrashed: motionResponse == .trashed, type: motionResponse == .wrongType ? "IMAGE" : "VIDEO",
+                         originalFileName: "synthetic.mov", livePhotoVideoId: nil, exifInfo: nil)
         }
         return .init(id: id, ownerId: "synthetic", isFavorite: false, visibility: "timeline", isTrashed: false,
                      type: kind == .video ? "VIDEO" : "IMAGE", originalFileName: "synthetic.jpg",

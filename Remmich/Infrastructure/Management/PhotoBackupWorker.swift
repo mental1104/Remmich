@@ -93,10 +93,21 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                     else {
                         throw LibraryWriteError.malformedResponse
                     }
-                    if job.source.kind == .livePhoto,
-                       confirmed.livePhotoVideoId.flatMap(UUID.init(uuidString:)) != job.motionAssetID
-                    {
-                        throw PhotoBackupExportError(reason: .livePhotoMismatch)
+                    if job.source.kind == .livePhoto {
+                        guard let motionID = job.motionAssetID,
+                              confirmed.livePhotoVideoId.flatMap(UUID.init(uuidString:)) == motionID
+                        else {
+                            throw PhotoBackupExportError(reason: .livePhotoMismatch)
+                        }
+                        // 主体关联不代表动态资源当前仍可用；完成前独立fresh回读，保留verifying检查点。
+                        let motion = try await client.asset(motionID.uuidString)
+                        try checkContext(validateContext)
+                        guard UUID(uuidString: motion.id) == motionID, motion.ownerId == userID,
+                              motion.type == "VIDEO", !motion.isTrashed
+                        else {
+                            throw LibraryWriteError.malformedResponse
+                        }
+                        // 既有动态视频可能归档，不强制hidden；两次读取之间仍没有服务端CAS/原子快照。
                     }
                     try job.confirmVerifiedReceipt()
                     try await checkpoint(job, scope: scope, validateContext: validateContext)

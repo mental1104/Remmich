@@ -35,6 +35,8 @@ private nonisolated let takeoverUserID = "99999999-9999-4999-8999-999999999999"
 private nonisolated let takeoverMotionBytes = Data("synthetic takeover motion\n".utf8)
 private nonisolated let takeoverPrimaryBytes = Data("synthetic takeover primary\n".utf8)
 private nonisolated let takeoverAssetJSON = #"{"id":"22222222-2222-4222-8222-222222222222","ownerId":"99999999-9999-4999-8999-999999999999","isFavorite":false,"visibility":"timeline","isTrashed":false,"type":"IMAGE","originalFileName":"synthetic.jpg","livePhotoVideoId":"11111111-1111-4111-8111-111111111111","exifInfo":null}"#
+/// 动态回读使用独立VIDEO对象；不能把still的正确关联当作动态资源存在/非回收站的证据。
+private nonisolated let takeoverMotionAssetJSON = #"{"id":"11111111-1111-4111-8111-111111111111","ownerId":"99999999-9999-4999-8999-999999999999","isFavorite":false,"visibility":"hidden","isTrashed":false,"type":"VIDEO","originalFileName":"synthetic.mov","livePhotoVideoId":null,"exifInfo":null}"#
 
 /// 每例拥有随机账号namespace、独立SQLite连接、两个真实manager/controller和有限HTTP响应脚本。
 @MainActor private final class BackupTakeoverFixture {
@@ -145,11 +147,12 @@ private nonisolated let takeoverAssetJSON = #"{"id":"22222222-2222-4222-8222-222
         #expect(exporter.directories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
 
         let requests = await script.requests()
-        try #require(requests.count == 5)
-        #expect(requests.map(\.job.stage) == [.uploadingMotion, .uploadingPrimary, .uploadingMotion, .uploadingPrimary, .verifying])
-        #expect(requests.map(\.job.attempts) == [1, 1, 2, 2, 2])
+        try #require(requests.count == 6)
+        #expect(requests.map(\.job.stage) == [.uploadingMotion, .uploadingPrimary, .uploadingMotion, .uploadingPrimary, .verifying, .verifying])
+        #expect(requests.map(\.job.attempts) == [1, 1, 2, 2, 2, 2])
         #expect(requests[2].job.motionAssetID == takeoverMotionID && requests[2].job.primaryAssetID == nil)
         #expect(requests[4].job.motionAssetID == takeoverMotionID && requests[4].job.primaryAssetID == takeoverPrimaryID)
+        #expect(requests[5].job.motionAssetID == takeoverMotionID && requests[5].job.primaryAssetID == takeoverPrimaryID)
         var correlations = Set<String>()
         for index in 0 ..< 4 {
             let checksum = index.isMultiple(of: 2) ? takeoverMotionChecksum : takeoverPrimaryChecksum
@@ -159,6 +162,8 @@ private nonisolated let takeoverAssetJSON = #"{"id":"22222222-2222-4222-8222-222
         }
         #expect(requests[4].request.method == "GET" && requests[4].request.url == endpoint.appending(path: "assets/\(takeoverPrimaryID.uuidString)"))
         #expect(requests[4].request.body == nil && requests[4].request.contentType == nil)
+        #expect(requests[5].request.method == "GET" && requests[5].request.url == endpoint.appending(path: "assets/\(takeoverMotionID.uuidString)"))
+        #expect(requests[5].request.authorization == "Bearer takeover-fixture" && requests[5].request.body == nil && requests[5].request.contentType == nil)
 
         // 迟到服务器响应真正退出协议任务后再核对，避免仅在释放gate前比较快照造成假通过。
         let encoder = JSONEncoder()
@@ -169,7 +174,7 @@ private nonisolated let takeoverAssetJSON = #"{"id":"22222222-2222-4222-8222-222
         let afterLate = try await store.loadPhotoBackups(scope: scope)
         #expect(try encoder.encode(afterLate) == beforeLate)
         #expect(firstManager.revision == 0 && waitingManager.revision == 1)
-        #expect(await script.requests().count == 5)
+        #expect(await script.requests().count == 6)
     }
 
     /// 即使超时/断言提前抛错，也取消实际任务和URLSession，并释放所有响应/观察门。
@@ -284,7 +289,7 @@ private nonisolated struct TakeoverDuplicateResponse: Encodable {
     let results: [Item]
 }
 
-/// 固定五次HTTP交换并在旧主帧查重处挂起；业务失败或测试取消也会唤醒所有观察者。
+/// 固定六次HTTP交换并在旧主帧查重处挂起；最后still/motion回读均在真实verifying检查点。
 private actor TakeoverHTTPScript {
     private let store: SQLiteLibraryIndexStore
     private let scope: MediaAccountScope
@@ -303,19 +308,20 @@ private actor TakeoverHTTPScript {
         self.store = store; self.scope = scope; self.liveJobID = liveJobID
     }
 
-    /// request为真实Bearer请求，endpoint为隔离API根；按固定motion/primary/motion/primary/GET序列回传字节。
+    /// request为真实Bearer请求，endpoint为隔离API根；四次查重后依次GET still/motion，不跳过动态核对。
     func response(_ request: TakeoverRequest, endpoint: URL) async throws -> TakeoverReply {
         guard !aborted else { throw CancellationError() }
         let step = observations.count
-        guard step < 5, request.authorization == "Bearer takeover-fixture", request.cookie == nil else { throw URLError(.badServerResponse) }
+        guard step < 6, request.authorization == "Bearer takeover-fixture", request.cookie == nil else { throw URLError(.badServerResponse) }
         let journal = try await store.loadPhotoBackups(scope: scope)
         guard !aborted else { throw CancellationError() }
         guard let job = journal.jobs.first(where: { $0.id == liveJobID }) else { throw PhotoBackupStateError.invalidTransition }
         observations.append(.init(request: request, job: job))
-        if step == 4 {
-            guard request.method == "GET", request.url == endpoint.appending(path: "assets/\(takeoverPrimaryID.uuidString)"),
+        if step >= 4 {
+            let id = step == 4 ? takeoverPrimaryID : takeoverMotionID
+            guard request.method == "GET", request.url == endpoint.appending(path: "assets/\(id.uuidString)"),
                   request.body == nil else { throw URLError(.badServerResponse) }
-            return .init(step: step, data: Data(takeoverAssetJSON.utf8))
+            return .init(step: step, data: Data((step == 4 ? takeoverAssetJSON : takeoverMotionAssetJSON).utf8))
         }
         guard request.method == "POST", request.url == endpoint.appending(path: "assets/bulk-upload-check"),
               request.contentType == "application/json", let body = request.body else { throw URLError(.badServerResponse) }

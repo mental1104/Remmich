@@ -4,6 +4,13 @@
 - Qualify the queue total mutation with self inside the escaping coordinator closure. This preserves the MainActor boundary, queue selection and upload semantics; no compiler check is disabled. The independent viewer repair is coordinated separately before one new candidate CI.
 - Scoped SwiftFormat/diff checks passed; repaired Swift compilation awaits the next actual run. No server/API/database/production/signing change. Rollback this isolated source repair restores the known compiler error.
 
+## 2026-11-24: Verify current Live Photo motion before confirming a backup
+
+- Source: codex/fix-backup-motion-verification from frozen62623eb; upstream remains672f02e. Independent follow-up; no currently tested head, server/API/production, workflow, push or CI change.
+- After still identity/owner/type/non-trash/link checks, fresh GET motion and require the recorded UUID, same owner, VIDEO and non-trash. Keep verifying until both checks finish; allow archived motion without rewriting visibility. Failed reads preserve receipts and pause remaining work with no retry. Sequential reads are not CAS/atomic pairing and concurrent changes can still follow either read.
+- Add real-SQLite worker cases for trashed/wrong ID/type/owner plus normal/archived motion. Real Controller/coordinator/SQLite/URLSession fixtures now require six exchanges and independent still/motion GETs at verifying; preserve counters and old-response rejection. Scoped SwiftFormat0.64.5, whitespace and fixture-JSON checks passed; Swift tests and real-service HTTP/media/device acceptance remain unexecuted. No running isolated upload service exists; production was not used for testing.
+- Roll back this worker/test/documentation commit independently; confirmation changes do not delete/restore/relink remote assets or discard saved receipts.
+
 ## 2026-11-24: Preserve early compilation and per-stage CI evidence
 
 - Source: integrated CI fix09a438c over candidatec9c3aba; upstream remains672f02e. Existing triggers, draft gate, runner, business tests and final release/tested-revision gate remain intact; no server, production, signing or paid-runner change.
