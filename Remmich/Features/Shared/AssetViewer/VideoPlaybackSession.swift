@@ -170,21 +170,29 @@ final class VideoPlaybackSession {
         resumesPreparationAfterSuspension = false
 
         do {
-            let local: AVPlayerItem? = if let library = media.savedPhotosLibrary {
-                try await savedVideoItem(in: library)
-            } else if let revision, let item = try await media.localPhotoPlayerItem(assetID: assetID, revision: revision) {
-                item
+            try Task.checkCancellation()
+            var local: AVPlayerItem?
+            var selectedOrigin = MediaReadOrigin.immichResource
+            if let library = media.savedPhotosLibrary {
+                local = try await savedVideoItem(in: library)
+                selectedOrigin = .devicePhotos
             } else if let revision {
-                try await media.exports.localVideoAsset(assetID: assetID, revision: revision, tier: .playback)
-                    .map { AVPlayerItem(asset: $0) }
-            } else {
-                nil
+                if let item = try await media.localPhotoPlayerItem(assetID: assetID, revision: revision) {
+                    local = item
+                    selectedOrigin = .devicePhotos
+                } else {
+                    try Task.checkCancellation()
+                    local = try await media.exports.localVideoAsset(assetID: assetID, revision: revision, tier: .playback)
+                        .map { AVPlayerItem(asset: $0) }
+                }
             }
+            try Task.checkCancellation()
             guard accepts(generation: preparationGeneration) else { return }
             let item: AVPlayerItem
             if let local {
                 item = local
             } else {
+                try Task.checkCancellation()
                 let configuration = try media.videoStreamConfiguration(assetID: assetID)
                 let source = try AuthenticatedVideoStreamSource(
                     configuration: configuration,
@@ -201,6 +209,9 @@ final class VideoPlaybackSession {
 
                 item = AVPlayerItem(asset: source.asset)
                 streamSource = source
+            }
+            if let revision {
+                media.recordVideoMediaOrigin(selectedOrigin, assetID: assetID, revision: revision)
             }
             applyNowPlayingMetadata(to: item)
             item.preferredForwardBufferDuration = 10

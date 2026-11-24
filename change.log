@@ -1,3 +1,9 @@
+## 2026-11-24: Guard deferred local requests and video fallback
+
+- Source: local-media-matching966e3c6; upstream remains672f02e. Recheck the confirmed association when a deferred image request executes and bypass wrapper memory reads so an old request cannot skip current permission/account validation. Preserve the existing remote pipeline cache after a valid local miss.
+- Check task cancellation before video lookup/fallback and record the selected playback source independently of its poster. No server, SDK, workflow, upload or production changes.
+- Two scoped SwiftFormat checks and diff checks pass on NAS. Swift compilation, routing tests and actual Photos/device playback remain unverified pending the unified candidate CI. Revert this guard commit with its routing dependency if rolling back; no media or persisted server data is changed.
+
 ## 2026-11-24: Wire matched local media into native image and video entry points
 
 - Source: local-media-matching2ca52a6; upstream remains672f02e. Connect the parallel matching controller/PhotoKit reader contracts to MediaLibraryController and VideoPlaybackSession, without server/API/schema or original-download changes. Matching-controller/checksum dependencies are still being integrated; this commit alone is not a buildable/validated delivery.

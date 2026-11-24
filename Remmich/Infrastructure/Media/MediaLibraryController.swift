@@ -379,7 +379,7 @@ final class MediaLibraryController {
             guard let self else { throw CancellationError() }
             return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
                                                  accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
-        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache])
+        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
     }
 
     /// association/scope/accountGeneration固定本次读取身份；本机miss才进入既有fallback，取消/换号绝不回源。
@@ -395,7 +395,9 @@ final class MediaLibraryController {
         let limit = descriptor.derivative == .thumbnail ? 1024 : descriptor.derivative == .preview ? 2048 : 4096
         let pixels = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
             ?? MediaPixelSize(width: limit, height: limit)
-        if let image = try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate),
+        // 旧request可能在创建后才被实际执行；关联已关闭/失效时直接回退，不能再访问Photos。
+        if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
+           let image = try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate),
            localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association
         {
             try validate()
@@ -412,6 +414,7 @@ final class MediaLibraryController {
 
     /// assetID/revision为当前普通视频；仅匹配同版Photos current时返回播放器，nil交给既有缓存/远端路径。
     func localPhotoPlayerItem(assetID: String, revision: Date) async throws -> AVPlayerItem? {
+        try Task.checkCancellation()
         guard let scope, let association = localMediaMatches.association(assetID: assetID, revision: revision) else { return nil }
         let accountGeneration = management.generation
         let validate: @MainActor () throws -> Void = {
@@ -446,6 +449,11 @@ final class MediaLibraryController {
     func mediaReadOrigin(assetID: String, revision: Date) -> MediaReadOrigin? {
         guard localMediaMatches.association(assetID: assetID, revision: revision) != nil else { return nil }
         return mediaReadOrigins[.init(assetID: assetID, revision: revision)]
+    }
+
+    /// 视频播放选定路径可覆盖先前poster来源；Immich缓存和流属于同一资源来源，不代表已传输字节。
+    func recordVideoMediaOrigin(_ origin: MediaReadOrigin, assetID: String, revision: Date) {
+        recordMediaOrigin(origin, assetID: assetID, revision: revision)
     }
 
     /// assetID/revision标识当前资产，sourceVersion固定原片校验和与版本，targetPixels只限制预览解码尺寸。
