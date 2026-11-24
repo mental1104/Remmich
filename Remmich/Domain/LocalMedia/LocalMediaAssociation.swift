@@ -10,14 +10,15 @@ nonisolated struct LocalMediaRemoteAsset: Decodable, Equatable, Sendable {
     let isEdited: Bool?
     let checksum: String?
     let updatedAt: Date?
+    let livePhotoVideoId: UUID?
 
-    private enum CodingKeys: String, CodingKey { case id, ownerId, type, isTrashed, isOffline, isEdited, checksum, updatedAt }
+    private enum CodingKeys: String, CodingKey { case id, ownerId, type, isTrashed, isOffline, isEdited, checksum, updatedAt, livePhotoVideoId }
 
     /// id/owner/type来自GET身份；可选状态、20字节SHA1的Base64与版本缺失时保留nil，供验证层明确拒绝。
-    init(id: UUID, ownerId: UUID, type: String, isTrashed: Bool?, isOffline: Bool?, isEdited: Bool?, checksum: String?, updatedAt: Date?) {
+    init(id: UUID, ownerId: UUID, type: String, isTrashed: Bool?, isOffline: Bool?, isEdited: Bool?, checksum: String?, updatedAt: Date?, livePhotoVideoId: UUID? = nil) {
         self.id = id; self.ownerId = ownerId; self.type = type
         self.isTrashed = isTrashed; self.isOffline = isOffline; self.isEdited = isEdited
-        self.checksum = checksum; self.updatedAt = updatedAt
+        self.checksum = checksum; self.updatedAt = updatedAt; self.livePhotoVideoId = livePhotoVideoId
     }
 
     /// decoder使用官方ISO字符串版本，支持小数秒；坏日期抛出而不是降级为nil后与未知版本相等。
@@ -35,7 +36,8 @@ nonisolated struct LocalMediaRemoteAsset: Decodable, Equatable, Sendable {
         try self.init(id: values.decode(UUID.self, forKey: .id), ownerId: values.decode(UUID.self, forKey: .ownerId),
                       type: values.decode(String.self, forKey: .type), isTrashed: values.decodeIfPresent(Bool.self, forKey: .isTrashed),
                       isOffline: values.decodeIfPresent(Bool.self, forKey: .isOffline), isEdited: values.decodeIfPresent(Bool.self, forKey: .isEdited),
-                      checksum: values.decodeIfPresent(String.self, forKey: .checksum), updatedAt: date)
+                      checksum: values.decodeIfPresent(String.self, forKey: .checksum), updatedAt: date,
+                      livePhotoVideoId: values.decodeIfPresent(UUID.self, forKey: .livePhotoVideoId))
     }
 }
 
