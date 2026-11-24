@@ -1,8 +1,10 @@
 import Foundation
+import HTTPTypes
 import OpenAPIRuntime
 import OpenAPIURLSession
 import OSLog
 
+/// 账号API封装，保留可更新凭据与固定传输边界；Fork高级搜索使用独立可取消读取协议。
 public actor ImmichClient {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -17,8 +19,11 @@ public actor ImmichClient {
     public let apiURL: URL
     private var credential: ImmichCredential?
     private let transport: any ClientTransport
+    private let forkSmartTransport: any ClientTransport
     private let routeCheckSession: URLSession?
 
+    /// apiURL为已验证API根，credential为可选会话/API key，transport注入读取边界或测试替身。
+    /// 未注入时Fork使用不缓存/禁重定向前台会话，既有SDK调用保留原传输。
     public init(
         apiURL: URL,
         credential: ImmichCredential? = nil,
@@ -27,9 +32,12 @@ public actor ImmichClient {
         self.apiURL = apiURL
         self.credential = credential
         self.transport = transport ?? ImmichNetworkSession.transport
+        forkSmartTransport = transport ?? ImmichSearchNetwork.transport
         routeCheckSession = nil
     }
 
+    /// apiURL/credential为路由检查身份，transport和routeCheckSession属于原健康检查会话。
+    /// Fork交互搜索不复用该检查会话，仍使用独立受限传输。
     private init(
         apiURL: URL,
         credential: ImmichCredential?,
@@ -39,6 +47,7 @@ public actor ImmichClient {
         self.apiURL = apiURL
         self.credential = credential
         self.transport = transport
+        forkSmartTransport = ImmichSearchNetwork.transport
         self.routeCheckSession = routeCheckSession
     }
 
@@ -301,41 +310,12 @@ public actor ImmichClient {
     /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
-        guard (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
-        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
-        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
-        if let after, let before, after > before {
-            throw ImmichAPIError.invalidResponse
-        }
+        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
         let output = try await makeClient().searchAssets(.init(body: .json(.init(
             cursor: cursor,
-            filter: .init(
-                city: query.city.isEmpty ? nil : .init(eq: query.city),
-                country: query.country.isEmpty ? nil : .init(eq: query.country),
-                description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
-                hasAlbums: query.hasAlbums.map { .init(eq: $0) },
-                isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
-                lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
-                make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
-                model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
-                ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
-                originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
-                originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
-                personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
-                rating: ratingFilter(query.rating),
-                state: query.state.isEmpty ? nil : .init(eq: query.state),
-                takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
-                trashedAt: .init(eq: .null),
-                _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
-                visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
-                iso: numericFilter(.iso, conditions: query.exifConditions),
-                fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
-                focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
-                exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
-                orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
-            ),
+            filter: structuredSearchFilter(query),
             orderBy: .init(direction: .desc, field: .fileCreatedAt),
             size: size,
             withExif: true
@@ -349,8 +329,44 @@ public actor ImmichClient {
         }
     }
 
+    /// query为完整原生条件；metadata/Fork智能路径共用同一映射，非法日期或原子条件在网络前拒绝。
+    private func structuredSearchFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.SearchFilter {
+        guard query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
+        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
+        if let after, let before, after > before {
+            throw ImmichAPIError.invalidResponse
+        }
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try .init(
+            city: query.city.isEmpty ? nil : .init(eq: query.city),
+            country: query.country.isEmpty ? nil : .init(eq: query.country),
+            description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
+            hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+            isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
+            lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
+            make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
+            model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
+            ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
+            originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
+            originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
+            personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+            rating: ratingFilter(query.rating),
+            state: query.state.isEmpty ? nil : .init(eq: query.state),
+            takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
+            trashedAt: .init(eq: .null),
+            _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
+            visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
+            iso: numericFilter(.iso, conditions: query.exifConditions),
+            fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
+            focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
+            exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
+            orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
+        )
+    }
+
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。
-    /// 智能模式使用官方旧式数字分页，避免把无分页的smart V3冒充完整结果。
+    /// 普通智能模式保留官方页码，高级组合只走独立Fork绑定游标，不删减条件降级。
     public func search(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation? = nil, size: Int = 60) async throws -> ImmichSearchPage {
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.mode != .smart || text.isEmpty {
@@ -363,6 +379,9 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.assets, continuation: page.nextCursor.map(ImmichSearchContinuation.cursor))
         }
         guard credential != nil else { throw ImmichAPIError.unauthorized }
+        if query.requiresForkSmartSearch {
+            return try await forkSmartSearch(query, continuation: continuation, size: size)
+        }
         // 旧式smart没有这些组合的可靠分页契约，不得丢弃高级条件冒充成功。
         guard query.exifConditions.isEmpty, query.orientation == nil, query.hasAlbums == nil, (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
         var pageNumber = 1
@@ -407,6 +426,65 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
         case let .undocumented(statusCode, _):
             throw Self.map(status: statusCode)
+        }
+    }
+
+    /// 独立Fork只读请求体；不向生成的官方SmartSearchDto加入自定义字段或路径。
+    private struct ForkSmartSearchBody: Encodable {
+        let query: String
+        let filter: Components.Schemas.SearchFilter
+        let size: Int
+        let cursor: String?
+        let withExif = true
+    }
+
+    /// query完整保留筛选，continuation仅接受Fork令牌，size限制页大小；缺路由错误保留给账号范围界面提示。
+    private func forkSmartSearch(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation?, size: Int) async throws -> ImmichSearchPage {
+        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
+        var cursor: String?
+        if let continuation {
+            guard case let .forkCursor(value) = continuation, !value.isEmpty, value.utf16.count <= 4096 else { throw ImmichAPIError.invalidResponse }
+            cursor = value
+        }
+        let transcoder = Self.dateTranscoder
+        let encoder = JSONEncoder()
+        // 与生成SDK的应用日期配置一致，保留本地日界线的毫秒格式及null三态。
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var value = encoder.singleValueContainer()
+            try value.encode(transcoder.encode(date))
+        }
+        let data = try encoder.encode(ForkSmartSearchBody(query: text, filter: structuredSearchFilter(query), size: size, cursor: cursor))
+        let operationID = "forkSearchSmart"
+        let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/search/smart",
+                                  headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])
+        let network = forkSmartTransport
+        do {
+            try Task.checkCancellation()
+            let (response, body) = try await AuthenticationMiddleware(credential: credential).intercept(
+                request, body: HTTPBody(data, length: .known(Int64(data.count)), iterationBehavior: .multiple), baseURL: apiURL,
+                operationID: operationID
+            ) { request, body, baseURL in
+                try await network.send(request, body: body, baseURL: baseURL, operationID: operationID)
+            }
+            try Task.checkCancellation()
+            guard response.status.code == 200 else { throw Self.map(status: response.status.code) }
+            guard let body else { throw ImmichAPIError.invalidResponse }
+            let bytes = try await Data(collecting: body, upTo: 32 * 1024 * 1024)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .custom { decoder in
+                try transcoder.decode(decoder.singleValueContainer().decode(String.self))
+            }
+            let page = try decoder.decode(Components.Schemas.SearchResponseDto.self, from: bytes).assets
+            try Task.checkCancellation()
+            guard page.nextPage == nil else { throw ImmichAPIError.invalidResponse }
+            if let next = page.nextCursor, next.isEmpty || next == cursor {
+                throw ImmichAPIError.invalidResponse
+            }
+            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: page.nextCursor.map(ImmichSearchContinuation.forkCursor))
+        } catch {
+            throw Self.map(error)
         }
     }
 

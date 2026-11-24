@@ -34,14 +34,13 @@ struct AdvancedSearchTests {
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
     }
 
-    /// 重复槽位和暂不支持的smart组合必须拒绝，而不是覆盖条件或伪报完整分页。
-    @Test func rejectsDuplicateSlotsAndUnsupportedSmartCombination() async throws {
+    /// 重复槽位在metadata和高级smart均须发送前拒绝，不能覆盖条件。
+    @Test func rejectsDuplicateSlotsInEverySearchMode() async throws {
         var query = ImmichMetadataSearch()
         query.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400),
                                 .init(field: .iso, comparison: .atLeast, value: 800)]
         let client = try makeClient()
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
-        query.exifConditions.removeLast()
         query.mode = .smart
         query.text = "synthetic"
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }

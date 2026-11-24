@@ -471,6 +471,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         let token: ImmichSearchContinuation? = switch continuation {
         case let .cursor(value)?: .cursor(value)
         case let .page(value)?: .page(value)
+        case let .forkCursor(value)?: .forkCursor(value)
         case nil: nil
         }
         do {
@@ -480,6 +481,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             let next: NativeSearchContinuation? = switch page.continuation {
             case let .cursor(value)?: .cursor(value)
             case let .page(value)?: .page(value)
+            case let .forkCursor(value)?: .forkCursor(value)
             case nil: nil
             }
             return NativeSearchPage(assets: page.assets.map(Self.map), continuation: next)
@@ -489,6 +491,9 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
                 throw CancellationError()
             }
             if let api = error as? ImmichAPIError {
+                if query.requiresForkSmartSearch, api == .notFound || api == .httpStatus(405) || api == .serverError(501) {
+                    throw NativeSearchError.unsupportedExtension
+                }
                 switch api {
                 case .unauthorized: throw NativeSearchError.unauthorized
                 case .forbidden: throw NativeSearchError.forbidden

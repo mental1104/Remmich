@@ -27,12 +27,12 @@ struct SearchRatingTests {
         _ = try await client(rating: rating, smart: true).search(query)
     }
 
-    /// 0不在旧式smart评分范围内，越界值也须在网络之前拒绝。
-    @Test func rejectsUnsupportedOrInvalidRatingsBeforeSending() async throws {
+    /// 两条路径的越界值须网络前拒绝；合法smart0改由独立Fork契约覆盖。
+    @Test func rejectsInvalidRatingsBeforeSending() async throws {
         let url = try #require(URL(string: "https://example.invalid/api"))
         let transport = UnexpectedRatingTransport()
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
-        for (mode, rating) in [(ImmichMetadataSearch.Mode.smart, ImmichSearchRating.stars(0)), (.fileName, .stars(-1)), (.fileName, .stars(6))] {
+        for (mode, rating) in [(ImmichMetadataSearch.Mode.smart, ImmichSearchRating.stars(-1)), (.smart, .stars(6)), (.fileName, .stars(-1)), (.fileName, .stars(6))] {
             var query = ImmichMetadataSearch()
             query.text = "synthetic"
             query.mode = mode
