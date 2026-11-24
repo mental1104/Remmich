@@ -58,7 +58,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         if let transfers {
             let owner = LibraryTransferOwner(session: session, endpoint: endpoint)
             client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
-                                  transport: ImmichQueuedGETTransport { request, operation in
+                                  transport: ImmichQueuedReadTransport { request, operation in
                                       let isAlbum = operation == "getAllAlbums" || operation == "getAlbumInfo"
                                           || request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems?.contains(where: { $0.name == "albumId" }) == true
                                       let kind: LibraryTransferKind = isAlbum ? .albumIndex : operation == "getAssetInfo" ? .metadata : .index
@@ -431,6 +431,83 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             try requireCurrent(requestGeneration)
             throw Self.map(error)
         }
+    }
+
+    /// query 为本次条件，continuation 为原始服务端令牌；返回当前代际的媒体结果，迟到响应拒绝发布。
+    func search(_ query: NativeSearchQuery, continuation: NativeSearchContinuation?) async throws -> NativeSearchPage {
+        let (client, owner) = try requestContext()
+        // SDK类型仅存在于基础设施层；界面和领域不导入ImmichAPI。
+        var dto = ImmichMetadataSearch()
+        dto.text = query.text
+        dto.mode = switch query.mode {
+        case .fileName: .fileName
+        case .description: .description
+        case .fullPath: .fullPath
+        case .ocr: .ocr
+        case .smart: .smart
+        }
+        dto.media = switch query.media { case .all: .all; case .image: .image; case .video: .video }
+        dto.city = query.city
+        dto.country = query.country
+        dto.state = query.state
+        dto.favoritesOnly = query.favoritesOnly
+        dto.archivedOnly = query.archivedOnly
+        dto.cameraMake = query.cameraMake
+        dto.cameraModel = query.cameraModel
+        dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
+        dto.hasAlbums = query.hasAlbums
+        dto.exifConditions = try query.exifConditions.map { condition in
+            guard let field = ImmichSearchNumericCondition.Field(rawValue: condition.field.rawValue),
+                  let comparison = ImmichSearchNumericCondition.Comparison(rawValue: condition.comparison.rawValue)
+            else { throw NativeSearchError.invalidQuery }
+            return .init(field: field, comparison: comparison, value: condition.value)
+        }
+        dto.personIDs = query.personIDs
+        dto.takenAfter = query.takenAfter
+        dto.takenBefore = query.takenBefore
+        dto.timeZone = query.timeZone
+        let token: ImmichSearchContinuation? = switch continuation {
+        case let .cursor(value)?: .cursor(value)
+        case let .page(value)?: .page(value)
+        case nil: nil
+        }
+        do {
+            let page = try await client.search(dto, continuation: token)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            let next: NativeSearchContinuation? = switch page.continuation {
+            case let .cursor(value)?: .cursor(value)
+            case let .page(value)?: .page(value)
+            case nil: nil
+            }
+            return NativeSearchPage(assets: page.assets.map(Self.map), continuation: next)
+        } catch {
+            try requireCurrent(owner)
+            if Task.isCancelled || error is CancellationError || (error as? ImmichAPIError) == .cancelled {
+                throw CancellationError()
+            }
+            if let api = error as? ImmichAPIError {
+                switch api {
+                case .unauthorized: throw NativeSearchError.unauthorized
+                case .forbidden: throw NativeSearchError.forbidden
+                case .httpStatus(400): throw NativeSearchError.invalidQuery
+                case .invalidResponse: throw NativeSearchError.invalidResponse
+                case .rateLimited: throw NativeSearchError.rateLimited
+                default: throw NativeSearchError.unavailable
+                }
+            }
+            throw NativeSearchError.unavailable
+        }
+    }
+
+    /// kind指定候选字段，query提供厂商约束；拒绝账号/路由变化后的迟到响应。
+    func searchSuggestions(_ kind: NativeSearchSuggestionKind, query: NativeSearchQuery) async throws -> [String] {
+        let (client, owner) = try requestContext()
+        guard let field = ImmichSearchSuggestionKind(rawValue: kind.rawValue) else { throw NativeSearchError.invalidQuery }
+        let values = try await client.searchSuggestions(kind: field, make: query.cameraMake.isEmpty ? nil : query.cameraMake)
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        return Array(Set(values.filter { !$0.isEmpty })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     func videos(cursor: String?) async throws -> VideoPage {

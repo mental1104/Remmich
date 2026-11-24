@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 nonisolated enum LibraryWriteError: LocalizedError {
-    case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate
+    case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName
     case http(Int)
 
     var errorDescription: String? {
@@ -13,6 +13,7 @@ nonisolated enum LibraryWriteError: LocalizedError {
         case .busy: "请等待当前操作完成。"
         case .malformedResponse: "服务器返回的数据不符合约定，未确认操作成功。"
         case .trashedDuplicate: "服务器回收站中已有此文件，请先决定是否恢复；未标记为备份成功。"
+        case .invalidPresetName: "Enter a saved search name of 1 to 100 characters."
         case let .http(code): "服务器返回 HTTP \(code)。请检查权限、版本和连接；不自动重试写操作。"
         }
     }
@@ -114,7 +115,9 @@ final nonisolated class LibraryMutationClient: Sendable {
         return data
     }
 
-    private func send(_ method: String, _ path: [String], body: Data? = nil, query: [URLQueryItem] = []) async throws -> Data {
+    /// method/path为固定操作，body为可选JSON，query为查询参数；expectedStatus可要求契约的精确状态码。
+    /// 返回响应字节；HTTP失败、取消或状态不匹配均拒绝，旧操作未指定状态时保持原行为。
+    private func send(_ method: String, _ path: [String], body: Data? = nil, query: [URLQueryItem] = [], expectedStatus: Int? = nil) async throws -> Data {
         var request = try request(method, path)
         if !query.isEmpty {
             var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
@@ -126,7 +129,48 @@ final nonisolated class LibraryMutationClient: Sendable {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await session.data(for: request)
-        return try checked(data, response)
+        let result = try checked(data, response)
+        if let expectedStatus, (response as? HTTPURLResponse)?.statusCode != expectedStatus {
+            throw LibraryWriteError.malformedResponse
+        }
+        return result
+    }
+
+    /// 读取当前账号登记；只有明确缺少扩展的404/405/501返回nil，鉴权和网络错误继续抛出。
+    func searchPresets() async throws -> [NativeSearchPreset]? {
+        do {
+            let data = try await send("GET", ["fork", "search-presets"], expectedStatus: 200)
+            return try JSONDecoder().decode([NativeSearchPreset].self, from: data)
+        } catch let LibraryWriteError.http(status) where [404, 405, 501].contains(status) {
+            return nil
+        }
+    }
+
+    /// name/conditions为新登记的完整内容；仅201与有效对象确认成功，不自动重放POST。
+    func createSearchPreset(name: String, conditions: NativeSearchPresetConditions) async throws -> NativeSearchPreset {
+        let body = try presetBody(name: name, conditions: conditions)
+        let data = try await send("POST", ["fork", "search-presets"], body: body, expectedStatus: 201)
+        return try JSONDecoder().decode(NativeSearchPreset.self, from: data)
+    }
+
+    /// id为当前账号的登记UUID；发送完整name/conditions，重名409与跨账号404由服务端裁决。
+    func updateSearchPreset(_ id: String, name: String, conditions: NativeSearchPresetConditions) async throws -> NativeSearchPreset {
+        let body = try presetBody(name: name, conditions: conditions)
+        let data = try await send("PATCH", ["fork", "search-presets", validID(id)], body: body, expectedStatus: 200)
+        return try JSONDecoder().decode(NativeSearchPreset.self, from: data)
+    }
+
+    /// id为待删除登记UUID；只接受204，不删除任何照片或相簿。
+    func deleteSearchPreset(_ id: String) async throws {
+        _ = try await send("DELETE", ["fork", "search-presets", validID(id)], expectedStatus: 204)
+    }
+
+    /// name去除首尾空白后按服务器UTF16长度校验；conditions原样编码，不能丢弃null/已知字段。
+    private func presetBody(name: String, conditions: NativeSearchPresetConditions) throws -> Data {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1 ... 100).contains(name.utf16.count) else { throw LibraryWriteError.invalidPresetName }
+        struct Body: Encodable { let name: String; let conditions: NativeSearchPresetConditions }
+        return try JSONEncoder().encode(Body(name: name, conditions: conditions))
     }
 
     func asset(_ id: String) async throws -> ManagedAsset {

@@ -1,3 +1,87 @@
+## 2026-11-24: Favorite and archive search conditions
+
+- Validation follow-up: ca271bb passed the complete CI45336010250, including offline contracts, app/test build, API tests, simulator app tests and artifact/source checks. This covers the saved-search panel and codec. Region7e4714e and visibilitycefddca follow-ups still require their own CI; no merge or parent gitlink update yet.
+
+- Source: codex/feature-search-visibility over7e4714e; upstream remains672f02e. No upstream sync or server/API/database change.
+- Add independent native favorites-only and archived-only switches. Metadata uses isFavorite/visibility structured fields; legacy smart uses existing flat fields. Disabled favorite switch omits the constraint; disabled archive switch keeps timeline visibility. Neither path includes hidden/locked assets implicitly.
+- Save and restore the existing isFavorite/isArchive true-only preset fields, including flag-only searches; false values in malformed saved conditions are rejected. Source mapping remains in Infrastructure, with no SDK imports in Features.
+- Add synthetic metadata/smart HTTP-body assertions for all four switch combinations and preset flag-only round trips. Local SwiftFormat and diff checks pass; Swift execution awaits CI. Existing ca271bb CI45336010250 has compiled and passed API tests, simulator app tests remain active and do not cover local region/visibility follow-ups.
+- Rollback: revert this follow-up; server saved conditions and media remain unchanged. Remaining extended fields, smart+advanced pagination and synthetic UI validation are still pending; no real-device acceptance.
+
+## 2026-11-24: Country and state search conditions
+
+- Source: codex/feature-search-regions over ca271bb; upstream remains672f02e, no upstream sync or server/API/database change.
+- Add country/state controls and account-scoped official suggestions, preserving free text on failure. Carry both fields through Domain/Infrastructure into metadata structured filters and legacy smart flat fields. Preserve them on saved-search capture and complete reuse, so a country/state preset no longer fails as unsupported.
+- Add synthetic metadata and smart body assertions, candidate/auth coverage and full preset round-trip assertions. Local SwiftFormat and diff checks pass; new Swift execution awaits CI. Existing ca271bb run45336010250 is still building and does not cover this follow-up. No real-device validation or production access; remaining advanced fields and smart+advanced pagination are still pending.
+- Rollback: revert this follow-up; saved server conditions remain intact and photo data is unchanged.
+
+## 2026-11-24: Native saved-search management and atomic reuse
+
+- Validation follow-up: CI45333843152 on d6e5963 completed app build, API tests, simulator app tests, result upload and source-cleanliness checks successfully. Product archiving remains in progress. This validates the preceding search/data contracts only;45c753a UI/codec still needs its own CI before merge.
+
+- Source: codex/feature-search-presets over d6e5963; upstream remains672f02e. No upstream sync, server/API/database changes or production access.
+- Wire a SwiftUI saved-search panel into SearchView: explicit account-scoped loading, create/rename/apply, confirmed complete replacement and delete. Failed saves keep the name draft; account/endpoint changes clear drafts, capability and list state. All operations use the existing management session without refreshing the photo index.
+- Add full-query capture/restoration with Gregorian day semantics, numeric/UUID/date validation and all-or-nothing application. Unsupported saved fields are preserved but cannot be applied yet. Rename re-reads all conditions; replacement re-reads the name. The existing server API has no CAS, so concurrent cross-client edits remain last-writer-wins.
+- Never automatically replay writes. Failed or cancelled operations invalidate freshness and require an explicit reload before further writes. Replacement confirmation captures the intended query before waiting. No photo deletion or original overwrite.
+- Added synthetic codec tests for DST days/full restoration, filename mapping, empty queries, invalid dates and duplicate EXIF slots. Local SwiftFormat and diff checks passed. CI45333843152 at prior d6e5963 has passed formatting, offline CRUD contracts and app compilation; API/app tests are still running and do not validate this follow-up. New UI/codec runtime validation awaits the next CI. No real-device acceptance; remaining search filters and smart/advanced combination are not complete.
+- Rollback: revert this follow-up; saved conditions remain on the server and photo data is unchanged. Parent gitlink stays on previously verified0af1897 until child validation succeeds.
+
+## 2026-11-24: Saved-search data and API contracts
+
+- Prior CI45333108930 found added SearchFilter fields appear after original properties in the generated initializer. Reordered metadata arguments to match actual prepared-schema order; every filter remains. Next CI includes this repair and saved-condition contracts.
+
+- Source: codex/feature-search-presets over8ab2e53; upstream remains672f02e. Adds client contracts for existing fork/search-presets only; no server/API/database/production change.
+- Model every existing preset field, including fields not yet supported by controls. Preserve missing/null/value distinctions for rating/tags and reject unknown condition keys rather than overwrite a lossy decode. Numeric conditions encode server operator names.
+- Add authenticated GET/POST/PATCH/DELETE methods to the explicit mutation client with exact200/201/204 response validation and UUID/name checks. Only GET404/405/501 marks unsupported;401/403/network/schema errors do not. Never automatically retry a preset POST, never change photo data.
+- Extend offline contract compilation with native models; add synthetic CRUD/status/permission/null tests plus Codable unknown/null/zero tests. Local SwiftFormat, shell syntax and diff checks passed; Swift execution awaits CI.
+- Not wired into SearchView yet: query capture/restoration and native preset management UI are next. No claim saved searches are usable in the client. Revert this follow-up to roll back; no media recovery needed.
+
+## 2026-11-24: EXIF, orientation and album-state filters
+
+- CI45331713557 compiled the previous app/test bundles, then package-test compilation exposed nested #require macros in candidate tests. Split URL/components/response requirements into separate assertions; no checks removed. Next CI includes this EXIF follow-up. Preset codec work remains local and excluded from this push.
+
+- Source: codex/feature-search-exif from5a4f9f0; upstream base remains672f02e. No server/API/database changes or production operations.
+- Add native ISO/aperture/focal-length/exposure comparisons with independent slots, orientation and album membership filters. Metadata requests preserve other conditions and proper seconds/mm units. Reject duplicate slots, nonfinite/negative values; display unsupported smart/advanced combinations instead of dropping conditions. Reliable smart+advanced pagination remains outstanding, so this is not full search-stage completion.
+- Add a minimal, provenance-recorded schema augmentation from the actual parent Fork: five properties in both filter nodes plus two orientation definitions. Preparation consumes this committed input; no generated Swift edited. Whole-document/source comparison and idempotence passed on Python3.8; existing unrelated schemas remain unchanged.
+- Added synthetic body/units/ranges/invalid-condition tests. Local SwiftFormat/diff checks passed; these new changes await CI. Current5a4f9f0 CI cannot validate this follow-up. Saved presets and remaining extended fields are still pending; no real-device acceptance.
+- Rollback: revert this follow-up and regenerate with prior preparation inputs; no media/data recovery needed.
+
+## 2026-11-24: Account-scoped search filter choices
+
+- Prior run45330859471 reached test compilation and found two test sources still accepting String? rather than the new typed continuation. Corrected ErrorSource/DelayedSource signatures without weakening assertions; next CI must compile and execute these tests.
+
+- Source: codex/feature-search-suggestions over7182bda; upstream remains672f02e. No server/API/database or production change.
+- Add authenticated official GET search suggestions for city, camera make/model; model choices honor the selected make. Keep free text usable on permission/network failure; candidates never use public Photon or coordinates. SDK types stay in Infrastructure and account/route generations reject late responses.
+- Candidate selection updates the same native query; changing make invalidates model choices without silently discarding selected conditions, preserving future atomic preset restoration. Concurrent choice requests remain outside writes and use the existing GET pipeline.
+- Added synthetic GET/auth/query tests and anonymous denial; local SwiftFormat/diff/import checks pass, new Xcode/test validation pending. Current CI7182bda is a prior revision and cannot validate these new changes. Remaining search work includes Fork EXIF/atomic conditions and saved presets.
+- Rollback: revert this follow-up; no data recovery needed. No real-device or private-photo acceptance performed.
+
+## 2026-11-24: Search modes and SDK boundary repair
+
+- CI run45326132850 exposed the prepared schema's intentional removal of nextPage, preventing smart wrapper compilation. Updated the preparation source to preserve this used field and regenerated from the original pinned official commit520a70891 (raw hash unchanged). Whole-document comparison confirms nextPage/property requirement is the only schema difference; idempotence, Python3.8 execution/syntax and diff checks passed. New Xcode validation still pending; no generated Swift was manually changed.
+
+- Source: codex/feature-search-modes over people/date f080864; upstream remains 672f02e. No server/API/database/production change.
+- Add filename, description, path, OCR and smart modes. Metadata keeps opaque cursors; smart uses official legacy numeric paging with basic filters, avoiding the unpaginated smart V3 path. Typed continuations reject mismatched/repeated/backward tokens; only explicit searchSmart POST is added to the read-only boundary.
+- PR #2 run45322996283 compiled and passed API tests but failed app architecture checks: two Feature files imported ImmichAPI. Preserve the checks and repair ownership: native query/continuation/error models live in Domain, SDK mapping in Infrastructure. Feature no longer imports SDK or hides it behind typealiases.
+- Added mode/body/routing, smart paging, malformed token and mixed-token tests. Local formatting, diff and Feature import checks passed; this new revision awaits macOS CI. Older successful package checks do not validate these changes.
+- Consolidate all preceding search commits in PR #3 rather than merge the failed base PR. Fork EXIF, suggestions and saved conditions remain outstanding; no real-device acceptance or production writes. Revert the consolidated search changes to roll back.
+
+## 2026-11-24: People and capture-date metadata filters
+
+- Source: codex/feature-search-people-dates, based on native-search 98e6dec (PR #2 still pending app tests when implementation began); upstream remains 672f02e. No server change or deployment.
+- Reuse account-scoped library people as filter candidates, preserve UUID identity and reject late candidates after account changes. Add optional start/end calendar days; encode local wall-clock boundaries like Web asLocalTimeISO, including DST. Reject invalid UUIDs and reversed dates before network access.
+- Preserve safe SDK distinctions for authentication/permission/request errors; retry after an invalid repeated cursor restarts the query instead of doing nothing. No raw server responses or search contents are logged.
+- Validation: local SwiftFormat and diff checks pass. Added request-body/person/date, DST, invalid range and error-state tests; new Xcode/Swift validation pending. This does not claim PR #2 or new filters have passed app tests yet.
+- Remaining search work: smart modes, candidate suggestions, Fork EXIF/atomic filters and saved conditions. Roll back this commit to remove filters; no data recovery needed.
+
+## 2026-11-24: Native metadata search and read-only POST transport
+
+- Source: codex/feature-native-search from dev 0af1897; upstream remains 672f02e. No server API, migration or production change.
+- Replaced Search fixtures with authenticated metadata results, filename/city/camera/type filters, cursor paging and the existing native viewer. Resources deduplicate by ID; failures retain the cursor; cancellation and generation invalidation reject late responses.
+- ImmichQueuedReadTransport retains durable GET loading and explicitly permits only searchAssets POST at /search/metadata through a cancellable ephemeral no-redirect transport. Search conditions never enter the URL-only durable journal. Old transport name remains a compatible alias; arbitrary writes remain rejected.
+- Added synthetic SDK/state tests for request/auth contracts, cursor retry, deduplication, cancellation and late responses. Ready PR Build now actually runs package/app tests before merge, preserving draft guards and existing triggers. Local SwiftFormat/diff checks pass; Xcode/Swift tests pending CI. No private media or real-device acceptance.
+- Stage remains incomplete: smart search, people/date filters, suggestions, Fork EXIF and saved conditions are subsequent work. Roll back by reverting this commit; no server data recovery required.
+
 ## 2026-11-24: Repair CI simulator selection
 
 - Source: codex/fix-ci-simulator-selection from dev 79d3e17; upstream remains 672f02e. No server API or production change.

@@ -32,6 +32,7 @@ final class ContractProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
+/// 顺序执行合成HTTP契约，不接入任何真实账号或图库。
 @main
 struct ForkContractChecks {
     static let assetID = "11111111-1111-4111-8111-111111111111"
@@ -59,6 +60,59 @@ struct ForkContractChecks {
         return try JSONSerialization.jsonObject(with: data) as! [String: Any]
     }
 
+    /// client必须使用本文件的URLProtocol；验证保存条件CRUD、null保留和能力/权限区分。
+    static func checkSearchPresets(_ client: LibraryMutationClient) async throws {
+        let saved = #"{"id":"11111111-1111-4111-8111-111111111111","name":"Synthetic","conditions":{"city":"Synthetic City","rating":null,"tagIds":null,"mediaCategory":"steam-screenshot"}}"#
+        let conditions = try JSONDecoder().decode(NativeSearchPreset.self, from: Data(saved.utf8)).conditions
+        ContractProtocol.install { request in
+            precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token")
+            switch request.httpMethod {
+            case "GET":
+                precondition(request.url!.path == "/api/fork/search-presets")
+                return .init(status: 200, body: "[\(saved)]")
+            case "POST", "PATCH":
+                let expected = request.httpMethod == "POST" ? "/api/fork/search-presets" : "/api/fork/search-presets/\(assetID)"
+                precondition(request.url!.path == expected)
+                let payload = try body(request)
+                precondition(payload["name"] as? String == "Synthetic")
+                let filters = payload["conditions"] as! [String: Any]
+                precondition(filters["rating"] is NSNull && filters["tagIds"] is NSNull)
+                precondition(filters["mediaCategory"] as? String == "steam-screenshot")
+                precondition(payload["userId"] == nil && filters["userId"] == nil)
+                return .init(status: request.httpMethod == "POST" ? 201 : 200, body: saved)
+            case "DELETE":
+                precondition(request.url!.path == "/api/fork/search-presets/\(assetID)")
+                return .init(status: 204, body: "")
+            default: preconditionFailure("Unexpected saved-search method")
+            }
+        }
+        let presets = try await client.searchPresets()
+        precondition(presets?.count == 1)
+        _ = try await client.createSearchPreset(name: "  Synthetic  ", conditions: conditions)
+        _ = try await client.updateSearchPreset(assetID, name: "Synthetic", conditions: conditions)
+        try await client.deleteSearchPreset(assetID)
+
+        // 缺少能力与权限失败必须区分；错误状态不能被当作成功或空列表。
+        for status in [404, 405, 501] {
+            ContractProtocol.install { _ in .init(status: status, body: "") }
+            let unsupported = try await client.searchPresets()
+            if case .some = unsupported {
+                preconditionFailure("Unsupported endpoint returned preset data")
+            }
+        }
+        ContractProtocol.install { _ in .init(status: 403, body: "") }
+        do { _ = try await client.searchPresets(); preconditionFailure("Permission failure treated as unsupported") }
+        catch LibraryWriteError.http(403) {}
+        ContractProtocol.install { _ in .init(status: 200, body: "{}") }
+        do { try await client.deleteSearchPreset(assetID); preconditionFailure("Wrong delete status accepted") }
+        catch LibraryWriteError.malformedResponse {}
+        ContractProtocol.install { _ in preconditionFailure("Invalid name must fail before network") }
+        do { _ = try await client.createSearchPreset(name: " ", conditions: conditions); preconditionFailure("Empty name accepted") }
+        catch LibraryWriteError.invalidPresetName {}
+        print("PASS: saved-search CRUD, null preservation, exact statuses and capability/permission distinction")
+    }
+
+    /// 创建纯内存传输客户端，逐项运行契约并在结束时取消会话。
     static func main() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [ContractProtocol.self]
@@ -153,6 +207,7 @@ struct ForkContractChecks {
         precondition(directory.includes(albumID: "b", category: ForkAlbumDirectory.defaultCategory, group: ""))
         precondition(directory.searchText(albumID: "a") == "Trips Paris")
         print("PASS: fork category intersection, whitespace and default category")
+        try await checkSearchPresets(client)
         print("All offline contract checks passed; no production network requests were made.")
     }
 }

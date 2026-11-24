@@ -5,9 +5,13 @@
 - Upstream describe: `v3.1.0-447-g520a70891`
 - OpenAPI document version: `3.2.0`
 - Upstream SHA-256: `4e15b58113426d59ffb991a82875308b3eeb64e6c916395e5c923a0632fcc67f`
-- Prepared SHA-256: `ceaf70807a32549461939df11f367479da739cd3ca8f5bca118ef5a8eafe3f2f`
+- Prepared SHA-256: `ce4d8d70456d9d968f1139d9494b9479c0696990d2664dc132da1c66032f5798`
 - Copied: 2026-09-27
-- Transformations: `Scripts/prepare-immich-schema.py` removes deprecated flat search fields and the unused `SearchAssetResponseDto.nextPage`. It also limits the authenticated user config decoder to map settings and the optional external domain used for shared links. This lets Remmich load maps from server responses that omit unrelated fields such as `theme`.
+- Transformations: `Scripts/prepare-immich-schema.py` removes deprecated flat metadata request fields. It retains `SearchAssetResponseDto.nextPage`, now used for official legacy smart pagination, alongside metadata `nextCursor`. It also limits the authenticated user config decoder to map settings and the optional external domain used for shared links. This lets Remmich load maps from server responses that omit unrelated fields such as `theme`.
+
+2026-11-24 search update: regenerate with the same upstream commit above, whose raw SHA-256 was rechecked unchanged. Compared with the previous prepared snapshot, the only Schema change is restoring the original nextPage property and required entry (22 lines); all other JSON values match. Preparation is idempotent. Generated Swift remains build-tool output and was not edited. Smart legacy deprecations remain visible rather than suppressed.
+
+2026-11-24 EXIF follow-up: the preparation script additionally consumes committed `search-extensions.json` (SHA-256 `d3ec71dba687fb67cebe520f05c9d0672b78b915a00d43010b10cc6dbd85a43a`). That input records the owning Fork commit and complete source-schema hash. Only iso/fNumber/focalLength/exposureTime/orientation are added to SearchFilter and SearchFilterBranch, with MediaOrientationFilter/SearchOrientation dependencies. A whole-document comparison proves all other values match the prior prepared snapshot; the selected definitions exactly match the parent Fork source. This does not refresh other API schemas or claim these fields work on every official server. Actual API errors remain visible. Regeneration and idempotence were checked on Python3.8; generated Swift is still produced by the build plugin.
 
 The generator configuration includes only operations used by the wrapper and their dependencies. This avoids generating unused legacy search DTOs and operations whose initializers reference deprecated properties. The preparation step removes the equivalent unused aliases from the search DTO that Remmich does use; it does not suppress compiler diagnostics or edit generated Swift files.
 

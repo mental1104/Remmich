@@ -28,9 +28,8 @@ struct AuthenticationMiddleware: ClientMiddleware {
 }
 
 enum ReadOnlyOperationPolicy {
-    /// Immich's metadata search is a POST solely because its filter is a JSON body.
-    /// It is server-read-only; every actual mutation remains blocked here.
-    private static let allowedNonReadOperations: Set<String> = ["login", "logout", "searchAssets"]
+    /// 元数据/智能搜索因JSON条件使用POST，但只读取服务器资源；真正写入仍拒绝。
+    private static let allowedNonReadOperations: Set<String> = ["login", "logout", "searchAssets", "searchSmart"]
 
     static func validate(request: HTTPRequest, operationID: String) throws {
         let readMethods: Set<HTTPRequest.Method> = [.get, .head, .options]

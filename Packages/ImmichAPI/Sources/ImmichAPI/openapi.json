@@ -25842,6 +25842,27 @@
               }
             ]
           },
+          "nextPage": {
+            "deprecated": true,
+            "description": "Next page token",
+            "nullable": true,
+            "type": "string",
+            "x-immich-history": [
+              {
+                "version": "v1",
+                "state": "Added"
+              },
+              {
+                "version": "v2",
+                "state": "Stable"
+              },
+              {
+                "version": "v3.2.0",
+                "state": "Deprecated"
+              }
+            ],
+            "x-immich-state": "Deprecated"
+          },
           "total": {
             "description": "Total number of matching assets",
             "maximum": 9007199254740991,
@@ -25861,6 +25882,7 @@
           "facets",
           "items",
           "nextCursor",
+          "nextPage",
           "total"
         ],
         "type": "object"
@@ -26043,6 +26065,21 @@
           },
           "visibility": {
             "$ref": "#/components/schemas/EnumFilterAssetVisibility"
+          },
+          "iso": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "fNumber": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "focalLength": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "exposureTime": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "orientation": {
+            "$ref": "#/components/schemas/MediaOrientationFilter"
           }
         },
         "type": "object"
@@ -26145,6 +26182,21 @@
           },
           "visibility": {
             "$ref": "#/components/schemas/EnumFilterAssetVisibility"
+          },
+          "iso": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "fNumber": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "focalLength": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "exposureTime": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "orientation": {
+            "$ref": "#/components/schemas/MediaOrientationFilter"
           }
         },
         "type": "object"
@@ -32473,6 +32525,24 @@
           }
         },
         "type": "object"
+      },
+      "MediaOrientationFilter": {
+        "properties": {
+          "eq": {
+            "$ref": "#/components/schemas/SearchOrientation"
+          }
+        },
+        "required": [
+          "eq"
+        ],
+        "type": "object"
+      },
+      "SearchOrientation": {
+        "enum": [
+          "landscape",
+          "portrait"
+        ],
+        "type": "string"
       }
     }
   }

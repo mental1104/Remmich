@@ -297,6 +297,148 @@ public actor ImmichClient {
         }
     }
 
+    /// 按文件名和已选字段读取真实资源；query 不变，cursor 为上页原始令牌，size 为1–1000。
+    /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
+    public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
+        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
+        if let after, let before, after > before {
+            throw ImmichAPIError.invalidResponse
+        }
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
+        let output = try await makeClient().searchAssets(.init(body: .json(.init(
+            cursor: cursor,
+            filter: .init(
+                city: query.city.isEmpty ? nil : .init(eq: query.city),
+                country: query.country.isEmpty ? nil : .init(eq: query.country),
+                description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
+                hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+                isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
+                make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
+                model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
+                ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
+                originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
+                originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
+                personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+                state: query.state.isEmpty ? nil : .init(eq: query.state),
+                takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
+                _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
+                visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
+                iso: numericFilter(.iso, conditions: query.exifConditions),
+                fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
+                focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
+                exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
+                orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
+            ),
+            orderBy: .init(direction: .desc, field: .fileCreatedAt),
+            size: size,
+            withExif: true
+        ))))
+        switch output {
+        case let .ok(response):
+            let page = try response.body.json.assets
+            return ImmichMetadataSearchPage(assets: page.items.map(Self.timelineAsset), nextCursor: page.nextCursor)
+        case let .undocumented(statusCode, _):
+            throw Self.map(status: statusCode)
+        }
+    }
+
+    /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。
+    /// 智能模式使用官方旧式数字分页，避免把无分页的smart V3冒充完整结果。
+    public func search(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation? = nil, size: Int = 60) async throws -> ImmichSearchPage {
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.mode != .smart || text.isEmpty {
+            var cursor: String?
+            if let continuation {
+                guard case let .cursor(value) = continuation else { throw ImmichAPIError.invalidResponse }
+                cursor = value
+            }
+            let page = try await metadataSearch(query, cursor: cursor, size: size)
+            return ImmichSearchPage(assets: page.assets, continuation: page.nextCursor.map(ImmichSearchContinuation.cursor))
+        }
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        // 旧式smart没有这些组合的可靠分页契约，不得丢弃高级条件冒充成功。
+        guard query.exifConditions.isEmpty, query.orientation == nil, query.hasAlbums == nil, (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        var pageNumber = 1
+        if let continuation {
+            guard case let .page(value) = continuation, value > 0 else { throw ImmichAPIError.invalidResponse }
+            pageNumber = value
+        }
+        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
+        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
+        if let after, let before, after > before {
+            throw ImmichAPIError.invalidResponse
+        }
+        let output = try await makeClient().searchSmart(.init(body: .json(.init(
+            city: query.city.isEmpty ? nil : query.city,
+            country: query.country.isEmpty ? nil : query.country,
+            isFavorite: query.favoritesOnly ? true : nil,
+            make: query.cameraMake.isEmpty ? nil : query.cameraMake,
+            model: query.cameraModel.isEmpty ? nil : query.cameraModel,
+            page: pageNumber,
+            personIds: query.personIDs.isEmpty ? nil : query.personIDs,
+            query: text,
+            size: size,
+            state: query.state.isEmpty ? nil : query.state,
+            takenAfter: after,
+            takenBefore: before,
+            _type: query.media == .all ? nil : query.media == .image ? .IMAGE : .VIDEO,
+            visibility: query.archivedOnly ? .archive : .timeline,
+            withExif: true
+        ))))
+        switch output {
+        case let .ok(response):
+            let page = try response.body.json.assets
+            // 不把未知形状或倒退/重复页码当成正常终页。
+            guard page.nextCursor == nil else { throw ImmichAPIError.invalidResponse }
+            var next: ImmichSearchContinuation?
+            if let raw = page.nextPage {
+                guard let value = Int(raw), value > pageNumber else { throw ImmichAPIError.invalidResponse }
+                next = .page(value)
+            }
+            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
+        case let .undocumented(statusCode, _):
+            throw Self.map(status: statusCode)
+        }
+    }
+
+    /// field为EXIF字段，conditions为本次原子条件；返回非空数值过滤或nil，非法/重复槽位拒绝。
+    private func numericFilter(_ field: ImmichSearchNumericCondition.Field, conditions: [ImmichSearchNumericCondition]) throws -> Components.Schemas.NumberFilter? {
+        let matching = conditions.filter { $0.field == field }
+        guard !matching.isEmpty else { return nil }
+        var result = Components.Schemas.NumberFilter()
+        var seen: Set<ImmichSearchNumericCondition.Comparison> = []
+        for condition in matching {
+            guard condition.value.isFinite, condition.value >= 0, seen.insert(condition.comparison).inserted else { throw ImmichAPIError.invalidResponse }
+            switch condition.comparison {
+            case .equal: result.eq = condition.value
+            case .greaterThan: result.gt = condition.value
+            case .atLeast: result.gte = condition.value
+            case .lessThan: result.lt = condition.value
+            case .atMost: result.lte = condition.value
+            }
+        }
+        return result
+    }
+
+    /// kind为账号内候选字段，make仅约束型号；返回可读字符串，不请求null候选。
+    public func searchSuggestions(kind: ImmichSearchSuggestionKind, make: String? = nil) async throws -> [String] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard let field = Components.Schemas.SearchSuggestionType(rawValue: kind.rawValue) else { throw ImmichAPIError.invalidResponse }
+        let output = try await makeClient().getSearchSuggestions(.init(query: .init(
+            includeNull: false,
+            make: kind == .cameraModel ? make : nil,
+            _type: field
+        )))
+        switch output {
+        case let .ok(response): return try response.body.json
+        case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+        }
+    }
+
     public func videoAssets(cursor: String? = nil, size: Int = 100) async throws -> ImmichVideoPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }

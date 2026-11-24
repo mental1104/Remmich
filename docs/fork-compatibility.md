@@ -37,6 +37,19 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- Saved-search contracts are local and pending CI: full typed conditions preserve null/missing values and unknown-field rejection; explicit CRUD methods use existing authenticated fork routes and exact statuses. SearchView capture/restore/management UI is not connected yet, so saved searches are not advertised as supported. No production writes performed.
+
+- EXIF/orientation/album-state follow-up is local and awaits CI: metadata supports numeric atomic comparisons and exact extra filters; invalid values/slots reject before network. Smart+advanced combinations are explicitly unavailable until reliable pagination is implemented; no silent condition dropping. Minimal schema augmentation is pinned to the owning Fork. Saved conditions and other extended fields remain unfinished.
+
+- Search suggestions follow-up adds current-account city/camera choices through official GET suggestions, with manual input fallback and stale-owner rejection. New synthetic request tests and Xcode validation are pending; no public Photon lookup is involved. Fork EXIF and saved conditions remain unfinished.
+
+- Consolidated PR #3 now includes native domain search models plus filename/description/path/OCR/smart modes. PR #2 app checks found two forbidden Feature SDK imports; those checks remain intact, and mapping moved to Infrastructure. This revision awaits new CI. Metadata uses opaque cursors, smart uses official legacy page numbers; no claim that smart V3 has pagination. Fork EXIF, suggestions and saved conditions remain unfinished.
+
+- People/date filter follow-up is implemented on codex/feature-search-people-dates but awaits CI: account-scoped people, optional local calendar boundaries, invalid-range rejection and explicit SDK error messages. Smart search, suggestions, Fork EXIF and saved conditions remain unfinished. Do not use older successful CI for this follow-up.
+
+- Native search work in progress (PR #3): real metadata cursor results and legacy smart page results, people/calendar-day/city/camera/media filters, account-scoped suggestions, and Fork EXIF/orientation/album filters. Local follow-ups add country/state controls and suggestions, favorites/archive switches, and their saved-condition reuse; they are not covered by ca271bb CI. Favorites off means unrestricted; archive off preserves timeline scope, with hidden/locked content excluded. Read-only POST uses an explicit ephemeral no-redirect path in ImmichQueuedReadTransport; durable GET indexing stays unchanged. Smart with advanced filters remains unavailable until reliable combined pagination is implemented.
+- Saved-search follow-up adds an account-scoped panel for create/rename/apply/confirmed replacement/delete using existing authenticated fork/search-presets routes. Reuse validates all conditions before replacing the query; unsupported conditions are preserved and cannot be partially applied. Rename re-reads full conditions; replacement re-reads the latest name, but the server has no compare-and-swap contract. Failed or cancelled writes require a reload, without automatic retry or photo changes. ca271bb passed complete CI45336010250, including the panel/codec tests, API tests, app compilation and simulator app tests; local region/visibility follow-ups still need separate CI. Neither this nor earlier successful builds establish device acceptance. Parent remains pinned to verified0af1897.
+
 - CI simulator repair: Build and Tests independently select an installed iPhone with iOS 27+ using Scripts/select-ci-simulator.sh. The previous fixed iPhone 17 Pro was absent on the runner; this is unrelated to the user's physical iPhone 15 Pro. NAS syntax/synthetic checks passed; GitHub Xcode validation is pending.
 
 - Initial downstream app build for physical iOS succeeded (unsigned compile).
