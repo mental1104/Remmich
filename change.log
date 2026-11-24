@@ -41,6 +41,13 @@
 - Preserve and strengthen assertions: reference plus city must round-trip; malformed/non-v4 references and text/reference conflict must fail as a whole. Thumbnail/preview must contain exactly size and edited=true, retaining path/auth/size identity checks. No production code, assertion removal, compiler setting or CI gate changes.
 - Scoped SwiftFormat/diff checks pass on NAS; repaired Swift test execution remains unverified. No server/API/schema/production/signing changes. Revert this test-only contract update independently if superseded.
 
+## 2026-11-24: Repair phone search UI hit regions, control identity and fixture entry gate
+
+- Source: codex/fix-search-phone-ui from failed424a22a, upstream remains672f02e; no sync. CI45394307543/job138445871332 phone artifact14923531997 records real iPhone17/iOS27.2 simulator execution: five scenarios, three failed and two passed. This patch is independent of scene/local-media work; no push/CI/workflow/production or shared Media/Viewer changes.
+- Original log/AX/PNG/recordings locate failures before late-account switching, before Viewer entry and before rotation. Search-only result labels now have a real square rectangle/contentShape instead of relying on the non-hittable cover and overflowing intrinsic photo dimensions. Filter container ID moves onto its title, retaining child Toggle IDs. DEBUG source explicitly awaits entry report after gate reservation and retains an early release instead of creating an untracked report Task inside the suspended continuation.
+- Preserve all five UI tests, native Viewer/rendered-pixel checks, screenshots, account-completion barrier, rotation/keyboard checks and timeouts. Add square/nonoverlap/hittable assertions and two actual fixture/Store tests for early release and ignored-cancellation late response. No skipped checks or fake success.
+- Actual NAS checks: scoped SwiftFormat0.64.5 format/lint for4 Swift files and diff whitespace, actual downloaded evidence inspection. No Swift/Xcode here: repaired compilation, unit/UI rerun, full chain and real-device acceptance remain UNVERIFIED; do not claim the observed assertions are fixed until execution. docs/search-phone-ci-diagnosis.md records exact stage/source evidence and inference limits. Revert this patch; no durable media/server data change.
+
 ## 2026-11-24: Make new management HTTP fixture captures explicitly Sendable
 
 - Source: candidatea207b3b; upstream remains672f02e. CI45392189009/job138438516772 ended compilation failure with one source diagnostic at AlbumDirectoryManagementTests.swift:481: sending a Task closure risks a race. The previous batch macro errors are absent. App linking is not combined build/test success; API/app/UI execution remains incomplete.

@@ -80,7 +80,7 @@ struct SearchView: View {
                     referenceCard(reference)
                 }
                 SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
-                DisclosureGroup("Filters") {
+                DisclosureGroup {
                     VStack {
                         Picker("Search mode", selection: Binding(get: { query.mode }, set: { mode in
                             query.mode = mode
@@ -199,8 +199,10 @@ struct SearchView: View {
                             Button("Load people") { Task { await loadPeople() } }
                         }
                     }.textFieldStyle(.roundedBorder)
+                } label: {
+                    // 容器identifier会传播到开关等子节点；只标记标题，保留每个筛选控件自己的身份。
+                    Text("Filters").accessibilityIdentifier("search-filters")
                 }.padding(.horizontal)
-                    .accessibilityIdentifier("search-filters")
                 if let error = store.error {
                     Text(error).foregroundStyle(.secondary)
                         .accessibilityIdentifier("search-error")
@@ -227,8 +229,7 @@ struct SearchView: View {
                 LazyVGrid(columns: [.init(.adaptive(minimum: 100, maximum: 180), spacing: 2)], spacing: 2) {
                     ForEach(store.assets) { asset in
                         Button { open(asset) } label: {
-                            LibraryAssetCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
-                                .aspectRatio(1, contentMode: .fit).clipped()
+                            SearchResultCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
@@ -445,6 +446,23 @@ struct SearchView: View {
                                  groupedCatalogs: .init(), isComplete: true))
         selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
                                            origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Search")), timeline: timeline)
+    }
+}
+
+/// 搜索按钮的真实正方形标签；图片区原本禁止命中，需由独立矩形定义可点击边界，避免原图宽高比溢出格子。
+private struct SearchResultCover: View {
+    let assetID: String
+    let revision: Date
+    let media: MediaLibraryController
+
+    var body: some View {
+        Rectangle().fill(.clear)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                LibraryAssetCover(assetID: assetID, revision: revision, media: media)
+            }
+            .clipped()
+            .contentShape(Rectangle())
     }
 }
 

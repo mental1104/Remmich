@@ -15,8 +15,14 @@ final class SearchAcceptanceUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'search-result-'")).count, 0)
         submit("synthetic", in: app)
         assertLabel("Loaded 2 items", identifier: "search-loaded-count", in: app)
+        let first = app.buttons["search-result-search-alpha-1"]
+        let second = app.buttons["search-result-search-alpha-2"]
+        XCTAssertTrue(first.isHittable)
+        XCTAssertLessThan(abs(first.frame.width - first.frame.height), 1)
+        XCTAssertLessThan(abs(second.frame.width - second.frame.height), 1)
+        XCTAssertFalse(first.frame.intersects(second.frame))
         capture("search-results-portrait", app: app)
-        app.buttons["search-result-search-alpha-1"].tap()
+        first.tap()
         XCTAssertTrue(element("asset-viewer-page-search-alpha-1", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(element("asset-viewer-rendered-pixels-search-alpha-1", in: app).waitForExistence(timeout: 10))
         capture("search-native-viewer", app: app)

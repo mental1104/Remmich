@@ -86,7 +86,7 @@
                     if state.hasPrefix("started "), let old = retiredReader {
                         retiredReader = nil
                         // 新账号请求真正开始后才释放旧响应，避免依赖手势速度或固定等待。
-                        Task { await old.finishLateRequest() }
+                        await old.finishLateRequest()
                     }
                 } else if state == "completed late" {
                     retiredState = "returned"
@@ -98,12 +98,14 @@
     /// 合成读取器可控地产生结果/空态/分页失败和迟到响应，不执行HTTP或媒体写入。
     actor SearchUIFixtureReader: NativeSearchReading {
         private let account: String
-        private let report: @MainActor @Sendable (String, String) -> Void
+        private let report: @MainActor @Sendable (String, String) async -> Void
         private var failedContinuation = false
         private var pendingLateRequest: CheckedContinuation<Void, Never>?
+        private var lateRequestInstalled = false
+        private var lateRequestReleased = false
 
         /// account为合成命名空间；report只把请求阶段交回主线程观察，不控制业务状态机。
-        init(account: String, report: @escaping @MainActor @Sendable (String, String) -> Void) {
+        init(account: String, report: @escaping @MainActor @Sendable (String, String) async -> Void) {
             self.account = account
             self.report = report
         }
@@ -113,11 +115,18 @@
             let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if text == "late" {
                 // 故意忽略任务取消；仅新账号请求进入后释放，确定性覆盖迟到响应。
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    pendingLateRequest = continuation
-                    // 先安装gate再发布started，测试观察到started即可确定旧读取确实在途。
-                    Task { await report(account, "started late") }
+                guard !lateRequestInstalled else { throw NativeSearchError.invalidResponse }
+                lateRequestInstalled = true
+                lateRequestReleased = false
+                // gate先占位再显式等待主线程发布，避免悬挂continuation依赖另一个未跟踪Task来通知UI。
+                await report(account, "started late")
+                if !lateRequestReleased {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        pendingLateRequest = continuation
+                    }
                 }
+                lateRequestInstalled = false
+                lateRequestReleased = false
                 await report(account, "completed late")
                 return .init(assets: [Self.asset(account: account, index: 9)], continuation: nil)
             }
@@ -146,6 +155,9 @@
 
         /// 由新账号的请求阶段触发；恢复一次旧等待，不发布业务结果或访问网络。
         func finishLateRequest() {
+            guard lateRequestInstalled else { return }
+            // 发布started期间即可收到新账号释放，保留该信号，不能在稍后安装continuation时丢失。
+            lateRequestReleased = true
             pendingLateRequest?.resume()
             pendingLateRequest = nil
         }
