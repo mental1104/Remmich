@@ -22,7 +22,7 @@
 
 真实服务端顺序为 `AssetService.editAsset/removeAssetEdits → AssetEditRepository.replaceAll → 排 AssetEditThumbnailGeneration → HTTP 回执`。asset_edit 的 insert/delete 触发器更新 asset.isEdited；派生文件和 asset.width/height 在 `MediaService.generateAssetEditThumbnails` 后续任务中才更新。`getForThumbnail(edited=true)` 优先已编辑文件，缺少时仍可回落未编辑文件。因此 HTTP 成功不能证明渲染完成，客户端没有额外生成完成 API，也没有伪造状态。
 
-实际读取到后续 updatedAt 后，新远程身份和持久 warm 的毫秒文件版本会拒绝中间缓存。查看器实际图片 metadata 决定最终显示比例，不从原始 EXIF 猜裁剪比例，也不修改 Timeline 模型。root 仍需刷新查看器独立的 AssetViewerSession 快照；现有管理回调只刷 detail、AppShell 只触发一次 sync，可能早于派生完成。该集成与实际异步时序验收未完成，不能称端到端编辑验收通过。
+实际读取到后续 updatedAt 后，新远程身份和持久 warm 的毫秒文件版本会拒绝中间缓存。查看器实际图片 metadata 决定最终显示比例，不从原始 EXIF 猜裁剪比例。后续已添加 [查看器独立快照的有限刷新](viewer-edit-refresh.md)、显式重读与实际显示状态失效，不再只依赖 detail/一次索引 sync；该实现仍不证明异步完成或真实设备验收通过。
 
 索引 sourceRevision 字符串保留既有不带小数 ISO 契约，避免越界改写所有消费者。新文件名检查和远程缓存补足本路径；没有声称已修复所有索引子秒精度、所有中间版本的完成判定或原子编辑竞争。
 

@@ -16,6 +16,7 @@ struct AssetViewerDismissalTarget {
     let fillsFrame: Bool
 }
 
+/// 原生照片/视频查看器；静态远程照片可显式直读或有限观察编辑版本，其他媒体仍走既有显示生命周期。
 struct AssetViewerView: View {
     private static let memoryLogger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -53,6 +54,7 @@ struct AssetViewerView: View {
     @State private var zoomedAssetID: String?
     @State private var chromeVisible = true
     @State private var showsManagement = false
+    @State private var viewerRefresh = AssetViewerRefreshController()
     @State private var showsInfo = false
     @State private var detailStates: [String: AssetViewerDetailState] = [:]
     @State private var selectedPlace: PlaceLocation?
@@ -547,9 +549,12 @@ struct AssetViewerView: View {
         .navigationBarBackButtonHidden(true)
         .sheet(isPresented: $showsManagement) {
             if let asset = session.selectedAsset {
-                AssetManagementView(assetID: asset.id, controller: media.management) {
+                AssetManagementView(assetID: asset.id, controller: media.management, media: media,
+                                    previewRevision: asset.thumbnailRevision, editsChanged: { refreshFromServer(afterEdit: true) })
+                {
                     refreshedDetailAssetIDs.remove(asset.id)
                     Task { await loadAssetDetail(asset.id) }
+                    refreshFromServer(afterEdit: false)
                 }
             }
         }
@@ -614,6 +619,7 @@ struct AssetViewerView: View {
             await preloadCachedAssetDetails(pagerWindowAssets.map(\.id))
         }
         .onChange(of: session.selectedAssetID) { _, newAssetID in
+            viewerRefresh.cancel()
             interactiveMapFrame = nil
             infoScrollDismissalBlocked = false
             logMemoryPlayback("selection")
@@ -640,6 +646,12 @@ struct AssetViewerView: View {
             }
         }
         .onChange(of: locations?.namespace) { _, _ in interactiveMapFrame = nil }
+        .onChange(of: media.management.generation) { _, _ in viewerRefresh.cancel() }
+        .onChange(of: isDismissing) {
+            _, value in if value {
+                viewerRefresh.cancel()
+            }
+        }
         .onChange(of: route.id) { _, _ in
             replaceMemoryRoute()
         }
@@ -656,6 +668,7 @@ struct AssetViewerView: View {
             beginOpeningAnimation()
         }
         .onDisappear {
+            viewerRefresh.cancel()
             interactiveMapFrame = nil
             returnSource?.stop()
             logMemoryPlayback("disappear")
@@ -680,6 +693,9 @@ struct AssetViewerView: View {
             media.endViewerSession(id: mediaViewerID, originalAssets: requestedFullSizeAssets)
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                viewerRefresh.cancel()
+            }
             guard !isDismissing else { return }
             if phase == .active {
                 if let videoPlaybackSession {
@@ -1335,6 +1351,11 @@ struct AssetViewerView: View {
                     .accessibilityHidden(infoProgress >= 0.5)
                 }
 
+                if supportsFreshStillRefresh {
+                    refreshStatus
+                        .padding(.horizontal, 16)
+                }
+
                 bottomActions
                     .padding(.horizontal, 16)
             }
@@ -1728,6 +1749,60 @@ struct AssetViewerView: View {
                 }
             }
         }
+    }
+
+    /// 只对远程静态照片提供新刷新流程；Saved Photos、视频和Live Photo沿用原有播放/读取行为。
+    private var supportsFreshStillRefresh: Bool {
+        media.savedPhotosLibrary == nil && media.management.client != nil
+            && session.selectedAsset?.mediaKind == .image && session.selectedAsset?.livePhotoVideoID == nil
+    }
+
+    /// 显式刷新与有限观察状态；文案说明派生可能仍在生成，从不把HTTP写入或尺寸变化标为ready。
+    private var refreshStatus: some View {
+        HStack(spacing: 12) {
+            if let message = viewerRefresh.message {
+                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Spacer(minLength: 0)
+            }
+            Button { refreshFromServer(afterEdit: false) } label: {
+                if viewerRefresh.busy {
+                    ProgressView()
+                } else {
+                    Label("刷新照片", systemImage: "arrow.clockwise")
+                }
+            }
+            .disabled(viewerRefresh.busy)
+            .accessibilityIdentifier("asset-viewer-refresh")
+        }
+        .padding(12)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityIdentifier("asset-viewer-refresh-status")
+    }
+
+    /// afterEdit最多观察四次，其余只读一次；固定选中资源及管理代际，后台/关闭/换选择或账号后禁止发布。
+    private func refreshFromServer(afterEdit: Bool) {
+        guard supportsFreshStillRefresh, scenePhase == .active, !isDismissing,
+              let asset = session.selectedAsset, let client = media.management.client else { return }
+        let owner = media.management.generation
+        viewerRefresh.refresh(asset: asset, afterEdit: afterEdit,
+                              read: { try await client.freshViewerAsset(asset.id, ownerID: asset.ownerID) },
+                              isCurrent: {
+                                  media.management.generation == owner && session.selectedAssetID == asset.id
+                                      && scenePhase == .active && !isDismissing
+                              }, publish: { fresh in
+                                  guard session.replaceSelectedAsset(fresh) else { return false }
+                                  if fresh.thumbnailRevision != asset.thumbnailRevision {
+                                      renderedImageMetadataByAssetID.removeValue(forKey: asset.id)
+                                      displayedShareImage = nil
+                                      if afterEdit {
+                                          fullResolutionRequestIDs.removeValue(forKey: asset.id)
+                                          fullResolutionLoadErrors.removeValue(forKey: asset.id)
+                                      }
+                                      updateViewerPrefetch()
+                                  }
+                                  return true
+                              })
     }
 
     private var shareSelection: MediaShareSelection? {

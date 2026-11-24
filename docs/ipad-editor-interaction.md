@@ -15,6 +15,6 @@
 
 新增领域测试覆盖移动与四个角在缩放窗口中的连续性、外部调整/重置后旧锚点拒绝、空视口/NaN 输入、原图一/十像素移动、缩放固定左上点和边界。它们调用实际 Canvas 使用的 `AssetEditCropDragSession` 与像素方向操作；没有伪装成 UIKit 手势或 VoiceOver 硬件验收。
 
-NAS 已跑四个受影响 Swift 文件的 SwiftFormat 0.64.5 scoped lint 和 diff 检查。NAS 无 Swift/Xcode，以上测试、硬件焦点、指针、VoiceOver、Dynamic Type 与实际 Stage Manager/横竖屏交互仍未执行，等待统一 macOS CI 与 iPhone 15 Pro/iPad Pro 2022 11 英寸验收。阶段 3 的全应用多任务/键盘/指针与查看器异步编辑刷新仍未完成。
+NAS 已跑四个受影响 Swift 文件的 SwiftFormat 0.64.5 scoped lint 和 diff 检查。NAS 无 Swift/Xcode，以上测试、硬件焦点、指针、VoiceOver、Dynamic Type 与实际 Stage Manager/横竖屏交互仍未执行，等待统一 macOS CI 与 iPhone 15 Pro/iPad Pro 2022 11 英寸验收。查看器后续已接有限刷新，但真实派生 ready 确认和全应用多任务/键盘/指针验收仍未完成。
 
 回退本切片只改变输入方式和拖动连续性，保留原图、已保存编辑和离线资源，不需要数据回滚。

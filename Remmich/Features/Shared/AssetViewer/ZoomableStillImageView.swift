@@ -2,6 +2,7 @@ import Nuke
 import SwiftUI
 import UIKit
 
+/// 实际静态预览视图；源revision变化使旧像素状态失效，原片仍只能由显式fullResolutionRequestID触发。
 struct ZoomableStillImageView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -27,6 +28,7 @@ struct ZoomableStillImageView: View {
     @State private var loadedFileSizeBytes: Int?
     @State private var renderedSource: AssetViewerRenderedImageSource?
     @State private var isZoomed = false
+    @State private var loadedRevision: Date
 
     init(
         asset: TimelineAssetSummary,
@@ -61,6 +63,7 @@ struct ZoomableStillImageView: View {
         self.zoomChanged = zoomChanged
         self.livePhotoPressChanged = livePhotoPressChanged
         self.toggleChrome = toggleChrome
+        _loadedRevision = State(initialValue: asset.thumbnailRevision)
 
         let cachedPreview = media.cachedViewerPreview(
             for: asset,
@@ -104,11 +107,18 @@ struct ZoomableStillImageView: View {
         .accessibilityIdentifier("asset-viewer-still-\(asset.id)")
     }
 
+    /// 源revision保留子秒精度；同一照片的新服务端版本必须触发真实预览读取，不能只更新summary标签。
     private var loadID: String {
-        "\(asset.id)|\(targetPixels.width)x\(targetPixels.height)|\(isSelected)|\(reportsRenderedImageMetadata)|\(fullResolutionRequestID ?? 0)"
+        "\(asset.id)|\(asset.thumbnailRevision.timeIntervalSinceReferenceDate)|\(targetPixels.width)x\(targetPixels.height)|\(isSelected)|\(reportsRenderedImageMetadata)|\(fullResolutionRequestID ?? 0)"
     }
 
+    /// 已明确切到新服务器版本时清除旧显示状态；规格/选择变化仍复用当前版本，不改变原片显式触发条件。
     private func loadDisplayImage() async {
+        if loadedRevision != asset.thumbnailRevision {
+            loadedRevision = asset.thumbnailRevision
+            image = nil; failed = false; loadedTargetPixels = nil; loadedFileSizeBytes = nil; renderedSource = nil
+            isZoomed = false; zoomChanged(false)
+        }
         guard let pipeline = media.pipeline else {
             if fullResolutionRequestID != nil {
                 fullResolutionLoadFailed("Unable to load original.")

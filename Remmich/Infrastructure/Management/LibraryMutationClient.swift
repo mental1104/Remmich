@@ -293,6 +293,21 @@ final nonisolated class LibraryMutationClient: Sendable {
         try await JSONDecoder().decode(ManagedAsset.self, from: send("GET", ["assets", validID(id)]))
     }
 
+    /// id/ownerID固定查看器已选静态照片；用既有无重定向鉴权会话直读，4秒超时且只接受匹配身份的200。
+    /// 返回真实显示字段，不走索引缓存/后台GET队列，也不把响应当作编辑派生完成通知。
+    func freshViewerAsset(_ id: String, ownerID: String) async throws -> AssetViewerFreshAsset {
+        var request = try request("GET", ["assets", validID(id)])
+        request.timeoutInterval = 4
+        let (data, response) = try await session.data(for: request)
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let value = try JSONDecoder().decode(AssetViewerFreshAsset.self, from: bytes)
+        guard UUID(uuidString: value.id) == UUID(uuidString: id), value.ownerId == ownerID,
+              value.type == "IMAGE", value.livePhotoVideoId == nil else { throw LibraryWriteError.malformedResponse }
+        _ = try value.revision()
+        return value
+    }
+
     func albums(containing assetID: String? = nil) async throws -> [ManagedAlbum] {
         let query = try assetID.map { try [URLQueryItem(name: "assetId", value: validID($0))] } ?? []
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))

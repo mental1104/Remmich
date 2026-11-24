@@ -4,7 +4,7 @@
 
 ## 行为和入口
 
-原查看器的“编辑与管理 → 无损编辑”进入新 `Features/Editing/AssetEditingView`。`AssetManagementView` 保留原管理功能；root 需要在 `AssetViewerView` 的调用处传入 `media: media, previewRevision: asset.thumbnailRevision`。旧调用仍能编译，但缺少真实媒体控制器时编辑页明确失败，不能盲保存。
+原查看器的“编辑与管理 → 无损编辑”进入新 `Features/Editing/AssetEditingView`。`AssetManagementView` 保留原管理功能；`AssetViewerView` 已传入 `media: media, previewRevision: asset.thumbnailRevision` 并接有限刷新。其他旧调用仍能编译，但缺少真实媒体控制器时编辑页明确失败，不能盲保存。
 
 - 真实有限预览、原图/结果对照；只在内存中调整参数，不覆盖原片。
 - 选框内部拖动、四角缩放、双指捏合，始终落到合法整数像素。精确 Stepper 提供不依赖手势的操作。
@@ -51,6 +51,6 @@ NAS 临时复现脚本 `/tmp/remmich-editor-sharp-golden.mjs`，报告 `/tmp/rem
 
 ## 后续与回退
 
-阶段 3 还需要普通查看器 edited 资源闭环、派生版本刷新，以及全应用 iPad 多任务/尺寸变化、键盘/指针、Dynamic Type、无障碍和设备验收。本切片不把搜索 UI 测试或 API Schema 检查当成编辑验收。
+普通 edited 展示、离线来源隔离与 [有限查看器刷新](viewer-edit-refresh.md) 已有可审查实现；真正异步 ready 确认、统一 Swift/UI 验证，以及全应用 iPad 多任务/键盘/指针/无障碍与设备验收仍未完成。本切片不把搜索 UI 或 Schema 检查当成编辑验收。
 
 可独立 revert 本客户端编辑切片，恢复旧表单或暂时隐藏入口；不会恢复或删除已保存的官方服务端编辑。恢复原图应由用户明确使用现有 reset 操作，原始照片始终保留。未修改生产配置，也没有任何迁移需回滚。

@@ -50,6 +50,20 @@ struct ViewerPhotoLoadingTests {
         #expect(try containsThumbnail(#require(fixture.window.rootViewController?.view)))
     }
 
+    /// 实际产品View收到同秒的新summary时必须重新请求预览，不因loadedTargetPixels相同继续使用旧图。
+    @Test func sameSecondServerRevisionReloadsTheActualPreviewView() async throws {
+        let fixture = try await makeFixture(revision: Date(timeIntervalSince1970: 100.1))
+        defer { fixture.close() }
+        try await waitUntil { fixture.state.metadata.last?.source == .preview }
+        let initial = fixture.asset
+        let bytes = Data(#"{"id":"\#(initial.id)","ownerId":"\#(initial.ownerID)","type":"IMAGE","updatedAt":"1970-01-01T00:01:40.200Z","width":24,"height":18,"thumbhash":null,"isFavorite":false,"visibility":"timeline","isTrashed":false}"#.utf8)
+        let fresh = try JSONDecoder().decode(AssetViewerFreshAsset.self, from: bytes)
+        fixture.state.revisedAsset = try fresh.replacing(initial)
+        try await waitUntil { fixture.loader.urls.count == 2 && fixture.loader.completedCount == 2 }
+        #expect(fixture.loader.urls.allSatisfy { $0.lastPathComponent == "thumbnail" && $0.query == "size=preview&edited=true" })
+        #expect(fixture.state.metadata.last?.source == .preview)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0 ..< 150 {
             if condition() {
@@ -60,7 +74,8 @@ struct ViewerPhotoLoadingTests {
         try #require(condition(), "Viewer did not reach the expected loading state")
     }
 
-    private func makeFixture(selected: Bool = true, failsPreview: Bool = false) async throws -> PhotoFixture {
+    /// selected控制预载角色，failsPreview模拟失败，revision固定源版本；返回真实UIKit宿主及局部媒体loader。
+    private func makeFixture(selected: Bool = true, failsPreview: Bool = false, revision: Date = .distantPast) async throws -> PhotoFixture {
         try await waitUntil { UIApplication.shared.connectedScenes.contains { $0 is UIWindowScene } }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         func image(width: CGFloat, height: CGFloat) -> UIImage {
@@ -84,7 +99,7 @@ struct ViewerPhotoLoadingTests {
                                          capturedAt: .distantPast, uploadedAt: .distantPast, localOffsetHours: 0,
                                          mediaKind: .image, durationMilliseconds: nil, aspectRatio: 4.0 / 3,
                                          isFavorite: false, visibility: .timeline, livePhotoVideoID: nil, stack: nil,
-                                         projectionType: nil, thumbhash: nil, thumbnailRevision: .distantPast)
+                                         projectionType: nil, thumbhash: nil, thumbnailRevision: revision)
         let state = PhotoLoadingState(selected: selected)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 200, height: 200)
@@ -93,7 +108,7 @@ struct ViewerPhotoLoadingTests {
         ))
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
-        return PhotoFixture(window: window, media: media, loader: loader, state: state, thumbnail: thumbnail)
+        return PhotoFixture(window: window, media: media, loader: loader, state: state, thumbnail: thumbnail, asset: asset)
     }
 }
 
@@ -104,6 +119,7 @@ private struct PhotoFixture {
     let loader: PhotoDataLoader
     let state: PhotoLoadingState
     let thumbnail: UIImage
+    let asset: TimelineAssetSummary
 
     func close() {
         window.isHidden = true
@@ -116,6 +132,7 @@ private struct PhotoFixture {
 private final class PhotoLoadingState: ObservableObject {
     @Published var selected: Bool
     @Published var requestID: Int?
+    @Published var revisedAsset: TimelineAssetSummary?
     var metadata: [AssetViewerRenderedImageMetadata] = []
 
     init(selected: Bool) {
@@ -131,7 +148,7 @@ private struct PhotoLoadingView: View {
 
     var body: some View {
         ZoomableStillImageView(
-            asset: asset, media: media, isSelected: state.selected, sourceImage: thumbnail,
+            asset: state.revisedAsset ?? asset, media: media, isSelected: state.selected, sourceImage: thumbnail,
             targetPixels: .init(width: 20, height: 20), fitRect: CGRect(x: 0, y: 0, width: 200, height: 150),
             animatesFitChanges: false, showsBackground: false, reportsRenderedImageMetadata: true,
             fullResolutionRequestID: state.requestID, renderedImageMetadataChanged: { state.metadata.append($0) },

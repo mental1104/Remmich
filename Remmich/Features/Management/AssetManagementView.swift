@@ -7,6 +7,7 @@ struct AssetManagementView: View {
     let media: MediaLibraryController?
     let previewRevision: Date?
     let changed: () -> Void
+    let editsChanged: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var asset: ManagedAsset?
     @State private var albums: [ManagedAlbum] = []
@@ -20,15 +21,17 @@ struct AssetManagementView: View {
     @State private var confirmsReset = false
     @State private var editing = false
 
-    /// assetID/controller保留原管理契约；media/revision由查看器提供，旧调用缺省时仍能管理但不盲保存可视编辑。
+    /// assetID/controller保留原管理契约，media/revision来自查看器；editsChanged可区分需有限读取派生版本的编辑。
+    /// 缺省媒体仍可管理但不盲保存可视编辑，缺省专用回调继续使用changed，保留原有管理宿主兼容。
     init(assetID: String, controller: LibraryManagementController, media: MediaLibraryController? = nil,
-         previewRevision: Date? = nil, changed: @escaping () -> Void)
+         previewRevision: Date? = nil, editsChanged: (() -> Void)? = nil, changed: @escaping () -> Void)
     {
         self.assetID = assetID
         self.controller = controller
         self.media = media
         self.previewRevision = previewRevision
         self.changed = changed
+        self.editsChanged = editsChanged
     }
 
     var body: some View {
@@ -97,12 +100,16 @@ struct AssetManagementView: View {
                 Text("会影响所有客户端。回收站按服务器保留期限清理；这里不执行永久删除，也不删除手机原片。")
             }
             .confirmationDialog("清除已有的全部编辑？", isPresented: $confirmsReset, titleVisibility: .visible) {
-                Button("恢复原图", role: .destructive) { run { try await $0.resetEdits(assetID) } }
+                Button("恢复原图", role: .destructive) { run(isEditChange: true) { try await $0.resetEdits(assetID) } }
             } message: { Text("保留原始文件，移除服务器上的旋转、镜像和裁剪参数。") }
             .sheet(isPresented: $editing) {
                 if let asset {
                     AssetEditingView(asset: asset, controller: controller, media: media, previewRevision: previewRevision) {
-                        changed()
+                        if let editsChanged {
+                            editsChanged()
+                        } else {
+                            changed()
+                        }
                         Task { await load() }
                     }
                 }
@@ -131,13 +138,18 @@ struct AssetManagementView: View {
         }
     }
 
-    private func run(_ action: @escaping @Sendable (LibraryMutationClient) async throws -> Void) {
+    /// isEditChange只区分需有限观察派生图的编辑，action仍走原有显式写通道；无专用回调时兼容旧changed入口。
+    private func run(isEditChange: Bool = false, _ action: @escaping @Sendable (LibraryMutationClient) async throws -> Void) {
         error = nil
         notice = nil
         Task {
             do {
                 try await controller.perform(action)
-                changed()
+                if isEditChange, let editsChanged {
+                    editsChanged()
+                } else {
+                    changed()
+                }
                 notice = "服务器已确认操作成功。"
                 await load()
             } catch { self.error = error.localizedDescription }

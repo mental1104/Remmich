@@ -6,6 +6,7 @@ build_directory=$(mktemp -d "${TMPDIR:-/tmp}/remmich-contracts.XXXXXX")
 swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/LibraryMutationClient.swift \
   Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
+  Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
   Remmich/Domain/Timeline/NativeSearchModels.swift \
