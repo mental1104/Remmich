@@ -13,8 +13,8 @@ struct SearchRatingTests {
         var query = ImmichMetadataSearch()
         query.text = "synthetic"
         query.rating = rating
-        let client = try client(rating: rating)
-        _ = try await client.search(query)
+        let api = try client(rating: rating)
+        _ = try await api.search(query)
     }
 
     /// 旧式smart的1–5评分直接使用现有平铺字段；不更换分页协议。
