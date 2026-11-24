@@ -1,3 +1,11 @@
+## 2026-11-24: Preserve unrated legacy smart search
+
+- Source: codex/feature-search-rating overb27ed08; upstream remains672f02e, no upstream sync or server/database/production change.
+- The existing server legacy smart DTO accepts null for unrated. Extract its original nullable integer leaf into a named reference during schema preparation and apply the documented generator type override, so an explicit enum null survives the outer Optional's encoding. Existing page tokens and fields stay unchanged;0 remains outside legacy smart's1–5/null contract.
+- Normalize the reference back to its original leaf and compare the entire document: all JSON values match the prior snapshot. Raw official SHA remains4e15b581…; prepared SHA is15ca2935…. Python3.8 execution/syntax and preparation idempotence passed. Update provenance; generated Swift was not edited.
+- Extend SDK wire tests for smart absent/null/1/5; UI no longer blocks unrated smart. Local SwiftFormat/diff checks pass; new Swift code still awaits CI. Current bcaf66f CI45338292119 passed build/API tests and is running simulator app tests; it cannot validate this follow-up.
+- Rollback: revert this follow-up plus its generated-input preparation/config changes, preserving saved server conditions and media. Search stage remains incomplete due other filters,0/advanced smart pagination and synthetic UI coverage.
+
 ## 2026-11-24: Rating filters with explicit null semantics
 
 - Source: codex/feature-search-rating overbcaf66f; upstream remains672f02e. No upstream sync, server/API/schema/database/production change.

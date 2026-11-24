@@ -418,14 +418,14 @@ public actor ImmichClient {
         }
     }
 
-    /// rating为旧式smart评分；仅1–5可由该契约表达，拒绝未评分/0及越界，不能悄悄省略。
-    private func legacyRating(_ rating: ImmichSearchRating) throws -> Int? {
+    /// rating为旧式smart评分；null保留未评分，1–5为具体值，拒绝0及越界而非悄悄省略。
+    private func legacyRating(_ rating: ImmichSearchRating) throws -> ImmichNullableRatingValue? {
         switch rating {
         case .any: return nil
-        case .unrated: throw ImmichAPIError.invalidResponse
+        case .unrated: return .null
         case let .stars(value):
             guard (1 ... 5).contains(value) else { throw ImmichAPIError.invalidResponse }
-            return value
+            return .stars(value)
         }
     }
 

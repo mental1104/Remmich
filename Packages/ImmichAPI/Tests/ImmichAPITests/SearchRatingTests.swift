@@ -17,21 +17,22 @@ struct SearchRatingTests {
         _ = try await api.search(query)
     }
 
-    /// 旧式smart的1–5评分直接使用现有平铺字段；不更换分页协议。
-    @Test func smartKeepsSupportedRating() async throws {
+    /// 旧式smart的缺省/null/1–5直接使用现有平铺字段；不更换分页协议。
+    @Test(arguments: [ImmichSearchRating.any, .unrated, .stars(1), .stars(5)])
+    func smartKeepsSupportedRating(_ rating: ImmichSearchRating) async throws {
         var query = ImmichMetadataSearch()
         query.text = "synthetic"
         query.mode = .smart
-        query.rating = .stars(3)
-        _ = try await client(rating: .stars(3), smart: true).search(query)
+        query.rating = rating
+        _ = try await client(rating: rating, smart: true).search(query)
     }
 
-    /// 未评分/0不能由旧式smart完整表达，越界值也须在网络之前拒绝。
+    /// 0不在旧式smart评分范围内，越界值也须在网络之前拒绝。
     @Test func rejectsUnsupportedOrInvalidRatingsBeforeSending() async throws {
         let url = try #require(URL(string: "https://example.invalid/api"))
         let transport = UnexpectedRatingTransport()
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
-        for (mode, rating) in [(ImmichMetadataSearch.Mode.smart, ImmichSearchRating.unrated), (.smart, .stars(0)), (.fileName, .stars(-1)), (.fileName, .stars(6))] {
+        for (mode, rating) in [(ImmichMetadataSearch.Mode.smart, ImmichSearchRating.stars(0)), (.fileName, .stars(-1)), (.fileName, .stars(6))] {
             var query = ImmichMetadataSearch()
             query.text = "synthetic"
             query.mode = mode
@@ -85,7 +86,11 @@ private struct RatingTransport: ClientTransport {
         let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         if smart {
             #expect(operationID == "searchSmart")
-            #expect(json["rating"] as? Int == 3)
+            switch rating {
+            case .any: #expect(json["rating"] == nil)
+            case .unrated: #expect(json["rating"] is NSNull)
+            case let .stars(value): #expect(json["rating"] as? Int == value)
+            }
             #expect(json["page"] as? Int == 1)
         } else {
             #expect(operationID == "searchAssets")

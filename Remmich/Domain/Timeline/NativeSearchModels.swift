@@ -55,9 +55,9 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
 nonisolated enum NativeSearchRating: Hashable, Sendable {
     case any, unrated, stars(Int)
 
-    /// 未评分和0分无法由旧式smart完整表达，必须显示组合限制，不静默丢弃。
+    /// 0分不在旧式smart的1–5/null契约内，须明确提示组合限制，不静默丢弃。
     var requiresStructuredSearch: Bool {
-        switch self { case .any: false; case .unrated: true; case let .stars(value): value == 0 }
+        switch self { case .any, .unrated: false; case let .stars(value): value == 0 }
     }
 }
 

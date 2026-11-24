@@ -6,6 +6,7 @@ accessModifier: internal
 typeOverrides:
   schemas:
     NumberFilterNullable: ImmichNullableNumberFilter
+    NullableLegacySearchRating: ImmichNullableRatingValue
 filter:
   operations:
     - pingServer
