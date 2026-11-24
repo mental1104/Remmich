@@ -6,9 +6,9 @@ struct AssetEditCropCanvas: View {
     let image: UIImage
     let sourceSize: AssetEditPixelSize
     @Binding var crop: AssetEditPixelCrop
-    @State private var dragStart: AssetEditPixelCrop?
-    @State private var dragOrigin = CGSize.zero
+    @State private var dragSession = AssetEditCropDragSession()
     @State private var pinchStart: AssetEditPixelCrop?
+    @FocusState private var cropFocused: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -36,7 +36,26 @@ struct AssetEditCropCanvas: View {
                     .position(x: selected.midX, y: selected.midY)
                     .gesture(moveGesture(in: rect))
                     .simultaneousGesture(magnificationGesture())
-                    .accessibilityLabel("Crop selection")
+                    .onTapGesture { cropFocused = true }
+                    .hoverEffect(.highlight)
+                    .focusable().focused($cropFocused)
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { keyPress($0) }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("裁剪范围")
+                    .accessibilityValue("X \(crop.x)，Y \(crop.y)，宽 \(crop.width)，高 \(crop.height) 像素")
+                    .accessibilityHint("上下调整缩放范围，更多操作可按像素移动，或使用精确像素调整。")
+                    .accessibilityAdjustableAction { direction in
+                        dragSession.reset(); pinchStart = nil
+                        switch direction {
+                        case .increment: crop = crop.magnified(by: 1.05, in: sourceSize)
+                        case .decrement: crop = crop.magnified(by: 1 / 1.05, in: sourceSize)
+                        @unknown default: break
+                        }
+                    }
+                    .accessibilityAction(named: Text("向左移动一像素")) { nudge(.left) }
+                    .accessibilityAction(named: Text("向右移动一像素")) { nudge(.right) }
+                    .accessibilityAction(named: Text("向上移动一像素")) { nudge(.up) }
+                    .accessibilityAction(named: Text("向下移动一像素")) { nudge(.down) }
                     .accessibilityIdentifier("asset-editor-crop-selection")
                 ForEach(AssetEditPixelCrop.Corner.allCases, id: \.self) { corner in
                     let point = cornerPoint(corner, in: selected)
@@ -47,11 +66,11 @@ struct AssetEditCropCanvas: View {
                         .position(point)
                         .gesture(resizeGesture(corner: corner, in: rect))
                         .hoverEffect(.highlight)
-                        .accessibilityLabel(cornerLabel(corner))
+                        .accessibilityHidden(true)
                 }
             }
             .clipped()
-            .onChange(of: geometry.size) { _, _ in dragStart = nil; pinchStart = nil; dragOrigin = .zero }
+            .onChange(of: geometry.size) { _, _ in dragSession.reset(); pinchStart = nil }
         }
         .accessibilityIdentifier("asset-editor-crop-canvas")
     }
@@ -83,15 +102,10 @@ struct AssetEditCropCanvas: View {
             .onChanged { value in
                 guard imageRect.width > 0, imageRect.height > 0 else { return }
                 // 双指捏合期间暂停平移；恢复时重新记录位移起点，避免松开一根手指后跳框。
-                guard pinchStart == nil else { dragStart = nil; dragOrigin = value.translation; return }
-                if dragStart == nil {
-                    dragStart = crop; dragOrigin = value.translation
-                }
-                guard let dragStart else { return }
-                crop = dragStart.translated(dx: Double((value.translation.width - dragOrigin.width) / imageRect.width) * Double(sourceSize.width),
-                                            dy: Double((value.translation.height - dragOrigin.height) / imageRect.height) * Double(sourceSize.height), in: sourceSize)
+                guard pinchStart == nil else { dragSession.reset(); return }
+                crop = dragSession.updated(crop: crop, translation: value.translation, imageRect: imageRect, source: sourceSize)
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { _ in dragSession.reset() }
     }
 
     /// corner固定本次移动角，imageRect负责点数到像素换算；对角保持不动，松手后清除手势快照。
@@ -99,15 +113,10 @@ struct AssetEditCropCanvas: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard imageRect.width > 0, imageRect.height > 0 else { return }
-                if dragStart == nil {
-                    dragStart = crop
-                }
-                guard let dragStart else { return }
-                crop = dragStart.resized(corner: corner,
-                                         dx: Double(value.translation.width / imageRect.width) * Double(sourceSize.width),
-                                         dy: Double(value.translation.height / imageRect.height) * Double(sourceSize.height), in: sourceSize)
+                guard pinchStart == nil else { dragSession.reset(); return }
+                crop = dragSession.updated(crop: crop, translation: value.translation, imageRect: imageRect, source: sourceSize, corner: corner)
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { _ in dragSession.reset() }
     }
 
     /// 捏合倍率只作用于当前草稿区域；不放大下载分辨率，也不改变旋转/镜像状态。
@@ -115,12 +124,12 @@ struct AssetEditCropCanvas: View {
         MagnificationGesture()
             .onChanged { value in
                 if pinchStart == nil {
-                    pinchStart = crop; dragStart = nil
+                    pinchStart = crop; dragSession.reset()
                 }
                 guard let pinchStart else { return }
                 crop = pinchStart.magnified(by: Double(value), in: sourceSize)
             }
-            .onEnded { _ in pinchStart = nil }
+            .onEnded { _ in pinchStart = nil; dragSession.reset() }
     }
 
     /// corner选择对应选框角；返回Canvas点坐标，角柄本身保持44点可交互区域。
@@ -133,13 +142,26 @@ struct AssetEditCropCanvas: View {
         }
     }
 
-    /// 返回角柄无障碍名称；精确像素输入同时提供不依赖拖拽的替代操作。
-    private func cornerLabel(_ corner: AssetEditPixelCrop.Corner) -> String {
-        switch corner {
-        case .topLeft: "Resize top left crop corner"
-        case .topRight: "Resize top right crop corner"
-        case .bottomLeft: "Resize bottom left crop corner"
-        case .bottomRight: "Resize bottom right crop corner"
+    /// key只在裁剪框取得硬件焦点后进入；Cmd/Control交给其余界面，Shift为10像素，Option调整右下边。
+    /// iPad使用onKeyPress，Apple的onMoveCommand当前仅支持macOS/tvOS，不能拿它假装iPad键盘可用。
+    private func keyPress(_ key: KeyPress) -> KeyPress.Result {
+        guard !key.modifiers.contains(.command), !key.modifiers.contains(.control) else { return .ignored }
+        let direction: AssetEditCropKeyboardDirection
+        switch key.key {
+        case .leftArrow: direction = .left
+        case .rightArrow: direction = .right
+        case .upArrow: direction = .up
+        case .downArrow: direction = .down
+        default: return .ignored
         }
+        dragSession.reset(); pinchStart = nil
+        crop = direction.applied(to: crop, in: sourceSize, resizing: key.modifiers.contains(.option), accelerated: key.modifiers.contains(.shift))
+        return .handled
+    }
+
+    /// direction为VoiceOver的一像素移动意图；重设在途手势锚点，避免下一事件覆盖辅助功能调整。
+    private func nudge(_ direction: AssetEditCropKeyboardDirection) {
+        dragSession.reset(); pinchStart = nil
+        crop = direction.applied(to: crop, in: sourceSize, resizing: false, accelerated: false)
     }
 }

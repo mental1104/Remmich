@@ -11,6 +11,7 @@ struct AssetEditingView: View {
     let changed: () -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var draft: AssetEditDraft?
     @State private var initialDraft: AssetEditDraft?
     @State private var sourceImage: UIImage?
@@ -150,7 +151,7 @@ struct AssetEditingView: View {
                 Text("原图对照").tag(true)
             }.pickerStyle(.segmented).accessibilityIdentifier("asset-editor-comparison")
             if draft.crop != nil {
-                if size.width >= 760 {
+                if size.width >= 760, !dynamicTypeSize.isAccessibilitySize {
                     HStack(alignment: .top, spacing: 14) {
                         cropCanvas(image, draft: draft).frame(maxWidth: .infinity)
                         resultPreview(image, draft: draft).frame(maxWidth: .infinity)
@@ -160,6 +161,8 @@ struct AssetEditingView: View {
                     resultPreview(image, draft: draft).frame(height: min(300, max(180, size.height * 0.32)))
                 }
                 Text("拖动选框或四角，双指捏合调整取景范围。左侧／上方选框使用原图坐标，先裁剪再应用旋转与镜像。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("点击选框后可用方向键移动；Shift 每次十像素，Option 调整宽高。也可展开精确像素调整。")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 resultPreview(image, draft: draft).frame(height: min(500, max(240, size.height * 0.6)))
