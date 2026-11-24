@@ -1,5 +1,7 @@
 ## 2026-11-24: Native saved-search management and atomic reuse
 
+- Validation follow-up: CI45333843152 on d6e5963 completed app build, API tests, simulator app tests, result upload and source-cleanliness checks successfully. Product archiving remains in progress. This validates the preceding search/data contracts only;45c753a UI/codec still needs its own CI before merge.
+
 - Source: codex/feature-search-presets over d6e5963; upstream remains672f02e. No upstream sync, server/API/database changes or production access.
 - Wire a SwiftUI saved-search panel into SearchView: explicit account-scoped loading, create/rename/apply, confirmed complete replacement and delete. Failed saves keep the name draft; account/endpoint changes clear drafts, capability and list state. All operations use the existing management session without refreshing the photo index.
 - Add full-query capture/restoration with Gregorian day semantics, numeric/UUID/date validation and all-or-nothing application. Unsupported saved fields are preserved but cannot be applied yet. Rename re-reads all conditions; replacement re-reads the name. The existing server API has no CAS, so concurrent cross-client edits remain last-writer-wins.
