@@ -1,3 +1,11 @@
+## 2026-11-24: Exercise no-Cloud-ID Live still matching through real Nuke display
+
+- Source: independent codex/test-live-still-match-display from4e007c1; upstream remains672f02e, no sync. Add only one new Tests file and docs; do not modify production, current CI, workflows, official clients, server/API or deployment.
+- Add two functions/three cases through actual metadata/checksum readers, real full-byte SHA1Stream, LocalMediaMatchController lookup/fresh gates, atomic JSON cold restore and actual Media/local image reader/Nuke. Synthetic system/remote boundaries use unique unedited photo+pairedVideo with no Cloud ID, a real complete PNG and actual UIImage. Positive normal/reversed resource order asserts photo-only/networkfalse hashing, checksum provenance/Live identity/namespace/exact version and local display with zero DataLoading/metadata-stream calls.
+- The paired-descriptor-change case keeps photo bytes and identity constant but rejects the real checksum proof before any precheck/fresh/association; initial enabled config remains without false completion. No motion download, original export, upload or PHLivePhoto positive is claimed.
+- Actual NAS evidence: complete74-byte3x2 PNG chunk/zlib checks and independent Node/OpenSSL SHA1 agree at757245f70891a13da1013405063ad948d80658cd; file utility is unavailable. One-file scoped SwiftFormat0.64.5 and diff checks pass. Swift compilation/runtime/UIKit decoding/real Photos/device behavior remain unverified; no push/new CI. See docs/local-live-still-match-display-tests.md.
+- Revert this isolated test/docs commit without production or data migration.
+
 ## 2026-11-24: Bind native Live Photo reading to the actual motion proof source
 
 - Source: independent codex/fix-local-live-proof-source from7518506; upstream remains672f02e, no sync. Limit product edits to dedicated reader/protocol and the Media helper argument; do not touch the root's dirty viewer host, remote models, current CI, server/API or production.
