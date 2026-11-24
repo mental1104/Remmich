@@ -262,6 +262,12 @@
 - Source: candidate795fd39; upstream remains672f02e. CI45386575394 ended19:51 with a single test-source diagnostic: recursive expansion of require in PeopleManagementContractTests.swift:264. Viewer type-check errors no longer appear and the app executable links; combined test products/API/app/UI execution did not complete, so no compiled artifact or runtime success is claimed.
 - Decode the captured HTTP body in explicit steps, retaining both required-body and dictionary-shape assertions and the same full JSON comparisons. No business code, test selection, compiler limit or CI gate changes. Repository search found no other same-expression nested require calls.
 - Scoped SwiftFormat/diff checks passed; actual repaired test compilation awaits the next candidate CI. No server/API/database/production or signing change. Rollback restores the known macro-expansion failure.
+## 2026-11-25: Let the backup page explicitly retry reading its saved queue
+
+- Source: independent codex/feature-backup-album-exclusions from5a9c426; upstream remains672f02e, no sync. Only PhotoBackupView plus these backup/compatibility records change; no Controller/domain/worker/API/schema/production/workflow change, push or CI.
+- Add the existing-form action "重新读取备份队列" using the current Controller.load path. Initial opening and explicit reread share one in-page loading guard; disable reread for loading/running/management-busy/no connection, and prevent conflicting scan/resume/task actions while the read is pending. A temporary initial load failure can be retried without closing the sheet. No automatic retry, scan or upload is introduced, and account-scoped draft/recovery semantics stay unchanged.
+- Actual NAS checks: scoped SwiftFormat0.64.5 lint for PhotoBackupView and gitdiff whitespace checks pass. No low-value implementation-mirroring UI test was added; SwiftUI compilation and real interaction remain unverified on NAS. Roll back this view/documentation commit independently without changing saved plans, jobs, receipts or media.
+
 ## 2026-11-25: Keep backup exclusion drafts account-bound and test actual scan persistence
 
 - Source: independent codex/feature-backup-album-exclusions froma1b5ae7; upstream remains672f02e, no sync. The existing314d972/a1b5ae7 selection/journal/UI slice remains outside the integration candidate. No server/API/schema/official-client/production/workflow changes, push, CI or merge todev.

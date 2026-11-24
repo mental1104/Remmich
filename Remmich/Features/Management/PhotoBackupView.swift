@@ -6,6 +6,7 @@ struct PhotoBackupView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var backup = PhotoBackupController()
+    @State private var loadingQueue = false
     @State private var confirmsResume = false
     @State private var retryID: UUID?
     @State private var confirmationOwner: UUID?
@@ -21,8 +22,13 @@ struct PhotoBackupView: View {
                         ProgressView(value: Double(backup.completed + backup.failed), total: Double(max(1, backup.total)))
                         Button("停止并保存队列", role: .destructive) { backup.cancel() }
                     } else {
+                        Button("重新读取备份队列") { Task { await reloadBackupQueue() } }
+                            .disabled(loadingQueue || backup.running || controller.busy || controller.client == nil)
                         Button("读取手机相簿…") { Task { await backup.loadAlbums() } }
-                            .disabled(backup.loadingAlbums)
+                            .disabled(backup.loadingAlbums || loadingQueue)
+                        if loadingQueue {
+                            ProgressView("正在读取备份队列")
+                        }
                         if backup.loadingAlbums {
                             ProgressView("正在读取手机相簿")
                         }
@@ -42,11 +48,11 @@ struct PhotoBackupView: View {
                         unavailableSelections
                         exclusionChoices
                         Button("扫描并更新备份队列") { backup.scan(using: controller) }
-                            .disabled(!backup.hasLoadedAlbums || backup.loadingAlbums || backup.selected.isEmpty || controller.client == nil || controller.busy)
+                            .disabled(loadingQueue || !backup.hasLoadedAlbums || backup.loadingAlbums || backup.selected.isEmpty || controller.client == nil || controller.busy)
                         Button("继续备份队列") {
                             retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
                         }
-                        .disabled(backup.requiresSelectionScan || !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) } || controller.client == nil || controller.busy)
+                        .disabled(loadingQueue || backup.requiresSelectionScan || !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) } || controller.client == nil || controller.busy)
                     }
                 }
                 if !backup.running, !backup.jobs.isEmpty {
@@ -66,7 +72,7 @@ struct PhotoBackupView: View {
                                         Button("取消任务", role: .destructive) { backup.cancelJob(job.id, using: controller) }
                                     }
                                     .buttonStyle(.borderless)
-                                    .disabled(controller.busy)
+                                    .disabled(loadingQueue || controller.busy)
                                 }
                             }
                         }
@@ -77,13 +83,13 @@ struct PhotoBackupView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { backup.cancel(); dismiss() } } }
             .confirmationDialog(retryID == nil ? "继续当前账户的备份队列？" : "只重试所选任务？", isPresented: $confirmsResume, titleVisibility: .visible) {
                 Button("继续上传并查重") {
-                    guard confirmationOwner == controller.generation else { return }
+                    guard !loadingQueue, confirmationOwner == controller.generation else { return }
                     backup.resume(using: controller, jobID: retryID)
                 }
             } message: {
                 Text("使用最近扫描保存的相簿排除和 iCloud 选项；更改后需重新扫描。成功回执仍会重新查重和核对配对；不自动重试未知结果。")
             }
-            .task { await backup.load(using: controller) }
+            .task { await reloadBackupQueue() }
             .onChange(of: controller.generation) { _, _ in backup.cancel(); dismiss() }
             .onChange(of: scenePhase) {
                 _, phase in if phase == .background {
@@ -93,6 +99,15 @@ struct PhotoBackupView: View {
             .onDisappear { backup.cancel() }
         }
         .interactiveDismissDisabled(backup.running)
+    }
+
+    /// 首次打开和明确重读共用现有load；同页只允许一次读取，不与扫描/上传或管理写入重叠。
+    /// 读取只恢复当前账户队列，不扫描或上传；失败保留现有资料，用户可以再次点击重读。
+    @MainActor private func reloadBackupQueue() async {
+        guard !loadingQueue, !backup.running, !controller.busy else { return }
+        loadingQueue = true
+        defer { loadingQueue = false }
+        await backup.load(using: controller)
     }
 
     /// 只根据成功读取的当前授权列表判断缺项；按钮仅调整页面选择，下一次扫描前不能继续或重试旧队列。
