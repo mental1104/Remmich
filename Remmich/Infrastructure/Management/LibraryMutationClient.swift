@@ -19,6 +19,7 @@ nonisolated enum LibraryWriteError: LocalizedError {
     }
 }
 
+/// 显式管理通道读取的资源快照；可选版本/方向信息供编辑页核对，不从预览像素猜测原图状态。
 nonisolated struct ManagedAsset: Decodable, Sendable {
     let id: String
     let ownerId: String
@@ -29,11 +30,44 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let originalFileName: String
     let livePhotoVideoId: String?
     let exifInfo: Exif?
+    let projectionType: String?
+    let updatedAt: String?
+    let checksum: String?
 
+    /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
         let description: String?
         let exifImageWidth: Int?
         let exifImageHeight: Int?
+        let orientation: String?
+
+        /// description为文字描述，宽高单位为像素；orientation为服务端原始方向字符串，缺省不猜测。
+        init(description: String?, exifImageWidth: Int?, exifImageHeight: Int?, orientation: String? = nil) {
+            self.description = description
+            self.exifImageWidth = exifImageWidth
+            self.exifImageHeight = exifImageHeight
+            self.orientation = orientation
+        }
+    }
+
+    /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
+         originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+    {
+        self.id = id
+        self.ownerId = ownerId
+        self.isFavorite = isFavorite
+        self.visibility = visibility
+        self.isTrashed = isTrashed
+        self.type = type
+        self.originalFileName = originalFileName
+        self.livePhotoVideoId = livePhotoVideoId
+        self.exifInfo = exifInfo
+        self.projectionType = projectionType
+        self.updatedAt = updatedAt
+        self.checksum = checksum
     }
 }
 
@@ -186,28 +220,37 @@ final nonisolated class LibraryMutationClient: Sendable {
         try await JSONDecoder().decode(AssetEditList.self, from: send("GET", ["assets", validID(id), "edits"]))
     }
 
+    /// id为目标资源，三个可选字段只发送指定项；仅精确200确认完成，不自动重试不确定写入。
     func update(_ id: String, favorite: Bool? = nil, visibility: String? = nil, description: String? = nil) async throws {
         struct Update: Encodable { let isFavorite: Bool?; let visibility: String?; let description: String? }
         let body = try JSONEncoder().encode(Update(isFavorite: favorite, visibility: visibility, description: description))
-        _ = try await send("PUT", ["assets", validID(id)], body: body)
+        _ = try await send("PUT", ["assets", validID(id)], body: body, expectedStatus: 200)
     }
 
+    /// id为单个资源；force固定false，只移入回收站，精确204才确认。
     func trash(_ id: String) async throws {
         struct Body: Encodable { let ids: [String]; let force = false }
-        _ = try await send("DELETE", ["assets"], body: JSONEncoder().encode(Body(ids: [validID(id)])))
+        _ = try await send("DELETE", ["assets"], body: JSONEncoder().encode(Body(ids: [validID(id)])), expectedStatus: 204)
     }
 
+    /// id为单个回收站资源；精确200且实际恢复计数为1才确认，零计数需重读状态而非盲目重发。
     func restore(_ id: String) async throws {
         struct Body: Encodable { let ids: [String] }
-        _ = try await send("POST", ["trash", "restore", "assets"], body: JSONEncoder().encode(Body(ids: [validID(id)])))
+        struct Result: Decodable { let count: Int }
+        let data = try await send("POST", ["trash", "restore", "assets"], body: JSONEncoder().encode(Body(ids: [validID(id)])), expectedStatus: 200)
+        guard let result = try? JSONDecoder().decode(Result.self, from: data), result.count == 1 else {
+            throw LibraryWriteError.malformedResponse
+        }
     }
 
+    /// id为原资源、edits为完整官方编辑列表；200确认参数保存，不覆盖原始文件。
     func saveEdits(_ id: String, _ edits: AssetEditList) async throws {
-        _ = try await send("PUT", ["assets", validID(id), "edits"], body: JSONEncoder().encode(edits))
+        _ = try await send("PUT", ["assets", validID(id), "edits"], body: JSONEncoder().encode(edits), expectedStatus: 200)
     }
 
+    /// id为需恢复原始显示的资源；只删除编辑参数，精确204才确认。
     func resetEdits(_ id: String) async throws {
-        _ = try await send("DELETE", ["assets", validID(id), "edits"])
+        _ = try await send("DELETE", ["assets", validID(id), "edits"], expectedStatus: 204)
     }
 
     func createAlbum(name: String, assetID: String? = nil) async throws -> ManagedAlbum {
@@ -216,29 +259,51 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try await JSONDecoder().decode(ManagedAlbum.self, from: send("POST", ["albums"], body: body))
     }
 
+    /// id/name为目标相簿与新名；使用官方PATCH及精确200，不以不存在的PUT路由写入。
     func renameAlbum(_ id: String, name: String) async throws {
         struct Body: Encodable { let albumName: String }
-        _ = try await send("PUT", ["albums", validID(id)], body: JSONEncoder().encode(Body(albumName: name)))
+        _ = try await send("PATCH", ["albums", validID(id)], body: JSONEncoder().encode(Body(albumName: name)), expectedStatus: 200)
     }
 
+    /// albumID为目标相簿，assetID为候选成员；服务端最终检查写权限与成员资格，只发送封面字段。
+    /// 返回服务端确认相簿；身份或状态码不符一律失败，不自动重发。
+    func setAlbumCover(_ albumID: String, assetID: String) async throws -> ManagedAlbum {
+        struct Body: Encodable { let albumThumbnailAssetId: String }
+        let id = try validID(albumID)
+        let body = try JSONEncoder().encode(Body(albumThumbnailAssetId: validID(assetID)))
+        let data = try await send("PATCH", ["albums", id], body: body, expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedAlbum.self, from: data)
+        guard result.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id为相簿身份；只删除相簿保留照片，精确204才确认。
     func deleteAlbum(_ id: String) async throws {
-        _ = try await send("DELETE", ["albums", validID(id)])
+        _ = try await send("DELETE", ["albums", validID(id)], expectedStatus: 204)
     }
 
+    /// assetID为需移出成员、albumID为相簿；200和唯一匹配ID的success=true共同确认，不删除照片。
     func remove(_ assetID: String, from albumID: String) async throws {
         struct Body: Encodable { let ids: [String] }
-        struct Result: Decodable { let success: Bool }
-        let data = try await send("DELETE", ["albums", validID(albumID), "assets"], body: JSONEncoder().encode(Body(ids: [validID(assetID)])))
-        let results = try JSONDecoder().decode([Result].self, from: data)
-        guard results.count == 1, results.allSatisfy(\.success) else { throw LibraryWriteError.malformedResponse }
+        let id = try validID(assetID)
+        let data = try await send("DELETE", ["albums", validID(albumID), "assets"], body: JSONEncoder().encode(Body(ids: [id])), expectedStatus: 200)
+        try confirmMembership(data, assetID: id)
     }
 
+    /// assetID为需加入成员、albumID为相簿；响应必须唯一对应请求ID并确认成功。
     func add(_ assetID: String, to albumID: String) async throws {
         struct Body: Encodable { let ids: [String] }
-        struct Result: Decodable { let success: Bool }
-        let data = try await send("PUT", ["albums", validID(albumID), "assets"], body: JSONEncoder().encode(Body(ids: [validID(assetID)])))
-        let results = try JSONDecoder().decode([Result].self, from: data)
-        guard results.count == 1, results.allSatisfy(\.success) else { throw LibraryWriteError.malformedResponse }
+        let id = try validID(assetID)
+        let data = try await send("PUT", ["albums", validID(albumID), "assets"], body: JSONEncoder().encode(Body(ids: [id])), expectedStatus: 200)
+        try confirmMembership(data, assetID: id)
+    }
+
+    /// data为官方BulkIdResponseDto数组，assetID为唯一请求身份；缺ID、错误ID、失败或额外行均不确认为成功。
+    private func confirmMembership(_ data: Data, assetID: String) throws {
+        struct Result: Decodable { let id: String; let success: Bool }
+        guard let results = try? JSONDecoder().decode([Result].self, from: data), results.count == 1,
+              let result = results.first, result.id.lowercased() == assetID.lowercased(), result.success
+        else { throw LibraryWriteError.malformedResponse }
     }
 
     struct UploadResult: Decodable, Sendable { let id: String; let status: String }

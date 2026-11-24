@@ -1,3 +1,12 @@
+## 2026-11-24: Shared contracts for parallel editing and album management
+
+- Source: codex/feature-backup-reliability from search PR7 head364a54f; user explicitly authorizes concurrent stages2–5. Upstream remains672f02e; no server/API/database/production changes. These client changes are separate from the currently tested search branch.
+- Add optional projectionType/updatedAt/checksum and EXIF orientation to ManagedAsset, preserving actual Decodable fields and compatible explicit fixture initializers. Editors can compare the current server version and use the same oriented dimensions; absent values remain nil rather than invented data.
+- Correct album rename from PUT to the owning official PATCH /albums/:id contract; no PUT alias was found in the current controller/middleware. Add field-scoped PATCH cover update with exact200 and matching response album identity. Server still owns membership and permission checks.
+- Require exact statuses for existing update/trash/restore/edit/reset/album-delete/membership writes. Single restore also requires count1; membership requires one successful response matching the requested ID. Unconfirmed/partial results remain failures and are never automatically retried. No permanent deletion or original replacement is introduced.
+- Extend offline contracts for the actual PATCH/body/Bearer/response, wrong statuses, mismatched/missing/failed membership IDs, invalid restore counts and version/orientation decoding. Scoped SwiftFormat and diff checks passed; NAS has no Swift, so new contracts and app compilation await later unified CI. Search CI is independent; no new CI was started here.
+- Shared client/model ownership stays withroot; editor owns edit UI/preview, management owns batch/album UI and organization owns Library/SDK fresh reads. Rollback this gateway commit independently; media/presets are unchanged. Backup persistence and all larger stages remain unfinished.
+
 ## 2026-11-24: Complete search-state acceptance before integrated CI
 
 - Source: codex/feature-search-completion additionally integrates query-race08d88e4 as5ebd5dd, saved-lifecyclef15ec2d as125d14a and attachment-export1eacd72 as1ad6a84. No upstream sync, server/API/database or production media change. Optional management URLSession configuration injection defaults to the original production construction and retains authentication/cancellation/generation checks.
