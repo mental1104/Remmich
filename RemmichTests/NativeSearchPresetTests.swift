@@ -92,6 +92,22 @@ struct NativeSearchPresetTests {
         #expect(conditions.query?.value == "Synthetic.JPG")
     }
 
+    /// 单独收藏或归档条件可以保存；关闭开关须省略字段，不能写出服务端不支持的false。
+    @Test func roundTripsFavoriteAndArchiveFlags() throws {
+        for (favorites, archived) in [(true, false), (false, true), (true, true)] {
+            var query = NativeSearchQuery()
+            query.favoritesOnly = favorites
+            query.archivedOnly = archived
+            let conditions = try NativeSearchPresetCodec.capture(query)
+            #expect(conditions.isFavorite == (favorites ? true : nil))
+            #expect(conditions.isArchive == (archived ? true : nil))
+            #expect(try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone) == query)
+        }
+        var invalid = NativeSearchPresetConditions()
+        invalid.isFavorite = false
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt) }
+    }
+
     /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
     @Test func rejectsPartialRestoration() throws {
         var conditions = NativeSearchPresetConditions()

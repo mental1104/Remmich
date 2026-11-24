@@ -316,6 +316,7 @@ public actor ImmichClient {
                 country: query.country.isEmpty ? nil : .init(eq: query.country),
                 description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
                 hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+                isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
                 model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
                 ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
@@ -325,7 +326,7 @@ public actor ImmichClient {
                 state: query.state.isEmpty ? nil : .init(eq: query.state),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
-                visibility: .init(eq: .timeline),
+                visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
                 iso: numericFilter(.iso, conditions: query.exifConditions),
                 fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
                 focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
@@ -374,6 +375,7 @@ public actor ImmichClient {
         let output = try await makeClient().searchSmart(.init(body: .json(.init(
             city: query.city.isEmpty ? nil : query.city,
             country: query.country.isEmpty ? nil : query.country,
+            isFavorite: query.favoritesOnly ? true : nil,
             make: query.cameraMake.isEmpty ? nil : query.cameraMake,
             model: query.cameraModel.isEmpty ? nil : query.cameraModel,
             page: pageNumber,
@@ -384,7 +386,7 @@ public actor ImmichClient {
             takenAfter: after,
             takenBefore: before,
             _type: query.media == .all ? nil : query.media == .image ? .IMAGE : .VIDEO,
-            visibility: .timeline,
+            visibility: query.archivedOnly ? .archive : .timeline,
             withExif: true
         ))))
         switch output {

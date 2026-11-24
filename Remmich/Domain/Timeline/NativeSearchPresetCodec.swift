@@ -33,6 +33,8 @@ nonisolated enum NativeSearchPresetCodec {
         result.city = query.city.isEmpty ? nil : query.city
         result.country = query.country.isEmpty ? nil : query.country
         result.state = query.state.isEmpty ? nil : query.state
+        result.isFavorite = query.favoritesOnly ? true : nil
+        result.isArchive = query.archivedOnly ? true : nil
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
         result.personIds = query.personIDs.isEmpty ? nil : query.personIDs
@@ -45,6 +47,7 @@ nonisolated enum NativeSearchPresetCodec {
         guard result.query != nil || result.city != nil || result.country != nil || result.state != nil || result.make != nil || result.model != nil
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
+            || result.isFavorite != nil || result.isArchive != nil
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
         return result
@@ -54,11 +57,14 @@ nonisolated enum NativeSearchPresetCodec {
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
         guard conditions.queryAssetId == nil,
-              conditions.lensModel == nil, conditions.deviceModels == nil, conditions.isArchive == nil,
-              conditions.isFavorite == nil, conditions.isPanorama == nil, conditions.mediaCategory == nil,
+              conditions.lensModel == nil, conditions.deviceModels == nil,
+              conditions.isPanorama == nil, conditions.mediaCategory == nil,
               conditions.resolution == nil, conditions.rating == .missing, conditions.tagIds == .missing
         else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
+        guard conditions.isArchive != false, conditions.isFavorite != false else { throw NativeSearchPresetConversionError.invalid }
+        query.archivedOnly = conditions.isArchive == true
+        query.favoritesOnly = conditions.isFavorite == true
         query.timeZone = timeZone
         if let text = conditions.query {
             guard !text.value.isEmpty, text.value.utf16.count <= 2000 else { throw NativeSearchPresetConversionError.invalid }

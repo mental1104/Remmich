@@ -34,6 +34,9 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var media: Media = .all
     var country = ""
     var state = ""
+    /// false表示不限制收藏/保留时间线，true才增加收藏或归档条件。
+    var favoritesOnly = false
+    var archivedOnly = false
     var city = ""
     var cameraMake = ""
     var cameraModel = ""

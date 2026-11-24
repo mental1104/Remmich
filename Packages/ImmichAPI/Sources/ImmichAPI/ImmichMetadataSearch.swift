@@ -34,6 +34,9 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var media: Media = .all
     public var country = ""
     public var state = ""
+    /// 收藏关闭表示不限制；归档关闭保留既有timeline范围，不包含锁定内容。
+    public var favoritesOnly = false
+    public var archivedOnly = false
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""

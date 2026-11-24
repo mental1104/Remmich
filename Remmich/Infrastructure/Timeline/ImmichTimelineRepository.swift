@@ -450,6 +450,8 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.city = query.city
         dto.country = query.country
         dto.state = query.state
+        dto.favoritesOnly = query.favoritesOnly
+        dto.archivedOnly = query.archivedOnly
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }

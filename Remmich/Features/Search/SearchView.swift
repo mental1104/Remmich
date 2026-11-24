@@ -45,6 +45,8 @@ struct SearchView: View {
                         SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
                         SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
                         SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
+                        Toggle("Favorites only", isOn: $query.favoritesOnly)
+                        Toggle("Archived only", isOn: $query.archivedOnly)
                         if let suggestionError {
                             Text(suggestionError).font(.caption)
                         }
@@ -161,7 +163,7 @@ struct SearchView: View {
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
-              || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
+              || query.favoritesOnly || query.archivedOnly || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
             guard let source else { return }

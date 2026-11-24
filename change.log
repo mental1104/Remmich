@@ -1,3 +1,11 @@
+## 2026-11-24: Favorite and archive search conditions
+
+- Source: codex/feature-search-visibility over7e4714e; upstream remains672f02e. No upstream sync or server/API/database change.
+- Add independent native favorites-only and archived-only switches. Metadata uses isFavorite/visibility structured fields; legacy smart uses existing flat fields. Disabled favorite switch omits the constraint; disabled archive switch keeps timeline visibility. Neither path includes hidden/locked assets implicitly.
+- Save and restore the existing isFavorite/isArchive true-only preset fields, including flag-only searches; false values in malformed saved conditions are rejected. Source mapping remains in Infrastructure, with no SDK imports in Features.
+- Add synthetic metadata/smart HTTP-body assertions for all four switch combinations and preset flag-only round trips. Local SwiftFormat and diff checks pass; Swift execution awaits CI. Existing ca271bb CI45336010250 has compiled and passed API tests, simulator app tests remain active and do not cover local region/visibility follow-ups.
+- Rollback: revert this follow-up; server saved conditions and media remain unchanged. Remaining extended fields, smart+advanced pagination and synthetic UI validation are still pending; no real-device acceptance.
+
 ## 2026-11-24: Country and state search conditions
 
 - Source: codex/feature-search-regions over ca271bb; upstream remains672f02e, no upstream sync or server/API/database change.
