@@ -76,6 +76,37 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             | xcbeautify
 
+      # 就绪PR实际执行测试，避免只编译测试包就合入dev；不增加新触发方式。
+      - name: Test API package before PR merge
+        if: ${{ github.event_name == 'pull_request' }}
+        run: swift test --jobs 2 --package-path Packages/ImmichAPI
+
+      - name: Test app logic before PR merge
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Remmich.xcodeproj \
+            -scheme Remmich \
+            -configuration Debug \
+            -destination "$IPHONE_DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$RUNNER_TEMP/RemmichPRTests.xcresult" \
+            -jobs 2 \
+            -parallel-testing-enabled NO \
+            -only-testing:RemmichTests \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            | xcbeautify
+
+      - name: Upload PR test results
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-test-results
+          path: ${{ runner.temp }}/RemmichPRTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Verify build did not modify checked-out sources
         run: git diff --exit-code
 

@@ -3,7 +3,7 @@
 - Source: codex/feature-native-search from dev 0af1897; upstream remains 672f02e. No server API, migration or production change.
 - Replaced Search fixtures with authenticated metadata results, filename/city/camera/type filters, cursor paging and the existing native viewer. Resources deduplicate by ID; failures retain the cursor; cancellation and generation invalidation reject late responses.
 - ImmichQueuedReadTransport retains durable GET loading and explicitly permits only searchAssets POST at /search/metadata through a cancellable ephemeral no-redirect transport. Search conditions never enter the URL-only durable journal. Old transport name remains a compatible alias; arbitrary writes remain rejected.
-- Added synthetic SDK/state tests for request/auth contracts, cursor retry, deduplication, cancellation and late responses. Local SwiftFormat/diff checks pass; Xcode/Swift tests pending CI. No private media or real-device acceptance.
+- Added synthetic SDK/state tests for request/auth contracts, cursor retry, deduplication, cancellation and late responses. Ready PR Build now actually runs package/app tests before merge, preserving draft guards and existing triggers. Local SwiftFormat/diff checks pass; Xcode/Swift tests pending CI. No private media or real-device acceptance.
 - Stage remains incomplete: smart search, people/date filters, suggestions, Fork EXIF and saved conditions are subsequent work. Roll back by reverting this commit; no server data recovery required.
 
 ## 2026-11-24: Repair CI simulator selection
