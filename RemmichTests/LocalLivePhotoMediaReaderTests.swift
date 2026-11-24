@@ -39,6 +39,30 @@ import Testing
         #expect(throws: LocalPhotoChecksumError.invalidInput) { try LocalLivePhotoMotionProof(source: source, resource: photo, digest: digest) }
     }
 
+    /// 完整motion证明完成后，即使identity/modDate相同，资源或创建时间/位置变化也不能进入native请求。
+    @Test(arguments: ["other-resource", "new-created", "new-location"])
+    func sourceChangeBetweenProofAndNativeNeverStartsRequest(_ mode: String) async throws {
+        let before = liveSource(); let changed = liveSource(mode)
+        #expect(before.snapshot.identity == changed.snapshot.identity && changed.motionResource() != nil)
+        let driver = LiveReadDriver(sources: [before, before, changed])
+        let reader = PhotoKitLocalLivePhotoMediaReader(driver: driver)
+        let result = try await reader.motionProof(for: before.snapshot.identity, validateContext: {})
+        let proof = try #require(result)
+        let native = try await reader.livePhoto(for: before.snapshot.identity, targetPixels: .init(width: 64, height: 48), matching: proof.source, validateContext: {})
+        #expect(native == nil && driver.digestRequests == 1 && driver.nativeRequests == 0 && driver.sourceReads == 3)
+    }
+
+    /// 相同完整proof来源允许进入真实native适配边界；系统替身仍返回nil，仅证明门禁/参数而不冒充PHLivePhoto成功。
+    @Test func exactProofSourceAllowsNativeRequest() async throws {
+        let source = liveSource()
+        let driver = LiveReadDriver(sources: [source, source, source, source])
+        let reader = PhotoKitLocalLivePhotoMediaReader(driver: driver)
+        let result = try await reader.motionProof(for: source.snapshot.identity, validateContext: {})
+        let proof = try #require(result)
+        let native = try await reader.livePhoto(for: source.snapshot.identity, targetPixels: .init(width: 64, height: 48), matching: proof.source, validateContext: {})
+        #expect(native == nil && driver.digestRequests == 1 && driver.nativeRequests == 1 && driver.sourceReads == 4)
+    }
+
     /// 字节读取期间版本、权限、资源或当前编辑变化都丢弃真实已算摘要，不能只看同一个本机ID。
     @Test(arguments: ["missing", "version", "limited", "edited", "resource"])
     func changedSourcesDoNotPublishMotionProof(_ mode: String) async throws {
@@ -195,8 +219,8 @@ private nonisolated func liveSource(_ mode: String = "valid") -> LocalLivePhotoS
     let version: Date? = mode == "unknown-version" ? nil : Date(timeIntervalSince1970: mode == "bad-version" ? .nan : mode == "next-version" ? 16 : 15)
     let snapshot = LocalPhotoSnapshot(identity: .init(localIdentifier: mode == "empty-id" ? "" : "synthetic-live", modificationDate: version,
                                                       mediaKind: mode == "image" ? .image : mode == "video" ? .video : .livePhoto),
-                                      creationDate: Date(timeIntervalSince1970: 10), adjustmentTime: mode == "timestamp" ? Date(timeIntervalSince1970: 20) : nil,
-                                      hasAdjustments: mode == "edited", latitude: nil, longitude: nil, pixelWidth: mode == "pixels" ? 0 : 64, pixelHeight: 48,
+                                      creationDate: Date(timeIntervalSince1970: mode == "new-created" ? 11 : 10), adjustmentTime: mode == "timestamp" ? Date(timeIntervalSince1970: 20) : nil,
+                                      hasAdjustments: mode == "edited", latitude: mode == "new-location" ? 1 : nil, longitude: mode == "new-location" ? 2 : nil, pixelWidth: mode == "pixels" ? 0 : 64, pixelHeight: 48,
                                       duration: mode == "duration" ? .nan : 0, mediaSubtypes: PHAssetMediaSubtype.photoLive.rawValue,
                                       resources: mode == "descriptor-mismatch" ? [] : resources.map(\.descriptor), cloudIdentity: .unavailable)
     return .init(snapshot: snapshot, resources: resources, access: mode == "limited" ? .limited : .full, isLivePlayback: mode != "playback")

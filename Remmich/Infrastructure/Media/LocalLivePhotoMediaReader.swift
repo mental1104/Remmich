@@ -6,8 +6,9 @@ import UniformTypeIdentifiers
 @MainActor protocol LocalLivePhotoMediaReading: Sendable {
     /// expected含同设备已知修改版本；nil代表不支持/本机不可读，取消和validateContext失效原样抛出。
     func motionProof(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> LocalLivePhotoMotionProof?
-    /// targetPixels来自展示规格；仅本机current完整结果可返回，不使用原片导出或普通video playerItem冒充。
-    func livePhoto(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto?
+    /// targetPixels来自展示规格，expectedSource是前阶段motion证明快照；nil仅用于独立本机读取，关联流程必须传实际proof.source。
+    func livePhoto(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, matching expectedSource: LocalPhotoSnapshot?,
+                   validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto?
 }
 
 /// native Live Photo回调的窄Sendable值；临时降质/系统错误不会被当作最终完整媒体。
@@ -60,13 +61,20 @@ nonisolated struct LocalLivePhotoDelivery: Sendable {
         return try .init(source: before, resource: resource, digest: digest)
     }
 
+    /// expectedSource非nil时在native请求前比较完整证明来源，关闭跨阶段只凭identity/modDate的空隙；独立读取默认nil。
     /// actual PHImageRequestID使用既有gate取消；degraded不算终态，取消/账号失效不能被包装为普通miss回源。
-    func livePhoto(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto? {
+    func livePhoto(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, matching expectedSource: LocalPhotoSnapshot? = nil,
+                   validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto?
+    {
         try context(validateContext)
         guard targetPixels.width > 0, targetPixels.height > 0 else { return nil }
         let observed = currentSource(expected)
         try context(validateContext)
         guard let before = observed, before.motionResource() != nil else { return nil }
+        // proof.source已将cloudIdentity归零；比较所有可观察资源与元数据，不因本机ID/版本相同就沿用旧movie摘要。
+        if let expectedSource, before.snapshot.withCloudIdentity(.unavailable) != expectedSource {
+            return nil
+        }
         let read = PhotoResourceRead<PHLivePhoto>()
         let duration = timeout
         let timer = Task {

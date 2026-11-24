@@ -481,7 +481,7 @@ final class MediaLibraryController {
             guard currentAssociation(), let proof, proof.source.identity == association.localIdentity,
                   proof.digest.sha1Base64 == before.motionChecksum else { return nil }
             let pixels = MediaPixelSize(width: min(4096, targetPixels.width), height: min(4096, targetPixels.height))
-            let native = try await localLivePhotoReader.livePhoto(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
+            let native = try await localLivePhotoReader.livePhoto(for: association.localIdentity, targetPixels: pixels, matching: proof.source, validateContext: validate)
             try validate()
             guard currentAssociation(), let native else { return nil }
             // native准备跨越异步边界；重新读取两个对象，不能沿用可能已重配/编辑/离线的初始pair。

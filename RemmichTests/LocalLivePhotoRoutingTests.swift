@@ -15,6 +15,7 @@ import Testing
         let result = try await fixture.read()
         #expect(result == nil && fixture.reader.calls == ["proof", "native"])
         #expect(fixture.reader.pixels == MediaPixelSize(width: 4096, height: 3000))
+        #expect(fixture.reader.expectedSource == liveRoutingSource().snapshot.withCloudIdentity(.unavailable))
         let requests = await fixture.remote.requests
         #expect(requests == [liveRoutingStillID, liveRoutingMotionID])
         #expect(fixture.loader.requests.isEmpty && fixture.media.mediaReadOrigin(assetID: liveRoutingStillID.uuidString, revision: liveRoutingRevision) == nil)
@@ -347,6 +348,7 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
     private let gate: LiveRoutingGate
     private(set) var calls: [String] = []
     private(set) var pixels: MediaPixelSize?
+    private(set) var expectedSource: LocalPhotoSnapshot?
     /// proof可能是故意不匹配的已知本机版本，reader不替helper提前过滤。
     init(proof: LocalLivePhotoMotionProof?, failure: String?, holdStage: String?, gate: LiveRoutingGate) {
         self.proof = proof; self.failure = failure; self.holdStage = holdStage; self.gate = gate
@@ -364,9 +366,11 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
         return proof
     }
 
-    /// 记录实际native入口目标像素，不创建或声称播放真实媒体。
-    func livePhoto(for _: LocalPhotoIdentity, targetPixels: MediaPixelSize, validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto? {
-        try validateContext(); calls.append("native"); pixels = targetPixels
+    /// 记录实际native入口目标像素和前阶段proof来源，不创建或声称播放真实媒体。
+    func livePhoto(for _: LocalPhotoIdentity, targetPixels: MediaPixelSize, matching expectedSource: LocalPhotoSnapshot?,
+                   validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto?
+    {
+        try validateContext(); calls.append("native"); pixels = targetPixels; self.expectedSource = expectedSource
         if holdStage == "native" {
             await gate.hold()
         }

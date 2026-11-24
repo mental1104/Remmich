@@ -1,3 +1,10 @@
+## 2026-11-24: Bind native Live Photo reading to the actual motion proof source
+
+- Source: independent codex/fix-local-live-proof-source from7518506; upstream remains672f02e, no sync. Limit product edits to dedicated reader/protocol and the Media helper argument; do not touch the root's dirty viewer host, remote models, current CI, server/API or production.
+- Require matching expectedSource in the protocol, default nil only on concrete independent reader calls. The media helper always supplies proof.source; before any native request, compare complete current snapshot with cloudIdentity normalized to unavailable against the exact proof source. Existing full post-read/context/remote-pair checks remain, closing the cross-phase identity/modDate-only gap.
+- Add two real-reader functions/four cases: actual synthetic-stream motion proof followed by changed same-identity resource/creation/location produces zero native requests; an exact source reaches one request. Update protocol fake and assert actual helper forwards complete proof.source. Four scoped SwiftFormat0.64.5 files and diff checks pass; no Swift compiler/native positive/media playback validation on NAS.
+- No PHLivePhoto fake success, media mutation, persistence migration, push or CI trigger. Revert protocol/reader/helper/fake signatures together if required; see docs/local-live-photo-proof-source.md.
+
 ## 2026-11-24: Isolate Live Photo audio activation ownership
 
 - Source: codex/feature-live-photo-audio-controller from2a712c2; upstream remains672f02e, no sync. Add one MainActor observable controller and focused async tests only; host wiring is independently owned. Existing ViewerAudioSessionControlling/system audio policy, Media/Photos/server/API/schema/production/workflow remain unchanged.
