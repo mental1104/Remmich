@@ -1,3 +1,8 @@
+## 2026-11-24: Fix local-first test compilation diagnostics
+
+- Source: parallel-client-slices44dbafd; upstream remains672f02e. CI45412142375/job138508488617 reached terminal failure at test-bundle compilation: three LocalMediaMatchTests optional-metadata macro sites did not propagate the inner throwing call, and MediaThumbnailVersionTests lacked a direct Nuke import for ImageRequest.url. API/App/UI tests were skipped, not passed.
+- Evaluate throwing metadata before require and explicitly import the defining module. Preserve all assertions, production matching/routing, failure semantics and workflow gates; no server/API/schema/production changes. NAS scoped two-file SwiftFormat/diff checks pass; replacement compilation/runtime remains pending the next single CI chain. Rollback reverts only these test-source fixes.
+
 ## 2026-11-24: Refresh deferred image identity when the active route changes
 
 - Source: local-media-matching80c152c; upstream remains672f02e. Bind the local wrapper image ID to its management generation as well as scope, remote revision and local identity/version. A same-account route change can now start a fresh view/Nuke request instead of coalescing with an invalidated old-context operation; fallback cache keys remain unchanged.

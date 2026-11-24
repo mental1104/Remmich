@@ -9,7 +9,8 @@ struct LocalMediaMatchTests {
     @Test(arguments: [false, true])
     func matchesCurrentRepresentationIncludingEdits(_ edited: Bool) throws {
         let snapshot = localMediaSnapshot(adjustmentTime: edited ? Date(timeIntervalSince1970: 20.75) : nil, hasAdjustments: edited)
-        let fields = try #require(snapshot.mobileMetadata())
+        let metadata = try snapshot.mobileMetadata()
+        let fields = try #require(metadata)
         #expect(fields.createdAt == Date(timeIntervalSince1970: 10))
         #expect(fields.adjustmentTime == (edited ? Date(timeIntervalSince1970: 20) : nil))
         let candidate = LocalMediaRemoteCandidate(assetID: UUID(), metadata: fields)
@@ -33,7 +34,9 @@ struct LocalMediaMatchTests {
     @Test(arguments: [false, true])
     func duplicateCandidatesAreAmbiguous(_ differentIDs: Bool) throws {
         let snapshot = localMediaSnapshot()
-        let first = try LocalMediaRemoteCandidate(assetID: UUID(), metadata: #require(snapshot.mobileMetadata()))
+        let metadata = try snapshot.mobileMetadata()
+        let fields = try #require(metadata)
+        let first = LocalMediaRemoteCandidate(assetID: UUID(), metadata: fields)
         let second = LocalMediaRemoteCandidate(assetID: differentIDs ? UUID() : first.assetID, metadata: first.metadata)
         #expect(try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: [first, second]) == .ambiguous)
     }
@@ -61,7 +64,9 @@ struct LocalMediaMatchTests {
     func representationAssociationDoesNotRequireOriginalResourceShape(_ live: Bool) throws {
         let resources = [localMediaResource(role: .originalPhoto), localMediaResource(role: live ? .pairedVideo : .alternatePhoto)]
         let snapshot = localMediaSnapshot(kind: live ? .livePhoto : .image, resources: resources)
-        let candidate = try LocalMediaRemoteCandidate(assetID: UUID(), metadata: #require(snapshot.mobileMetadata()))
+        let metadata = try snapshot.mobileMetadata()
+        let fields = try #require(metadata)
+        let candidate = LocalMediaRemoteCandidate(assetID: UUID(), metadata: fields)
         #expect(try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: [candidate]) == .candidate(candidate))
     }
 
