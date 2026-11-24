@@ -1,6 +1,6 @@
 # Media search conditions
 
-Native advanced filters now expose the existing Fork categories: phone videos, screenshots, Delta, Steam, Nintendo Switch and Nintendo 3DS screenshots. Panorama-only and 720p/1080p/2k/4k resolution tiers remain independent of the Photos/Videos selector. The server owns detection and resolution thresholds; the client sends the selected category's true-only boolean, `isPanorama.eq:true` and `resolution.eq`. No choice omits the corresponding field instead of sending false or a default tier.
+Native advanced filters now expose the existing Fork categories: phone videos, portrait1179x2556 screenshots, Delta, Steam, Nintendo Switch and Nintendo 3DS screenshots. The screenshot label states the current server's dimensions; it does not promise detection of all iPhone/iPad screenshots. Panorama-only and 720p/1080p/2k/4k resolution tiers remain independent of the Photos/Videos selector. The server owns detection and resolution thresholds; the client sends the selected category's true-only boolean, `isPanorama.eq:true` and `resolution.eq`. No choice omits the corresponding field instead of sending false or a default tier.
 
 Metadata search uses its existing cursor route. Smart text combined with any media extension uses the existing authenticated `POST /api/fork/search/smart`, complete structured filters and a separate Fork cursor on every page. A missing Fork route remains an explicit unsupported state; metadata validation errors remain visible. No condition is silently removed and there is no alternate-route retry.
 

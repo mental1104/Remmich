@@ -18,7 +18,7 @@ This is [mental1104/Remmich](https://github.com/mental1104/Remmich), forked from
 
 Remmich is a SwiftUI, UIKit, and AVKit client for your self-hosted Immich library. Browse photos, watch videos, revisit memories, and keep thumbnails and asset information available offline with explicit backup, non-destructive editing and management actions.
 
-Browse Photos, Videos, Albums, and Library collections from your Immich account, with offline indexing, interactive album layouts, Sharing and Save to Photos. Search still shows demo data.
+Browse Photos, Videos, Albums, and Library collections from your Immich account, with offline indexing, interactive album layouts, Sharing and Save to Photos. Search reads real account-scoped results with native filters and saved searches.
 
 See the **[Roadmap](#roadmap)** for current and planned work.
 
@@ -55,7 +55,7 @@ You can also follow [Build and run](CONTRIBUTING.md#build-and-run) to build from
 - **Live Photo sharing:** shares the still image. Native motion sharing is limited by the investigated Apple public APIs; automatic export is unavailable in this implementation, and the system picker requires another selection step. Save to Photos preserves Live Photos.
 - **Sharing:** single-asset sharing only. Shared files currently retain available GPS metadata.
 - **Offline originals:** thumbnail caching does not retain originals or playable videos; explicitly saved Photos resources can be reused when the requested quality matches.
-- **Search:** Search uses demo data until M8 adds server-backed search.
+- **Search:** Real metadata and smart search are connected. Extended-filter integration and iPhone/iPad UI acceptance are still in progress; advanced smart combinations require the optional Fork extension. See [validation boundaries](docs/fork-compatibility.md).
 - **Offline video:** saved Playback videos can load locally while the Photos resource remains accessible. Otherwise, streaming requires a reachable server.
 - **Asset locations and maps:** maps require valid asset GPS and an enabled, compatible Immich map source. Place names and translated map labels depend on the provider's available data.
 
@@ -87,7 +87,7 @@ The timeline places upcoming milestones above **Now** and completed work below i
 
 | Priority | Feature | Status | Intended outcome |
 | --- | --- | --- | --- |
-| M8 | Search and filters | In progress | Server-backed search with supported people, place, date, media and camera filters. Search currently uses demo data. |
+| M8 | Search and filters | In progress | Real server-backed results, native filters and saved conditions; remaining extended filters and iPhone/iPad acceptance are in progress. |
 | M9 | Wider native polish and resilience | Planned | Broader iPad, accessibility, interruption, offline and performance coverage across the completed workflows. |
 | M10 | Release verification and distribution | Planned | Broader real-device verification and sideloading distribution; AltStore remains under consideration. |
 

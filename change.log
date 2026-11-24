@@ -1,3 +1,11 @@
+## 2026-11-24: Integrate parallel native search work for unified CI
+
+- Source: codex/feature-search-completion normally merges independent media6d0b8e1, tagsaa90693d, reference090824c, devicese1af999, UIaf0d776/cadf191 and verified deva521360. Preserve every query source/filter, complete preset conversion, candidate generation guards and all tests when resolving overlapping hunks; no published history rewritten.
+- PR6 head9969913 passed full CI45358465406, including app/test compilation, API and simulator app tests, artifact/source checks. Its merged dev tree is identicalb7e0a388; post-merge Build45361549041 is running. These results do not validate this new integrated feature branch. No parent gitlink update, release or production deployment.
+- Add cross-feature two-page SDK assertions for media/device/tag/EXIF/rating/album/orientation under metadata, smart text and reference sources; add encoded full native preset round trips for all three tag states and text/reference. Review feedback adds category-only route checks and exact omission of unselected resolution. Label screenshot scope accurately as portrait1179x2556, matching the server rather than promising all iPad screenshots.
+- Joined scheme builds app/logic/UI once on ready PRs, then runs iPhone and iPad UI serially with strict prebuilt products; draft guard, triggers, runner, release gates and dev Build→Tests receipts are preserved. No new validation bypass or paid runner. README no longer incorrectly describes production search as demo data.
+- Whole-project SwiftFormat lint passed (281 files, one excluded), schema source/equality/idempotence and Python syntax checks passed, UI script syntax and diff checks passed. New integrated Swift compilation and actual phone/tablet UI execution remain pending; no physical-device acceptance or private media used. Rollback each independent feature or this integration while retaining server media/presets; overall search stage remains incomplete.
+
 ## 2026-11-24: Native media category, panorama and resolution search
 
 - Source: codex/feature-search-media from PR6 head9969913; upstream remains672f02e, no upstream sync or server/API/database/production change.

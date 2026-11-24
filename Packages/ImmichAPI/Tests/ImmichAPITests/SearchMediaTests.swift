@@ -22,6 +22,18 @@ struct SearchMediaTests {
         }
     }
 
+    /// 单独的category也必须触发完整Fork智能分页；不让其他扩展条件掩盖路由判断回归。
+    @Test(arguments: ImmichSearchMediaCategory.allCases)
+    func routesStandaloneCategory(_ category: ImmichSearchMediaCategory) async throws {
+        var query = ImmichMetadataSearch()
+        query.mediaCategory = category
+        try await verifyPages(query)
+        query.mode = .smart
+        query.text = "synthetic"
+        #expect(query.requiresForkSmartSearch)
+        try await verifyPages(query)
+    }
+
     /// 全景或分辨率单独启用仍可执行；空文本保留metadata协议，非空smart选择独立Fork协议。
     @Test func routesStandaloneMediaConditions() async throws {
         var panorama = ImmichMetadataSearch()
@@ -41,6 +53,28 @@ struct SearchMediaTests {
     @Test func omitsUnselectedMediaFilters() async throws {
         var query = ImmichMetadataSearch()
         query.text = "synthetic"
+        try await verifyPages(query)
+    }
+
+    /// 交叉整合后的媒体/设备/标签/EXIF必须同页保留；参考图也不能退回文字或旧式smart。
+    @Test func preservesCombinedFiltersForEveryQuerySource() async throws {
+        var query = ImmichMetadataSearch()
+        query.text = "synthetic"
+        query.mediaCategory = .steamScreenshot
+        query.resolution = .fourK
+        query.panoramasOnly = true
+        query.deviceModels = ["Synthetic Model", "Synthetic Alias"]
+        query.cameraModel = "Synthetic Model"
+        query.tags = .anyOf(["11111111-1111-4111-8111-111111111111"])
+        query.orientation = .landscape
+        query.hasAlbums = false
+        query.rating = .stars(0)
+        query.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400)]
+        try await verifyPages(query)
+        query.mode = .smart
+        try await verifyPages(query)
+        query.queryAssetID = "22222222-2222-4222-8222-222222222222"
+        query.text = ""
         try await verifyPages(query)
     }
 
@@ -70,7 +104,11 @@ private struct MediaSearchTransport: ClientTransport {
         let bytes = try await Data(collecting: encoded, upTo: 1_000_000)
         let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         let filter = try #require(object["filter"] as? [String: Any])
-        #expect((filter["resolution"] as? [String: String])?["eq"] == query.resolution?.rawValue)
+        if let resolution = query.resolution {
+            #expect((filter["resolution"] as? [String: String])?["eq"] == resolution.rawValue)
+        } else {
+            #expect(filter["resolution"] == nil)
+        }
         if query.panoramasOnly {
             #expect((filter["isPanorama"] as? [String: Bool])?["eq"] == true)
         } else {
@@ -88,8 +126,26 @@ private struct MediaSearchTransport: ClientTransport {
             }
         }
         #expect(object["page"] == nil)
+        if !query.deviceModels.isEmpty {
+            let model = try #require(filter["model"] as? [String: Any])
+            #expect(model["in"] as? [String] == query.deviceModels)
+            #expect(model["eq"] as? String == query.cameraModel)
+        }
+        if case let .anyOf(ids) = query.tags {
+            #expect((filter["tagIds"] as? [String: [String]])?["any"] == ids)
+            #expect((filter["iso"] as? [String: Double])?["gte"] == 400)
+            #expect((filter["rating"] as? [String: Int])?["eq"] == 0)
+            #expect((filter["orientation"] as? [String: String])?["eq"] == "landscape")
+            #expect((filter["hasAlbums"] as? [String: Bool])?["eq"] == false)
+        }
         if query.requiresForkSmartSearch {
-            #expect(object["query"] as? String == "synthetic")
+            if let reference = query.queryAssetID {
+                #expect(object["query"] == nil)
+                #expect(object["queryAssetId"] as? String == reference)
+            } else {
+                #expect(object["query"] as? String == "synthetic")
+                #expect(object["queryAssetId"] == nil)
+            }
         }
         if let cursor = object["cursor"] as? String {
             #expect(cursor == "next")

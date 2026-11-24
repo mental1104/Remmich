@@ -94,7 +94,7 @@ nonisolated enum NativeSearchMediaCategory: String, Codable, CaseIterable, Senda
     var title: String {
         switch self {
         case .phoneVideo: "Phone videos"
-        case .screenshot: "Screenshots"
+        case .screenshot: "Portrait screenshots (1179x2556)"
         case .deltaScreenshot: "Delta screenshots"
         case .steamScreenshot: "Steam screenshots"
         case .switchScreenshot: "Nintendo Switch screenshots"

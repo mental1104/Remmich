@@ -44,4 +44,39 @@ struct NativeSearchMediaPresetTests {
         invalid.isPanorama = false
         #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt) }
     }
+
+    /// 多个子任务整合后完整登记仍应一次恢复；query来源和标签三态不因组合媒体/设备而丢失。
+    @Test(arguments: [NativeSearchTagFilter.any, .untagged, .anyOf(["11111111-1111-4111-8111-111111111111"])])
+    func roundTripsAllIntegratedConditions(_ tags: NativeSearchTagFilter) throws {
+        var query = NativeSearchQuery()
+        query.mode = .smart
+        query.text = "synthetic"
+        query.mediaCategory = .steamScreenshot
+        query.resolution = .fourK
+        query.panoramasOnly = true
+        query.tags = tags
+        query.deviceModels = ["Synthetic Model", "Synthetic Alias"]
+        query.cameraModel = "Synthetic Model"
+        query.lensModel = "Synthetic Lens"
+        query.city = "Synthetic City"
+        query.country = "Synthetic Country"
+        query.state = "Synthetic State"
+        query.favoritesOnly = true
+        query.archivedOnly = true
+        query.rating = .stars(0)
+        query.hasAlbums = false
+        query.orientation = .landscape
+        query.personIDs = ["33333333-3333-4333-8333-333333333333"]
+        query.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400)]
+        for reference in [false, true] {
+            if reference {
+                query.useReferenceAsset("22222222-2222-4222-8222-222222222222")
+            }
+            let bytes = try JSONEncoder().encode(NativeSearchPresetCodec.capture(query))
+            let conditions = try JSONDecoder().decode(NativeSearchPresetConditions.self, from: bytes)
+            let restored = try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone)
+            #expect(restored == query)
+            #expect(restored.requiresForkSmartSearch)
+        }
+    }
 }

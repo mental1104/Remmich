@@ -7,7 +7,7 @@ Search UI acceptance follow-up (from advanced-smart 9969913): an explicitly flag
 Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
 
 Server: mental1104/immich, local feature baseline `aa9aa667f` (official stable v3.4.2); new smart pagination is not deployed.
-Client: mental1104/Remmich, `dev293c3e8`; upstream `main` 672f02e. Advanced smart follow-up is a draft and awaits its own CI. Branch spelling is lowercase, matching the existing server.
+Client: mental1104/Remmich, `deva521360`; upstream `main` 672f02e. Advanced smart PR6 head9969913 passed full CI45358465406 and merged with the same treeb7e0a388. Post-merge Build45361549041 is running; the parent gitlink remains verified293c3e8. Tags, device groups, reference queries, media extensions and synthetic UI are now combined on a separate integration branch and still require their own CI. Branch spelling is lowercase, matching the existing server.
 
 ## API boundary
 
