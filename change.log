@@ -5,6 +5,14 @@
 - Add real URLSession synthetic identity-mismatch and ordered round-trip/future-field test cases. Offline contract compiler includes the new decoding source. Scoped SwiftFormat, bash syntax and diff checks passed; Swift execution and Xcode validation remain pending unified CI.
 - Roll back this client commit independently. Future server editing extensions intentionally require an updated client before editing; existing viewing/original downloads remain available.
 
+## 2026-11-24: Per-job backup checkpoints without full-history rewrites
+
+- Source: codex/fix-backup-row-storage from46ab21f; upstream remains672f02e. No upstream synchronization, server/API/production migration, workflow, push or CI execution.
+- Split the unpublished account journal into photo_backup_headers and ordered photo_backup_jobs, preserving the existing cold load/bulk scan API and all source/receipt/stage semantics. Add indexed nextQueuedPhotoBackup, same-source existing-row-only savePhotoBackupJob, queued+in-flight pause and in-flight-only cold recovery. Single checkpoints decode/validate/encode only their own job; the worker must still persist before every external side effect and enforce generation/cancellation.
+- Validate legacy blobs before one-time transactional conversion, retaining original recovery data on any failure; reject unknown/corrupt headers/rows and ambiguous mixed formats. Bulk replacements validate existing recovery data. Deleted-account single writes cannot reinsert tasks, including after the same account authenticates again. No credentials or media bytes are added to storage.
+- Add real-SQLite Swift scenarios with512 jobs and audit triggers proving only five selected-row updates are expected, unchanged other payloads/positions/header, indexed query planning, partial-receipt cold recovery, pause/terminal preservation, unknown/source-change/deleted/recreated-account writes, atomic legacy conversion and future/corrupt recovery preservation. NAS scoped SwiftFormat0.64.5 and diff checks passed; Swift compiler/tests are unavailable and not executed. Complexity improvement is source-level evidence, not a device throughput benchmark.
+- Worker integration remains separate and must use the new single-item methods rather than the full journal array in the hot loop. Rollback preserves account files; after legacy conversion an older build cannot read the new rows, so do not resume/overwrite with its empty snapshot. See docs/photo-backup-reliability.md. No private photos, production or device-space cleanup touched.
+
 ## 2026-11-24: Account-scoped durable backup journal and recovery semantics
 
 - Source: codex/feature-backup-reliability over4a01d68; upstream remains672f02e. No upstream sync, server/API/production migration, CI or original-media operation.

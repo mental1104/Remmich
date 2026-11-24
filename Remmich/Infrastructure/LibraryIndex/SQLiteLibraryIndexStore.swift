@@ -41,28 +41,155 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
     /// 旧版本/损坏或跨namespace的日志抛错，调用方不得以空值覆盖恢复资料。
     func loadPhotoBackups(scope: MediaAccountScope) throws -> PhotoBackupJournal {
         guard try canRead(scope) else { return .init(namespace: scope.cacheNamespace) }
-        let db = try preparedDatabase(scope: scope)
-        try createPhotoBackupSchema(db)
-        guard let json = try db.scalarText("SELECT payload FROM main.photo_backups WHERE scope=?", [.text(scope.cacheNamespace)]) else {
+        let db = try photoBackupDatabase(scope: scope)
+        guard let header = try photoBackupHeader(scope: scope, database: db) else {
             return .init(namespace: scope.cacheNamespace)
         }
-        let journal = try JSONDecoder().decode(PhotoBackupJournal.self, from: Data(json.utf8))
+        let jobs = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? ORDER BY position",
+                                [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupJob)
+        let journal = PhotoBackupJournal(header: header, jobs: jobs)
         try journal.validate(namespace: scope.cacheNamespace)
         return journal
     }
 
-    /// journal为调用方已完成的单次状态转换，scope为同一账号；SQLite原子替换后才可执行下一外部副作用。
-    /// 账号必须仍存在；晚到写入不能恢复Clear Local Data已删除的账号或写入另一账号日志。
+    /// journal为冷快照/明确扫描结果，scope为同一账号；批量事务创建任务并保存扫描顺序，热转换使用savePhotoBackupJob。
+    /// 已有未知版本或损坏旧日志不能覆盖；账号删除后不能重建其日志。
     func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {
+        try Task.checkCancellation()
         try journal.validate(namespace: scope.cacheNamespace)
+        let db = try photoBackupDatabase(scope: scope)
+        try db.transaction {
+            if let previous = try photoBackupHeader(scope: scope, database: db) {
+                // 整体替换仅用于扫描/冷快照；先验证已有恢复资料，不能用新空快照覆盖损坏任务行。
+                let saved = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? ORDER BY position",
+                                         [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupJob)
+                try PhotoBackupJournal(header: previous, jobs: saved).validate(namespace: scope.cacheNamespace)
+            }
+            try replacePhotoBackupRows(journal, scope: scope, database: db)
+            try Task.checkCancellation()
+        }
+    }
+
+    /// job必须已由批量扫描创建且源版本相同；只验证/编码/更新这一行，不插入未知任务或重写其他回执。
+    /// 调用方须在下一次导出/网络副作用前等待成功，并仍检查自己的账号/端点代际。
+    func savePhotoBackupJob(_ job: PhotoBackupJob, scope: MediaAccountScope) throws {
+        try Task.checkCancellation()
+        try job.validate()
+        let db = try photoBackupDatabase(scope: scope)
+        try db.transaction {
+            guard try photoBackupHeader(scope: scope, database: db) != nil,
+                  let saved = try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND job_id=?",
+                                              [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
+                  saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }
+            try updatePhotoBackupRow(job, scope: scope, database: db)
+            try Task.checkCancellation()
+        }
+    }
+
+    /// 按原扫描顺序读取一项queued任务，索引避免每次遍历完成历史；不claim、不上传，worker仍需串行并先保存begin。
+    func nextQueuedPhotoBackup(scope: MediaAccountScope) throws -> PhotoBackupJob? {
+        try Task.checkCancellation()
+        guard try canRead(scope) else { return nil }
+        let db = try photoBackupDatabase(scope: scope)
+        guard try photoBackupHeader(scope: scope, database: db) != nil else { return nil }
+        return try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND stage=? ORDER BY position LIMIT 1",
+                               [.text(scope.cacheNamespace), .text(PhotoBackupJob.Stage.queued.rawValue)], map: Self.decodePhotoBackupJob)
+    }
+
+    /// 用户停止/离开前台时暂停queued与in-flight，保留部分回执；即使调用Task已取消也须保存暂停结果。
+    func pausePhotoBackupWork(scope: MediaAccountScope) throws {
+        try pausePhotoBackupRows(scope: scope, includesQueued: true)
+    }
+
+    /// 冷启动仅将in-flight恢复为paused，不改queued或自动恢复上传；调用者明确继续后才开始新尝试。
+    func recoverPhotoBackupWork(scope: MediaAccountScope) throws {
+        try pausePhotoBackupRows(scope: scope, includesQueued: false)
+    }
+
+    /// scope必须已有账号文件；辅助表和旧格式转换不改变既有账号schema或重新创建已删除账号。
+    private func photoBackupDatabase(scope: MediaAccountScope) throws -> SQLiteConnection {
         guard try canRead(scope) else { throw CancellationError() }
         let db = try preparedDatabase(scope: scope)
         guard try db.scalarInt64("SELECT COUNT(*) FROM scopes WHERE scope=?", [.text(scope.cacheNamespace)]) == 1 else {
             throw CancellationError()
         }
         try createPhotoBackupSchema(db)
-        let json = try String(decoding: JSONEncoder().encode(journal), as: UTF8.self)
-        try db.execute("INSERT INTO main.photo_backups(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload", [.text(scope.cacheNamespace), .text(json)])
+        // 旧blob只转换一次；验证和全部行写入同事务，任何错误都保留原恢复资料。
+        if try db.scalarInt64("SELECT COUNT(*) FROM main.photo_backups WHERE scope=?", [.text(scope.cacheNamespace)]) == 1 {
+            try db.transaction {
+                // 事务内重读，避免另一连接已成功转换后重复导入旧blob。
+                guard let json = try db.scalarText("SELECT payload FROM main.photo_backups WHERE scope=?", [.text(scope.cacheNamespace)]) else { return }
+                let legacy = try JSONDecoder().decode(PhotoBackupJournal.self, from: Data(json.utf8))
+                try legacy.validate(namespace: scope.cacheNamespace)
+                guard try db.scalarInt64("SELECT COUNT(*) FROM main.photo_backup_headers WHERE scope=?", [.text(scope.cacheNamespace)]) == 0 else {
+                    throw PhotoBackupStateError.invalidJournal
+                }
+                try replacePhotoBackupRows(legacy, scope: scope, database: db)
+                try db.execute("DELETE FROM main.photo_backups WHERE scope=?", [.text(scope.cacheNamespace)])
+            }
+        }
+        return db
+    }
+
+    /// 返回当前账号独立日志头；只解码小型头部，不读取任务历史，未知版本阻止任何热路径覆盖。
+    private func photoBackupHeader(scope: MediaAccountScope, database: SQLiteConnection) throws -> PhotoBackupJournal.Header? {
+        guard let json = try database.scalarText("SELECT payload FROM main.photo_backup_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else {
+            guard try database.scalarInt64("SELECT 1 FROM main.photo_backup_jobs WHERE scope=? LIMIT 1", [.text(scope.cacheNamespace)]) == nil else {
+                throw PhotoBackupStateError.invalidJournal
+            }
+            return nil
+        }
+        let header = try JSONDecoder().decode(PhotoBackupJournal.Header.self, from: Data(json.utf8))
+        try header.validate(namespace: scope.cacheNamespace)
+        return header
+    }
+
+    /// journal已完成整体验证；只在明确扫描/冷转换事务内替换header和按顺序排列的任务行。
+    private func replacePhotoBackupRows(_ journal: PhotoBackupJournal, scope: MediaAccountScope, database: SQLiteConnection) throws {
+        try database.execute("DELETE FROM main.photo_backup_jobs WHERE scope=?", [.text(scope.cacheNamespace)])
+        let header = try String(decoding: JSONEncoder().encode(journal.header), as: UTF8.self)
+        try database.execute("INSERT INTO main.photo_backup_headers(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
+                             [.text(scope.cacheNamespace), .text(header)])
+        for (position, job) in journal.jobs.enumerated() {
+            let json = try String(decoding: JSONEncoder().encode(job), as: UTF8.self)
+            try database.execute("INSERT INTO main.photo_backup_jobs(scope,job_id,position,stage,payload) VALUES(?,?,?,?,?)",
+                                 [.text(scope.cacheNamespace), .text(job.id.uuidString), .int(position), .text(job.stage.rawValue), .text(json)])
+        }
+    }
+
+    /// job已由调用路径验证且存在；只更新阶段和当前payload，position/id/source身份不变。
+    private func updatePhotoBackupRow(_ job: PhotoBackupJob, scope: MediaAccountScope, database: SQLiteConnection) throws {
+        let json = try String(decoding: JSONEncoder().encode(job), as: UTF8.self)
+        try database.execute("UPDATE main.photo_backup_jobs SET stage=?,payload=? WHERE scope=? AND job_id=?",
+                             [.text(job.stage.rawValue), .text(json), .text(scope.cacheNamespace), .text(job.id.uuidString)])
+    }
+
+    /// includesQueued区分用户停止和冷恢复；只解码索引命中的活动行，整批暂停原子提交且不改其他历史。
+    private func pausePhotoBackupRows(scope: MediaAccountScope, includesQueued: Bool) throws {
+        guard try canRead(scope) else { return }
+        let db = try photoBackupDatabase(scope: scope)
+        try db.transaction {
+            guard try photoBackupHeader(scope: scope, database: db) != nil else { return }
+            var stages: [PhotoBackupJob.Stage] = [.exporting, .uploadingMotion, .uploadingPrimary, .verifying]
+            if includesQueued {
+                stages.append(.queued)
+            }
+            let placeholders = Array(repeating: "?", count: stages.count).joined(separator: ",")
+            let jobs = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND stage IN (\(placeholders)) ORDER BY position",
+                                    [.text(scope.cacheNamespace)] + stages.map { .text($0.rawValue) }, map: Self.decodePhotoBackupJob)
+            for var job in jobs {
+                job.pause()
+                try updatePhotoBackupRow(job, scope: scope, database: db)
+            }
+        }
+    }
+
+    /// row提供独立id/stage和JSON；拒绝索引状态与payload不一致，避免损坏行被跳过或误判完成。
+    private static func decodePhotoBackupJob(_ row: SQLiteRow) throws -> PhotoBackupJob {
+        let job = try JSONDecoder().decode(PhotoBackupJob.self, from: Data(row.text(2).utf8))
+        try job.validate()
+        guard row.text(0) == job.id.uuidString, row.text(1) == job.stage.rawValue else { throw PhotoBackupStateError.invalidJournal }
+        return job
     }
 
     private struct AlbumCatalogState: Codable {
@@ -2137,6 +2264,15 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
     /// 仅在当前账号首次使用备份日志时创建独立辅助表，不改既有缓存schema或用户资料；删除账号时级联回收。
     private func createPhotoBackupSchema(_ database: SQLiteConnection) throws {
         try database.execute("CREATE TABLE IF NOT EXISTS main.photo_backups(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE, payload TEXT NOT NULL)")
+        try database.execute("CREATE TABLE IF NOT EXISTS main.photo_backup_headers(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE, payload TEXT NOT NULL)")
+        try database.execute("""
+        CREATE TABLE IF NOT EXISTS main.photo_backup_jobs(
+            scope TEXT NOT NULL REFERENCES photo_backup_headers(scope) ON DELETE CASCADE,
+            job_id TEXT NOT NULL,position INTEGER NOT NULL CHECK(position>=0),stage TEXT NOT NULL,payload TEXT NOT NULL,
+            PRIMARY KEY(scope,job_id),UNIQUE(scope,position)
+        )
+        """)
+        try database.execute("CREATE INDEX IF NOT EXISTS main.photo_backup_jobs_queue ON photo_backup_jobs(scope,stage,position)")
     }
 
     private func createPlaceSchema(_ database: SQLiteConnection) throws {

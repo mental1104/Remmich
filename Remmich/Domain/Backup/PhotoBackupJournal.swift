@@ -67,6 +67,14 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         primaryWasDuplicate = false
     }
 
+    /// 只验证当前任务的持久化不变量，供单项检查点使用；不把回执存在等同于已完成服务器验证。
+    func validate() throws {
+        guard !source.localID.isEmpty, attempts >= 0,
+              motionAssetID == nil || source.kind == .livePhoto,
+              stage != .completed || (primaryAssetID != nil && (source.kind != .livePhoto || motionAssetID != nil))
+        else { throw PhotoBackupStateError.invalidJournal }
+    }
+
     /// 仅queued可开始；调用者须先持久化该转换，再读取PhotoKit或发HTTP。
     mutating func begin() throws {
         guard stage == .queued else { throw PhotoBackupStateError.invalidTransition }
@@ -142,6 +150,19 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
 
 /// 当前账号的备份日志；不含凭据/文件字节，资源在真正执行时从授权PhotoKit重新读取。
 nonisolated struct PhotoBackupJournal: Codable, Sendable {
+    /// 不含任务数组的日志头；热路径只检查版本/账号，完整任务由SQLite独立行保存。
+    struct Header: Codable, Sendable {
+        let version: Int
+        let namespace: String
+        let selectedAlbumIDs: [String]
+        let allowCloud: Bool
+
+        /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
+        func validate(namespace expected: String) throws {
+            guard version == 1, namespace == expected else { throw PhotoBackupStateError.invalidJournal }
+        }
+    }
+
     let version: Int
     let namespace: String
     var selectedAlbumIDs: [String]
@@ -157,15 +178,28 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         jobs = []
     }
 
+    /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
+    init(header: Header, jobs: [PhotoBackupJob]) {
+        version = header.version
+        namespace = header.namespace
+        selectedAlbumIDs = header.selectedAlbumIDs
+        allowCloud = header.allowCloud
+        self.jobs = jobs
+    }
+
+    /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
+    var header: Header {
+        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud)
+    }
+
     /// expected为当前认证账号namespace；拒绝跨账号、未知版本或重复任务ID的日志，不静默清空。
     func validate(namespace expected: String) throws {
-        guard version == 1, namespace == expected, Set(jobs.map(\.id)).count == jobs.count,
-              Set(jobs.map(\.source)).count == jobs.count,
-              jobs.allSatisfy({ job in
-                  !job.source.localID.isEmpty && job.attempts >= 0
-                      && (job.motionAssetID == nil || job.source.kind == .livePhoto)
-                      && (job.stage != .completed || (job.primaryAssetID != nil && (job.source.kind != .livePhoto || job.motionAssetID != nil)))
-              }) else { throw PhotoBackupStateError.invalidJournal }
+        try header.validate(namespace: expected)
+        guard Set(jobs.map(\.id)).count == jobs.count,
+              Set(jobs.map(\.source)).count == jobs.count else { throw PhotoBackupStateError.invalidJournal }
+        for job in jobs {
+            try job.validate()
+        }
     }
 
     /// sources为一次明确扫描的去重源快照；同版本完成项也重新查重，不能假定服务器永远保留旧备份。
