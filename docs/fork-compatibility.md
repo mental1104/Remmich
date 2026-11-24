@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Search UI acceptance follow-up (from advanced-smart 9969913): an explicitly flagged DEBUG host now drives the actual search state/viewer using offline synthetic pages, pure-memory details and local PNGs. The independent `RemmichSearchUI` scheme / `RemmichUITests` target includes five scenarios and phone/tablet selection with XS excluded. Only Linux static/format and mock selector checks ran; Swift compilation, simulator screenshots and device acceptance remain **unverified**. No workflows or server behavior changed. See [search UI acceptance](search-ui-acceptance.md) for the exact execution, isolation and coverage limits.
+
 Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
 
 Server: mental1104/immich, local feature baseline `aa9aa667f` (official stable v3.4.2); new smart pagination is not deployed.

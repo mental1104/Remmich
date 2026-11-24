@@ -14,6 +14,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		D20000000000000000000001 /* UI test app proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F846993C3066C25E00C68930 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F84699433066C25E00C68930;
+			remoteInfo = Remmich;
+		};
 		F84699523066C25F00C68930 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = F846993C3066C25E00C68930 /* Project object */;
@@ -24,6 +31,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D20000000000000000000002 /* RemmichUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemmichUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F84699443066C25E00C68930 /* Remmich.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Remmich.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F84699513066C25F00C68930 /* RemmichTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemmichTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -39,6 +47,11 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		D20000000000000000000003 /* RemmichUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = RemmichUITests;
+			sourceTree = "<group>";
+		};
 		F84699463066C25E00C68930 /* Remmich */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -55,6 +68,7 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		D20000000000000000000004 /* UI Frameworks */ = {isa = PBXFrameworksBuildPhase; files = (); };
 		F84699413066C25E00C68930 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
@@ -77,6 +91,7 @@
 			children = (
 				F84699463066C25E00C68930 /* Remmich */,
 				F84699543066C25F00C68930 /* RemmichTests */,
+				D20000000000000000000003 /* RemmichUITests */,
 				F84699453066C25E00C68930 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -86,6 +101,7 @@
 			children = (
 				F84699443066C25E00C68930 /* Remmich.app */,
 				F84699513066C25F00C68930 /* RemmichTests.xctest */,
+				D20000000000000000000002 /* RemmichUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -93,6 +109,22 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		D20000000000000000000005 /* RemmichUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D20000000000000000000009 /* UI configurations */;
+			buildPhases = (
+				D20000000000000000000006 /* UI Sources */,
+				D20000000000000000000004 /* UI Frameworks */,
+				D20000000000000000000007 /* UI Resources */,
+			);
+			buildRules = ();
+			dependencies = (D20000000000000000000008 /* UI app dependency */,);
+			fileSystemSynchronizedGroups = (D20000000000000000000003 /* RemmichUITests */,);
+			name = RemmichUITests;
+			productName = RemmichUITests;
+			productReference = D20000000000000000000002 /* RemmichUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		F84699433066C25E00C68930 /* Remmich */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F84699633066C25F00C68930 /* Build configuration list for PBXNativeTarget "Remmich" */;
@@ -150,6 +182,10 @@
 				LastSwiftUpdateCheck = 2700;
 				LastUpgradeCheck = 2700;
 				TargetAttributes = {
+					D20000000000000000000005 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = F84699433066C25E00C68930;
+					};
 					F84699433066C25E00C68930 = {
 						CreatedOnToolsVersion = 27.0;
 					};
@@ -180,11 +216,13 @@
 			targets = (
 				F84699433066C25E00C68930 /* Remmich */,
 				F84699503066C25F00C68930 /* RemmichTests */,
+				D20000000000000000000005 /* RemmichUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		D20000000000000000000007 /* UI Resources */ = {isa = PBXResourcesBuildPhase; files = (); };
 		F84699423066C25E00C68930 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
@@ -243,6 +281,7 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		D20000000000000000000006 /* UI Sources */ = {isa = PBXSourcesBuildPhase; files = (); };
 		F84699403066C25E00C68930 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
@@ -256,6 +295,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		D20000000000000000000008 /* UI app dependency */ = {
+			isa = PBXTargetDependency;
+			target = F84699433066C25E00C68930 /* Remmich */;
+			targetProxy = D20000000000000000000001 /* UI test app proxy */;
+		};
 		F84699533066C25F00C68930 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = F84699433066C25E00C68930 /* Remmich */;
@@ -264,6 +308,34 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		D2000000000000000000000A /* UI Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.espeonblue.RemmichUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Remmich;
+			};
+			name = Debug;
+		};
+		D2000000000000000000000B /* UI Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.espeonblue.RemmichUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Remmich;
+			};
+			name = Release;
+		};
 		F84699613066C25F00C68930 /* Debug configuration for PBXProject "Remmich" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -512,6 +584,14 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		D20000000000000000000009 /* UI configurations */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D2000000000000000000000A /* UI Debug */,
+				D2000000000000000000000B /* UI Release */,
+			);
+			defaultConfigurationName = Release;
+		};
 		F846993F3066C25E00C68930 /* Build configuration list for PBXProject "Remmich" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

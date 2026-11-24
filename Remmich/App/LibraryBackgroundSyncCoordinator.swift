@@ -403,9 +403,16 @@ final class LibraryBackgroundSyncCoordinator {
 
 @MainActor
 final class RemmichAppDelegate: NSObject, UIApplicationDelegate {
+    /// 系统启动回调返回可启动状态；显式搜索宿主不注册或恢复真实后台传输。
     func application(_: UIApplication,
                      didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool
     {
+        #if DEBUG
+            // 独立搜索UI宿主不恢复正常账号或后台传输；避免测试误读已有会话/网络队列。
+            if SearchUIFixtureLaunch.isEnabled {
+                return true
+            }
+        #endif
         LibraryBackgroundSyncCoordinator.shared.register()
         Task {
             await LibraryTransferQueue.shared.setResponseHandler {
@@ -415,9 +422,16 @@ final class RemmichAppDelegate: NSObject, UIApplicationDelegate {
         return true
     }
 
+    /// identifier为系统交付的会话；completionHandler必须完成一次，搜索夹具不接管旧传输。
     func application(_: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void)
     {
+        #if DEBUG
+            if SearchUIFixtureLaunch.isEnabled {
+                completionHandler()
+                return
+            }
+        #endif
         if identifier == LibraryTransferQueue.exportSessionIdentifier {
             let completion = LibraryTransferEventCompletion(completionHandler)
             Task {
