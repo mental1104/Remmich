@@ -1,3 +1,11 @@
+## 2026-11-24: Complete search-state acceptance before integrated CI
+
+- Source: codex/feature-search-completion additionally integrates query-race08d88e4 as5ebd5dd, saved-lifecyclef15ec2d as125d14a and attachment-export1eacd72 as1ad6a84. No upstream sync, server/API/database or production media change. Optional management URLSession configuration injection defaults to the original production construction and retains authentication/cancellation/generation checks.
+- Direct native tests now cover same-account query A/B first-page and continuation races, single pending pagination and token cycles, plus real Store→manager→HTTP preset409/reload, current full-condition/name preservation and account/endpoint boundaries. Actor handshakes establish the required ordering; no sleeps or live network substitute for the actual production state transitions. Preset Panel draft/confirmation UI remains unverified.
+- Ready PR UI exports original attachments/manifest and actual xcresulttool version/help, preserving xcresult/log/device receipts; failed tests retain evidence, tool/export failures fail the job. Trigger/draft/runner/release boundaries remain unchanged. No new signing/plugin bypass or paid runner.
+- Whole-project SwiftFormat0.64.5 lint passed (284 files, one excluded); both shell scripts syntax and complete diff whitespace checks passed. Original schema-source equality and idempotence remain unchanged. Integrated Swift/API/app/UI execution is pending the new PR7 run, not inferred from these static checks.
+- Baseline only: PR6 head9969913 fullCI45358465406 and merged deva521360 Build45361549041/Tests45363349761 all passed. Actual downloaded release-context14906396937 matches that build and revision; parent gitlink fixeda521360. No device acceptance, installation, release or production deployment. Roll back independent test/CI additions or feature commits while retaining server media/presets; the search stage remains incomplete until integrated execution succeeds.
+
 ## 2026-11-24: Direct native pagination mutex and continuation-cycle acceptance
 
 - Source: codex/feature-search-completion over6ed6568; upstream remains672f02e. No server/API/database, production behavior or workflow change.
