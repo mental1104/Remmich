@@ -1,3 +1,9 @@
+## 2026-11-24: Make new management HTTP fixture captures explicitly Sendable
+
+- Source: candidatea207b3b; upstream remains672f02e. CI45392189009/job138438516772 ended compilation failure with one source diagnostic at AlbumDirectoryManagementTests.swift:481: sending a Task closure risks a race. The previous batch macro errors are absent. App linking is not combined build/test success; API/app/UI execution remains incomplete.
+- Apply the already validated preset-fixture capture pattern to the four same-shaped directory/batch/people/backup-takeover response tasks: immutable capturedRequest, explicit Sendable closure/capture list, and explicit self.loading. Keep Mutex-protected state, actual URLSession cancellation, weak ownership, actor scripts and late-response gate cleanup. Add no unchecked conformance, compiler override or skipped assertion.
+- Scoped SwiftFormat/diff checks passed; repaired test compilation still requires the next actual CI. No production source, server/API/database, workflow, signing or device change. Rollback restores the prior fixture inference failure.
+
 ## 2026-11-24: Keep batch reload Sendable inference outside requirement macros
 
 - Source: candidatec258df2; upstream remains672f02e. CI45390035103 ended compilation failure with two macro diagnostics originating at BatchAssetManagementStoreTests.swift:117/259: a captured factory parameter lost its Sendable requirement during macro forwarding. Earlier nan and viewer diagnostics are gone; app links, but combined products and runtime checks are incomplete.

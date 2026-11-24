@@ -440,22 +440,23 @@ private final nonisolated class TakeoverURLProtocol: URLProtocol, @unchecked Sen
     /// 完整请求经过脚本和真实SQLite读取；取消后丢弃旧字节，再显式通知响应已退役。
     override func startLoading() {
         do {
-            let request = try TakeoverRequest(request)
-            guard let entry = Self.scripts.withLock({ $0[request.url.host ?? ""] }) else { throw URLError(.badURL) }
-            let task = Task { [weak self] in
+            let capturedRequest = try TakeoverRequest(request)
+            guard let entry = Self.scripts.withLock({ $0[capturedRequest.url.host ?? ""] }) else { throw URLError(.badURL) }
+            // 快照/脚本显式跨入Task；旧响应退出通知仍在取消后执行，不能省略gate清理。
+            let task = Task { @Sendable [weak self, capturedRequest, entry] in
                 var completedStep: Int?
                 do {
-                    let reply = try await entry.script.response(request, endpoint: entry.endpoint)
+                    let reply = try await entry.script.response(capturedRequest, endpoint: entry.endpoint)
                     completedStep = reply.step
-                    if let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) {
-                        guard let response = HTTPURLResponse(url: request.url, statusCode: 200, httpVersion: nil,
+                    if let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) {
+                        guard let response = HTTPURLResponse(url: capturedRequest.url, statusCode: 200, httpVersion: nil,
                                                              headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
                         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                         client?.urlProtocol(self, didLoad: reply.data)
                         client?.urlProtocolDidFinishLoading(self)
                     }
                 } catch {
-                    if let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) {
+                    if let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) {
                         client?.urlProtocol(self, didFailWithError: error)
                     }
                 }

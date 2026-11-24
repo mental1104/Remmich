@@ -357,18 +357,19 @@ private final nonisolated class PeopleHTTPProtocol: URLProtocol, @unchecked Send
     /// 收集真实请求并提供本地响应；流/脚本错误经URLSession错误路径传播。
     override func startLoading() {
         do {
-            let request = try PeopleCapturedRequest(request)
-            let fixture = try #require(Self.fixtures.withLock { $0[request.url.host ?? ""] })
-            let task = Task { [weak self] in
+            let capturedRequest = try PeopleCapturedRequest(request)
+            let fixture = try #require(Self.fixtures.withLock { $0[capturedRequest.url.host ?? ""] })
+            // 明确捕获Sendable请求和actor，保留原有取消检查与HTTP响应顺序。
+            let task = Task { @Sendable [weak self, capturedRequest, fixture] in
                 do {
-                    let reply = try await fixture.response(request)
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
-                    let (data, response) = try reply.response(url: request.url)
+                    let reply = try await fixture.response(capturedRequest)
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
+                    let (data, response) = try reply.response(url: capturedRequest.url)
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                     client?.urlProtocol(self, didLoad: data)
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
                     client?.urlProtocol(self, didFailWithError: error)
                 }
             }

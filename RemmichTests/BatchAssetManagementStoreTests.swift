@@ -469,19 +469,20 @@ private final nonisolated class BatchManagementProtocol: URLProtocol, @unchecked
     /// 快照请求后异步返回固定字节；捕获/路由错误直接使真正URLSession请求失败。
     override func startLoading() {
         do {
-            let request = try BatchCapturedRequest(request)
-            guard let entry = Self.scripts.withLock({ $0[request.url.host ?? ""] }) else { throw URLError(.badURL) }
-            let task = Task { [weak self] in
+            let capturedRequest = try BatchCapturedRequest(request)
+            guard let entry = Self.scripts.withLock({ $0[capturedRequest.url.host ?? ""] }) else { throw URLError(.badURL) }
+            // 与目录夹具保持同一显式发送边界，Task只捕获不可变快照和受锁保护的self。
+            let task = Task { @Sendable [weak self, capturedRequest, entry] in
                 do {
-                    let exchange = try await entry.script.response(for: request, endpoint: entry.endpoint)
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
-                    guard let response = HTTPURLResponse(url: request.url, statusCode: exchange.status, httpVersion: nil,
+                    let exchange = try await entry.script.response(for: capturedRequest, endpoint: entry.endpoint)
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
+                    guard let response = HTTPURLResponse(url: capturedRequest.url, statusCode: exchange.status, httpVersion: nil,
                                                          headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                     client?.urlProtocol(self, didLoad: Data(exchange.json.utf8))
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
                     client?.urlProtocol(self, didFailWithError: error)
                 }
             }
