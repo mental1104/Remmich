@@ -1,5 +1,4 @@
 import Foundation
-import ImmichAPI
 import Testing
 @testable import Remmich
 
@@ -7,8 +6,8 @@ import Testing
 @Suite("Native search state")
 struct NativeSearchStoreTests {
     /// 安全的SDK错误保留状态区别，不把鉴权失败或非法条件伪装成空结果。
-    @Test(arguments: [ImmichAPIError.unauthorized, .forbidden, .httpStatus(400)])
-    @MainActor func distinguishesAuthenticationPermissionAndRequestErrors(_ error: ImmichAPIError) async {
+    @Test(arguments: [NativeSearchError.unauthorized, .forbidden, .invalidQuery])
+    @MainActor func distinguishesAuthenticationPermissionAndRequestErrors(_ error: NativeSearchError) async {
         let store = NativeSearchStore()
         await store.search(.init(), source: ErrorSource(error: error))
         #expect(store.error == error.errorDescription)
@@ -22,13 +21,13 @@ struct NativeSearchStoreTests {
         let store = NativeSearchStore()
         await store.search(.init(), source: source)
         #expect(store.assets.map(\.id) == ["first"])
-        #expect(store.nextCursor == "next")
+        #expect(store.continuation == .cursor("next"))
         await store.loadMore(source: source)
         #expect(store.error != nil)
-        #expect(store.nextCursor == "next")
+        #expect(store.continuation == .cursor("next"))
         await store.loadMore(source: source)
         #expect(store.assets.map(\.id) == ["first", "second"])
-        #expect(store.nextCursor == nil)
+        #expect(store.continuation == nil)
         #expect(store.error == nil)
     }
 
@@ -63,10 +62,10 @@ struct NativeSearchStoreTests {
 
 /// error为合成SDK错误，只用于验证界面可见错误语义，不包含服务端原始响应。
 private struct ErrorSource: NativeSearchReading {
-    let error: ImmichAPIError
+    let error: NativeSearchError
 
-    /// query与cursor不触发网络；原样抛出指定的可安全展示错误。
-    func metadataSearch(_: ImmichMetadataSearch, cursor _: String?) async throws -> NativeSearchPage {
+    /// query与continuation不触发网络；原样抛出指定的可安全展示错误。
+    func search(_: NativeSearchQuery, continuation _: String?) async throws -> NativeSearchPage {
         throw error
     }
 }
@@ -84,15 +83,15 @@ private nonisolated func searchAsset(_ id: String) -> TimelineAssetSummary {
 private actor PagedSource: NativeSearchReading {
     private var failedOnce = false
 
-    /// query不参与合成数据生成；cursor必须始终使用首屏返回的next。
-    func metadataSearch(_: ImmichMetadataSearch, cursor: String?) async throws -> NativeSearchPage {
-        guard let cursor else { return .init(assets: [searchAsset("first")], nextCursor: "next") }
-        #expect(cursor == "next")
+    /// query不参与合成数据生成；continuation必须始终使用首屏返回的next。
+    func search(_: NativeSearchQuery, continuation: NativeSearchContinuation?) async throws -> NativeSearchPage {
+        guard let continuation else { return .init(assets: [searchAsset("first")], continuation: .cursor("next")) }
+        #expect(continuation == .cursor("next"))
         if !failedOnce {
             failedOnce = true
             throw URLError(.notConnectedToInternet)
         }
-        return .init(assets: [searchAsset("first"), searchAsset("second")], nextCursor: nil)
+        return .init(assets: [searchAsset("first"), searchAsset("second")], continuation: nil)
     }
 }
 
@@ -101,8 +100,8 @@ private actor DelayedSource: NativeSearchReading {
     private var response: CheckedContinuation<NativeSearchPage, Never>?
     private var waiter: CheckedContinuation<Void, Never>?
 
-    /// query/cursor仅满足读取契约；保存响应continuation直到测试显式完成。
-    func metadataSearch(_: ImmichMetadataSearch, cursor _: String?) async throws -> NativeSearchPage {
+    /// query/continuation仅满足读取契约；保存响应continuation直到测试显式完成。
+    func search(_: NativeSearchQuery, continuation _: String?) async throws -> NativeSearchPage {
         await withCheckedContinuation { continuation in
             response = continuation
             waiter?.resume()
@@ -120,7 +119,7 @@ private actor DelayedSource: NativeSearchReading {
 
     /// 释放合成响应；不检查取消，故意测试上层的防御性边界。
     func complete() {
-        response?.resume(returning: .init(assets: [searchAsset("late")], nextCursor: nil))
+        response?.resume(returning: .init(assets: [searchAsset("late")], continuation: nil))
         response = nil
     }
 }

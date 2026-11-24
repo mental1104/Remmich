@@ -15,10 +15,14 @@ public struct ImmichQueuedReadTransport: ClientTransport {
         self.searchTransport = searchTransport ?? SearchNetwork.transport
     }
 
+    /// request/body来自生成SDK，baseURL为验证过的API根，operationID必须匹配只读路由。
+    /// 返回HTTP状态/字节；取消原样传播，非法方法或路由在调用loader前拒绝。
     public func send(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
         try Task.checkCancellation()
         // 不放行任意POST：操作ID、方法、相对路径和请求体必须同时满足只读搜索契约。
-        if request.method == .post, operationID == "searchAssets", request.path == "/search/metadata", body != nil {
+        let isMetadata = operationID == "searchAssets" && request.path == "/search/metadata"
+        let isSmart = operationID == "searchSmart" && request.path == "/search/smart"
+        if request.method == .post, isMetadata || isSmart, body != nil {
             return try await searchTransport.send(request, body: body, baseURL: baseURL, operationID: operationID)
         }
         guard request.method == .get, body == nil,

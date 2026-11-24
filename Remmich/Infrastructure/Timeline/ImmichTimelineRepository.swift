@@ -433,17 +433,58 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
     }
 
-    /// query 为本次条件，cursor 为原始服务端令牌；返回当前代际的媒体结果，迟到响应拒绝发布。
-    func metadataSearch(_ query: ImmichMetadataSearch, cursor: String?) async throws -> NativeSearchPage {
+    /// query 为本次条件，continuation 为原始服务端令牌；返回当前代际的媒体结果，迟到响应拒绝发布。
+    func search(_ query: NativeSearchQuery, continuation: NativeSearchContinuation?) async throws -> NativeSearchPage {
         let (client, owner) = try requestContext()
+        // SDK类型仅存在于基础设施层；界面和领域不导入ImmichAPI。
+        var dto = ImmichMetadataSearch()
+        dto.text = query.text
+        dto.mode = switch query.mode {
+        case .fileName: .fileName
+        case .description: .description
+        case .fullPath: .fullPath
+        case .ocr: .ocr
+        case .smart: .smart
+        }
+        dto.media = switch query.media { case .all: .all; case .image: .image; case .video: .video }
+        dto.city = query.city
+        dto.cameraMake = query.cameraMake
+        dto.cameraModel = query.cameraModel
+        dto.personIDs = query.personIDs
+        dto.takenAfter = query.takenAfter
+        dto.takenBefore = query.takenBefore
+        dto.timeZone = query.timeZone
+        let token: ImmichSearchContinuation? = switch continuation {
+        case let .cursor(value)?: .cursor(value)
+        case let .page(value)?: .page(value)
+        case nil: nil
+        }
         do {
-            let page = try await client.metadataSearch(query, cursor: cursor)
+            let page = try await client.search(dto, continuation: token)
             try Task.checkCancellation()
             try requireCurrent(owner)
-            return NativeSearchPage(assets: page.assets.map(Self.map), nextCursor: page.nextCursor)
+            let next: NativeSearchContinuation? = switch page.continuation {
+            case let .cursor(value)?: .cursor(value)
+            case let .page(value)?: .page(value)
+            case nil: nil
+            }
+            return NativeSearchPage(assets: page.assets.map(Self.map), continuation: next)
         } catch {
             try requireCurrent(owner)
-            throw Self.map(error)
+            if Task.isCancelled || error is CancellationError || (error as? ImmichAPIError) == .cancelled {
+                throw CancellationError()
+            }
+            if let api = error as? ImmichAPIError {
+                switch api {
+                case .unauthorized: throw NativeSearchError.unauthorized
+                case .forbidden: throw NativeSearchError.forbidden
+                case .httpStatus(400): throw NativeSearchError.invalidQuery
+                case .invalidResponse: throw NativeSearchError.invalidResponse
+                case .rateLimited: throw NativeSearchError.rateLimited
+                default: throw NativeSearchError.unavailable
+                }
+            }
+            throw NativeSearchError.unavailable
         }
     }
 

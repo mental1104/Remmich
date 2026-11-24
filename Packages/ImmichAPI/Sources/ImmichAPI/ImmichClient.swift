@@ -308,13 +308,17 @@ public actor ImmichClient {
             throw ImmichAPIError.invalidResponse
         }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
         let output = try await makeClient().searchAssets(.init(body: .json(.init(
             cursor: cursor,
             filter: .init(
                 city: query.city.isEmpty ? nil : .init(eq: query.city),
+                description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
                 model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
-                originalFileName: text.isEmpty ? nil : .init(like: text),
+                ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
+                originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
+                originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
                 personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
@@ -328,6 +332,61 @@ public actor ImmichClient {
         case let .ok(response):
             let page = try response.body.json.assets
             return ImmichMetadataSearchPage(assets: page.items.map(Self.timelineAsset), nextCursor: page.nextCursor)
+        case let .undocumented(statusCode, _):
+            throw Self.map(status: statusCode)
+        }
+    }
+
+    /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。
+    /// 智能模式使用官方旧式数字分页，避免把无分页的smart V3冒充完整结果。
+    public func search(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation? = nil, size: Int = 60) async throws -> ImmichSearchPage {
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.mode != .smart || text.isEmpty {
+            var cursor: String?
+            if let continuation {
+                guard case let .cursor(value) = continuation else { throw ImmichAPIError.invalidResponse }
+                cursor = value
+            }
+            let page = try await metadataSearch(query, cursor: cursor, size: size)
+            return ImmichSearchPage(assets: page.assets, continuation: page.nextCursor.map(ImmichSearchContinuation.cursor))
+        }
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        var pageNumber = 1
+        if let continuation {
+            guard case let .page(value) = continuation, value > 0 else { throw ImmichAPIError.invalidResponse }
+            pageNumber = value
+        }
+        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
+        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
+        if let after, let before, after > before {
+            throw ImmichAPIError.invalidResponse
+        }
+        let output = try await makeClient().searchSmart(.init(body: .json(.init(
+            city: query.city.isEmpty ? nil : query.city,
+            make: query.cameraMake.isEmpty ? nil : query.cameraMake,
+            model: query.cameraModel.isEmpty ? nil : query.cameraModel,
+            page: pageNumber,
+            personIds: query.personIDs.isEmpty ? nil : query.personIDs,
+            query: text,
+            size: size,
+            takenAfter: after,
+            takenBefore: before,
+            _type: query.media == .all ? nil : query.media == .image ? .IMAGE : .VIDEO,
+            visibility: .timeline,
+            withExif: true
+        ))))
+        switch output {
+        case let .ok(response):
+            let page = try response.body.json.assets
+            // 不把未知形状或倒退/重复页码当成正常终页。
+            guard page.nextCursor == nil else { throw ImmichAPIError.invalidResponse }
+            var next: ImmichSearchContinuation?
+            if let raw = page.nextPage {
+                guard let value = Int(raw), value > pageNumber else { throw ImmichAPIError.invalidResponse }
+                next = .page(value)
+            }
+            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
         case let .undocumented(statusCode, _):
             throw Self.map(status: statusCode)
         }

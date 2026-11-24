@@ -2,10 +2,27 @@ import Foundation
 
 /// 原生元数据搜索条件；空值表示不限制，不包含账号范围或客户端计算的分页偏移。
 public struct ImmichMetadataSearch: Hashable, Sendable {
+    /// 搜索文本的语义；智能模式走smart，其他模式只走metadata。
+    public enum Mode: String, CaseIterable, Sendable {
+        case fileName, description, fullPath, ocr, smart
+
+        /// 返回原生界面的模式名称，不包含请求参数。
+        public var title: String {
+            switch self {
+            case .fileName: "File name"
+            case .description: "Description"
+            case .fullPath: "Path"
+            case .ocr: "OCR"
+            case .smart: "Smart search"
+            }
+        }
+    }
+
     /// 资源类型；all 不向服务器发送类型限制。
     public enum Media: String, CaseIterable, Sendable { case all, image, video }
 
     public var text = ""
+    public var mode: Mode = .fileName
     public var media: Media = .all
     public var city = ""
     public var cameraMake = ""
@@ -32,6 +49,18 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
     }
+}
+
+/// metadata不透明游标与smart数字页码不可互换；调用方不得自行构造offset。
+public enum ImmichSearchContinuation: Hashable, Sendable {
+    case cursor(String)
+    case page(Int)
+}
+
+/// 任一搜索模式的实际结果页，不承诺全局总命中数。
+public struct ImmichSearchPage: Sendable {
+    public let assets: [ImmichTimelineAsset]
+    public let continuation: ImmichSearchContinuation?
 }
 
 /// 一页实际搜索资源；nextCursor 必须原样传回，不是页码或总数量。

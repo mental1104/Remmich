@@ -16,6 +16,7 @@ filter:
     - getTimeBuckets
     - getTimeBucket
     - searchAssets
+    - searchSmart
     - getAssetInfo
     - searchMemories
     - getAllAlbums

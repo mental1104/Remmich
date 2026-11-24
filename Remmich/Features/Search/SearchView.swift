@@ -1,4 +1,3 @@
-import ImmichAPI
 import SwiftUI
 
 /// 真实搜索页，复用原生缩略图与查看器，不显示演示资源。
@@ -7,7 +6,7 @@ struct SearchView: View {
     let media: MediaLibraryController
     let assetDetails: any AssetDetailReading
     let showAccount: () -> Void
-    @State private var query = ImmichMetadataSearch()
+    @State private var query = NativeSearchQuery()
     @State private var store = NativeSearchStore()
     @State private var selection: Selection?
     @State private var people: [LibraryPerson] = []
@@ -25,13 +24,18 @@ struct SearchView: View {
         ScrollView {
             VStack(spacing: 16) {
                 Picker("Media", selection: $query.media) {
-                    Text("All").tag(ImmichMetadataSearch.Media.all)
-                    Text("Photos").tag(ImmichMetadataSearch.Media.image)
-                    Text("Videos").tag(ImmichMetadataSearch.Media.video)
+                    Text("All").tag(NativeSearchQuery.Media.all)
+                    Text("Photos").tag(NativeSearchQuery.Media.image)
+                    Text("Videos").tag(NativeSearchQuery.Media.video)
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
                 DisclosureGroup("Filters") {
                     VStack {
+                        Picker("Search mode", selection: $query.mode) {
+                            ForEach(NativeSearchQuery.Mode.allCases, id: \.self) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
                         TextField("City", text: $query.city)
                         TextField("Camera make", text: $query.cameraMake)
                         TextField("Camera model", text: $query.cameraModel)
@@ -57,7 +61,7 @@ struct SearchView: View {
                     Text(error).foregroundStyle(.secondary)
                     Button("Retry") { Task {
                         if let source {
-                            if store.hasSearched, store.nextCursor == nil {
+                            if store.hasSearched, store.continuation == nil {
                                 await store.search(query, source: source)
                             } else {
                                 await store.loadMore(source: source)
@@ -71,7 +75,7 @@ struct SearchView: View {
                 if store.assets.isEmpty, !store.isLoading {
                     ContentUnavailableView(store.hasSearched ? "No results" : "Search your library",
                                            systemImage: "magnifyingglass",
-                                           description: Text("Search file names or choose metadata filters."))
+                                           description: Text("Choose a search mode or metadata filters."))
                 }
                 LazyVGrid(columns: [.init(.adaptive(minimum: 100, maximum: 180), spacing: 2)], spacing: 2) {
                     ForEach(store.assets) { asset in
@@ -86,7 +90,7 @@ struct SearchView: View {
                 if store.isLoading {
                     ProgressView("Searching")
                 }
-                if store.nextCursor != nil, !store.isLoading {
+                if store.continuation != nil, !store.isLoading {
                     Button("Load more") { Task {
                         if let source {
                             await store.loadMore(source: source)
@@ -99,7 +103,7 @@ struct SearchView: View {
             }.padding(.vertical)
         }
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query.text, prompt: "File names")
+        .searchable(text: $query.text, prompt: Text(query.mode.title))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in

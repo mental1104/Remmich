@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- Consolidated PR #3 now includes native domain search models plus filename/description/path/OCR/smart modes. PR #2 app checks found two forbidden Feature SDK imports; those checks remain intact, and mapping moved to Infrastructure. This revision awaits new CI. Metadata uses opaque cursors, smart uses official legacy page numbers; no claim that smart V3 has pagination. Fork EXIF, suggestions and saved conditions remain unfinished.
+
 - People/date filter follow-up is implemented on codex/feature-search-people-dates but awaits CI: account-scoped people, optional local calendar boundaries, invalid-range rejection and explicit SDK error messages. Smart search, suggestions, Fork EXIF and saved conditions remain unfinished. Do not use older successful CI for this follow-up.
 
 - Native search work in progress: metadata results replace fixtures with filename/city/camera/type filters and cursor paging. Read-only POST uses an explicit ephemeral no-redirect path in ImmichQueuedReadTransport; durable GET indexing stays unchanged. Smart/people/date/Fork EXIF/presets remain unimplemented. New tests and Xcode validation await CI; earlier demo-data statements describe the previous pinned release.

@@ -1,16 +1,15 @@
 import Foundation
-import ImmichAPI
 import Observation
 
 /// 当前页媒体与原始续页令牌，不将返回数量当作全局总数。
 nonisolated struct NativeSearchPage: Sendable {
     let assets: [TimelineAssetSummary]
-    let nextCursor: String?
+    let continuation: NativeSearchContinuation?
 }
 
-/// 只读搜索边界；query是固定条件，cursor为上次响应令牌，错误不得伪装为空结果。
+/// 只读搜索边界；query是固定条件，continuation为上次响应令牌，错误不得伪装为空结果。
 nonisolated protocol NativeSearchReading: Sendable {
-    func metadataSearch(_ query: ImmichMetadataSearch, cursor: String?) async throws -> NativeSearchPage
+    func search(_ query: NativeSearchQuery, continuation: NativeSearchContinuation?) async throws -> NativeSearchPage
 }
 
 extension ImmichTimelineRepository: NativeSearchReading {}
@@ -22,37 +21,37 @@ final class NativeSearchStore {
     private(set) var isLoading = false
     private(set) var error: String?
     private(set) var hasSearched = false
-    private(set) var nextCursor: String?
+    private(set) var continuation: NativeSearchContinuation?
     private var generation = UUID()
-    private var query = ImmichMetadataSearch()
-    private var consumedCursors: Set<String> = []
+    private var query = NativeSearchQuery()
+    private var consumedContinuations: Set<NativeSearchContinuation> = []
 
     /// 清除本查询/账户的结果与续页状态，已经在途的响应失去发布权。
     func invalidate() {
         generation = UUID()
         assets = []
         error = nil
-        nextCursor = nil
-        consumedCursors = []
+        continuation = nil
+        consumedContinuations = []
         isLoading = false
         hasSearched = false
     }
 
     /// query为新条件，source为当前账号读取器；取消不弹错误，失败保留重试入口。
-    func search(_ query: ImmichMetadataSearch, source: any NativeSearchReading) async {
+    func search(_ query: NativeSearchQuery, source: any NativeSearchReading) async {
         invalidate()
         self.query = query
-        await load(cursor: nil, source: source)
+        await load(continuation: nil, source: source)
     }
 
     /// 读取下一页或重试失败首屏；source不变，一次最多一个在途分页。
     func loadMore(source: any NativeSearchReading) async {
-        guard !isLoading, !hasSearched || nextCursor != nil else { return }
-        await load(cursor: nextCursor, source: source)
+        guard !isLoading, !hasSearched || continuation != nil else { return }
+        await load(continuation: continuation, source: source)
     }
 
-    /// cursor为本次页位置；成功去重追加，失败不推进游标，取消或失效不发布。
-    private func load(cursor: String?, source: any NativeSearchReading) async {
+    /// continuation为本次页位置；成功去重追加，失败不推进游标，取消或失效不发布。
+    private func load(continuation: NativeSearchContinuation?, source: any NativeSearchReading) async {
         let owner = generation
         isLoading = true
         error = nil
@@ -62,27 +61,27 @@ final class NativeSearchStore {
             }
         }
         do {
-            let page = try await source.metadataSearch(query, cursor: cursor)
+            let page = try await source.search(query, continuation: continuation)
             try Task.checkCancellation()
             guard owner == generation else { return }
-            if let next = page.nextCursor, next == cursor || consumedCursors.contains(next) {
-                error = "The server repeated a search cursor. Search again to continue."
-                nextCursor = nil
+            if let next = page.continuation, next == continuation || consumedContinuations.contains(next) {
+                error = "The server repeated a search continuation. Search again to continue."
+                self.continuation = nil
                 hasSearched = true
                 return
             }
             var ids = Set(assets.map(\.id))
             assets += page.assets.filter { ids.insert($0.id).inserted }
-            if let cursor {
-                consumedCursors.insert(cursor)
+            if let continuation {
+                consumedContinuations.insert(continuation)
             }
-            nextCursor = page.nextCursor
+            self.continuation = page.continuation
             hasSearched = true
         } catch {
             guard owner == generation, !Task.isCancelled, !(error is CancellationError),
                   (error as? TimelineReadError) != .staleGeneration else { return }
             // 不泄露原始响应与查询内容，失败页允许用户重试。
-            self.error = (error as? ImmichAPIError)?.errorDescription
+            self.error = (error as? NativeSearchError)?.errorDescription
                 ?? "Search could not be loaded. Check connection and server version."
         }
     }

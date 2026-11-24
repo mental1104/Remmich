@@ -1,3 +1,11 @@
+## 2026-11-24: Search modes and SDK boundary repair
+
+- Source: codex/feature-search-modes over people/date f080864; upstream remains 672f02e. No server/API/database/production change.
+- Add filename, description, path, OCR and smart modes. Metadata keeps opaque cursors; smart uses official legacy numeric paging with basic filters, avoiding the unpaginated smart V3 path. Typed continuations reject mismatched/repeated/backward tokens; only explicit searchSmart POST is added to the read-only boundary.
+- PR #2 run45322996283 compiled and passed API tests but failed app architecture checks: two Feature files imported ImmichAPI. Preserve the checks and repair ownership: native query/continuation/error models live in Domain, SDK mapping in Infrastructure. Feature no longer imports SDK or hides it behind typealiases.
+- Added mode/body/routing, smart paging, malformed token and mixed-token tests. Local formatting, diff and Feature import checks passed; this new revision awaits macOS CI. Older successful package checks do not validate these changes.
+- Consolidate all preceding search commits in PR #3 rather than merge the failed base PR. Fork EXIF, suggestions and saved conditions remain outstanding; no real-device acceptance or production writes. Revert the consolidated search changes to roll back.
+
 ## 2026-11-24: People and capture-date metadata filters
 
 - Source: codex/feature-search-people-dates, based on native-search 98e6dec (PR #2 still pending app tests when implementation began); upstream remains 672f02e. No server change or deployment.
