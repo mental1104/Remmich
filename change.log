@@ -1,3 +1,11 @@
+## 2026-11-24: Adapt the native Albums header to iPad windows and text size
+
+- Source: independent codex/feature-ipad-library-layout from795fd39; upstream remains672f02e, no sync. Tonight's candidate stays frozen; no Viewer/AssetManagement/Library route, server/API/schema/data/production/workflow change, push or CI trigger.
+- Fix the observed fixed44-height, unscaled native scope control within the narrow center header region. Extract the existing scope bridge and add a measured header layout/component, retaining the native control instance and parent scope/query/sort/card identities. Use the original single row when text fits, a separate scope row when needed, and a native menu when even full-row text is too wide.
+- Apply one measured header height to scroll content/indicator clearance and reflow anchoring. Add Cmd-F open/focus without losing the current query, explicit Escape close and pointer feedback. Disable command-bearing controls outside the active visible Albums root, including viewer/management/other-tab/background/scope-motion contexts, so retained views cannot consume behind-page input.
+- New tests cover real UIFont width/size matrices, non-overlap/bounds/hit areas, layout modes and invalid geometry, plus a true UIHostingController product-header fixture for native control identity, font/height changes and selection preservation. Actual NAS evidence:five scoped SwiftFormat0.64.5 lint and diff checks; Swift compilation/tests, real keys/VoiceOver/pointer/multitasking and device acceptance remain unexecuted.
+- Details/rollback:docs/ipad-album-header.md. Revert this isolated client UI slice without media/account/cache recovery; whole-app iPad adaptation remains incomplete and this is not merged into the21:00 candidate.
+
 ## 2026-11-24: Bound the viewer modifier chain's type-checking expressions
 
 - Source: codex/fix-viewer-modifier-boundaries from exact2ff5b8c. CI45383819035 ended failure19:36 with the sole source diagnostic moved to onAppear/beginOpeningAnimation; extracting cleanup alone did not solve the enclosing generic expression. Upstream remains672f02e; no feature/API/data/production/workflow change, push or CI trigger.
