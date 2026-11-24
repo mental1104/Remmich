@@ -216,8 +216,13 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
     }
 
+    /// id为当前查看照片；精确200、匹配的assetId及可完整保留的编辑文档才允许进入编辑器。
     func edits(_ id: String) async throws -> AssetEditList {
-        try await JSONDecoder().decode(AssetEditList.self, from: send("GET", ["assets", validID(id), "edits"]))
+        let id = try validID(id)
+        let data = try await send("GET", ["assets", id, "edits"], expectedStatus: 200)
+        let receipt = try JSONDecoder().decode(AssetEditReceipt.self, from: data)
+        guard receipt.assetID == UUID(uuidString: id) else { throw LibraryWriteError.malformedResponse }
+        return receipt.document
     }
 
     /// id为目标资源，三个可选字段只发送指定项；仅精确200确认完成，不自动重试不确定写入。

@@ -1,3 +1,10 @@
+## 2026-11-24: Reject lossy edit documents and mismatched photo receipts
+
+- Source: backup integration branch over46ab21f; upstream remains672f02e. Client-only fix shared with the parallel visual editor; no server/API/schema, original-media or production changes.
+- GET /assets/:id/edits now requires200 and matching response assetId. Decode official row ids as response metadata, retain ordered crop/rotate/mirror parameters, and reject unknown document/action/parameter fields instead of dropping behavior before a later PUT. Request encoding remains edits/action/parameters only.
+- Add real URLSession synthetic identity-mismatch and ordered round-trip/future-field test cases. Offline contract compiler includes the new decoding source. Scoped SwiftFormat, bash syntax and diff checks passed; Swift execution and Xcode validation remain pending unified CI.
+- Roll back this client commit independently. Future server editing extensions intentionally require an updated client before editing; existing viewing/original downloads remain available.
+
 ## 2026-11-24: Account-scoped durable backup journal and recovery semantics
 
 - Source: codex/feature-backup-reliability over4a01d68; upstream remains672f02e. No upstream sync, server/API/production migration, CI or original-media operation.
