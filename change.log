@@ -1,5 +1,7 @@
 ## 2026-11-24: Favorite and archive search conditions
 
+- Validation follow-up: ca271bb passed the complete CI45336010250, including offline contracts, app/test build, API tests, simulator app tests and artifact/source checks. This covers the saved-search panel and codec. Region7e4714e and visibilitycefddca follow-ups still require their own CI; no merge or parent gitlink update yet.
+
 - Source: codex/feature-search-visibility over7e4714e; upstream remains672f02e. No upstream sync or server/API/database change.
 - Add independent native favorites-only and archived-only switches. Metadata uses isFavorite/visibility structured fields; legacy smart uses existing flat fields. Disabled favorite switch omits the constraint; disabled archive switch keeps timeline visibility. Neither path includes hidden/locked assets implicitly.
 - Save and restore the existing isFavorite/isArchive true-only preset fields, including flag-only searches; false values in malformed saved conditions are rejected. Source mapping remains in Infrastructure, with no SDK imports in Features.
