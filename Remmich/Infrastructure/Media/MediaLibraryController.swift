@@ -331,6 +331,29 @@ final class MediaLibraryController {
         return request
     }
 
+    /// assetID/revision标识当前资产，sourceVersion固定原片校验和与版本，targetPixels只限制预览解码尺寸。
+    /// 返回明确edited=false且与普通/已编辑缓存隔离的请求；无当前验证路由或本地照片模式时返回nil。
+    /// 请求仍由既有受限pipeline执行，不复用SavedPhotos、不注册下载回执、不写原图或扩大网络权限。
+    func uneditedEditorPreviewRequest(assetID: String, revision: Date, sourceVersion: String,
+                                      targetPixels: MediaPixelSize) -> ImageRequest?
+    {
+        guard savedPhotosLibrary == nil, UUID(uuidString: assetID) != nil,
+              !sourceVersion.isEmpty, let scope, let session, let activeAPIURL else { return nil }
+        let descriptor = MediaRequestDescriptor(assetID: assetID, updatedAt: revision, derivative: .preview, targetPixels: targetPixels)
+        guard let base = Self.mediaURL(for: descriptor, apiURL: activeAPIURL),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [.init(name: "size", value: "preview"), .init(name: "edited", value: "false")]
+        guard let url = components.url else { return nil }
+        var urlRequest = URLRequest(url: url)
+        urlRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        var request = ImageRequest(urlRequest: urlRequest)
+        request.imageID = "editor-original|" + descriptor.cacheKey(in: scope) + "|" + sourceVersion
+        request.priority = .high
+        request.thumbnail = .init(size: .init(width: targetPixels.width, height: targetPixels.height),
+                                  unit: .pixels, contentMode: .aspectFit)
+        return request
+    }
+
     private func registerExportRequest(_ request: ImageRequest, descriptor: MediaRequestDescriptor) {
         let key = "\(descriptor.assetID)|\(descriptor.updatedAt.timeIntervalSince1970)|\(descriptor.derivative.rawValue)"
         guard let scope else { return }
