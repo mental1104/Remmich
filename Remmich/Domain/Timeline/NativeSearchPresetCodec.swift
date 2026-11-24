@@ -37,6 +37,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.isArchive = query.archivedOnly ? true : nil
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
+        result.lensModel = query.lensModel.isEmpty ? nil : query.lensModel
         result.personIds = query.personIDs.isEmpty ? nil : query.personIDs
         result.mediaType = switch query.media { case .all: nil; case .image: .image; case .video: .video }
         result.albumStatus = query.hasAlbums.map { $0 ? .inAlbum : .notInAlbum }
@@ -48,6 +49,7 @@ nonisolated enum NativeSearchPresetCodec {
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
+            || result.lensModel != nil
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
         return result
@@ -57,7 +59,7 @@ nonisolated enum NativeSearchPresetCodec {
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
         guard conditions.queryAssetId == nil,
-              conditions.lensModel == nil, conditions.deviceModels == nil,
+              conditions.deviceModels == nil,
               conditions.isPanorama == nil, conditions.mediaCategory == nil,
               conditions.resolution == nil, conditions.rating == .missing, conditions.tagIds == .missing
         else { throw NativeSearchPresetConversionError.unsupported }
@@ -77,7 +79,7 @@ nonisolated enum NativeSearchPresetCodec {
             case .smart: .smart
             }
         }
-        for value in [conditions.country, conditions.state, conditions.city, conditions.make, conditions.model].compactMap(\.self) {
+        for value in [conditions.country, conditions.state, conditions.city, conditions.make, conditions.model, conditions.lensModel].compactMap(\.self) {
             guard !value.isEmpty, value.utf16.count <= 256 else { throw NativeSearchPresetConversionError.invalid }
         }
         query.city = conditions.city ?? ""
@@ -85,6 +87,7 @@ nonisolated enum NativeSearchPresetCodec {
         query.state = conditions.state ?? ""
         query.cameraMake = conditions.make ?? ""
         query.cameraModel = conditions.model ?? ""
+        query.lensModel = conditions.lensModel ?? ""
         if let people = conditions.personIds {
             guard (1 ... 100).contains(people.count), people.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw NativeSearchPresetConversionError.invalid }
             query.personIDs = people

@@ -6,6 +6,7 @@ public enum ImmichSearchSuggestionKind: String, Sendable {
     case city
     case cameraMake = "camera-make"
     case cameraModel = "camera-model"
+    case cameraLensModel = "camera-lens-model"
 }
 
 /// 原生元数据搜索条件；空值表示不限制，不包含账号范围或客户端计算的分页偏移。
@@ -40,6 +41,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    public var lensModel = ""
     /// 横竖构图来自Fork扩展；未选择则不限制。
     public enum Orientation: String, Sendable { case landscape, portrait }
     public var orientation: Orientation?

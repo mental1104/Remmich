@@ -45,6 +45,7 @@ struct SearchView: View {
                         SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
                         SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
                         SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
+                        SearchChoiceField(title: "Lens model", text: $query.lensModel, values: suggestions[.cameraLensModel])
                         Toggle("Favorites only", isOn: $query.favoritesOnly)
                         Toggle("Archived only", isOn: $query.archivedOnly)
                         if let suggestionError {
@@ -147,6 +148,10 @@ struct SearchView: View {
         }
         .onChange(of: query.cameraMake) { _, _ in
             suggestions[.cameraModel] = nil
+            suggestions[.cameraLensModel] = nil
+        }
+        .onChange(of: query.cameraModel) { _, _ in
+            suggestions[.cameraLensModel] = nil
         }
         .fullScreenCover(item: $selection) { selected in
             AssetViewerView(route: selected.route, store: selected.timeline, media: media, assetDetails: assetDetails,
@@ -161,7 +166,7 @@ struct SearchView: View {
         store.invalidate()
         guard !invalidDateRange, !invalidSmartCombination,
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
-              || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty
+              || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
               || query.favoritesOnly || query.archivedOnly || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
@@ -201,7 +206,7 @@ struct SearchView: View {
         }
     }
 
-    /// 读取当前账号候选；只在账号和厂商条件均未变化时发布，不访问公共地名服务。
+    /// 读取当前账号候选；仅在账号/厂商/型号未变化时发布，不清空已选条件或访问公共地名服务。
     private func loadChoices() async {
         guard let source, !loadingSuggestions else { return }
         let owner = media.management.generation
@@ -219,10 +224,11 @@ struct SearchView: View {
             async let states = source.searchSuggestions(.state, query: requested)
             async let makes = source.searchSuggestions(.cameraMake, query: requested)
             async let models = source.searchSuggestions(.cameraModel, query: requested)
-            let values = try await (cities, makes, models, countries, states)
+            async let lenses = source.searchSuggestions(.cameraLensModel, query: requested)
+            let values = try await (cities, makes, models, countries, states, lenses)
             try Task.checkCancellation()
-            guard owner == media.management.generation, requested.cameraMake == query.cameraMake else { return }
-            suggestions = [.city: values.0, .cameraMake: values.1, .cameraModel: values.2, .country: values.3, .state: values.4]
+            guard owner == media.management.generation, requested.cameraMake == query.cameraMake, requested.cameraModel == query.cameraModel else { return }
+            suggestions = [.city: values.0, .cameraMake: values.1, .cameraModel: values.2, .country: values.3, .state: values.4, .cameraLensModel: values.5]
         } catch {
             guard owner == media.management.generation, !Task.isCancelled else { return }
             suggestionError = "Filter choices could not be loaded. You can still enter values manually."

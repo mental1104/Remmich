@@ -1,3 +1,11 @@
+## 2026-11-24: Lens model filters and complete saved-condition reuse
+
+- Source: codex/feature-search-lens from dev67ec731; upstream remains672f02e, no upstream sync. Separate from pending nullable repair PR #4; merge that verified dev baseline before running this follow-up's CI.
+- Add native lens model entry and official account-scoped camera-lens-model suggestions, constrained by selected make/model. Metadata and legacy smart keep the lens condition across their own pagination tokens. Changing make/model invalidates candidates without silently deleting selected query conditions; stale candidate responses cannot publish after account/make/model changes.
+- Capture and restore the existing preset lensModel field, including lens-only queries, without partial reuse. No new server routes, generated operations, API schema or photo writes. The owning Fork's Chinese/EXIF conversion needs the separately tested local one-field server correction; it has not been deployed.
+- Added metadata/smart two-page wire assertions, candidate make/model checks, full and lens-only preset round trips. Local SwiftFormat/diff passed; Swift/wire execution and device/UI acceptance remain pending. Parent server focused109 tests and5 HTTP/isolated-PG cases passed with synthetic records/identity and temporary dependency mappings, without ML or real photos.
+- Rollback: revert this follow-up; existing saved server conditions/media stay intact. Other extended filters and advanced smart pagination remain outstanding; this does not complete the search stage.
+
 ## 2026-11-24: Favorite and archive search conditions
 
 - Validation follow-up: ca271bb passed the complete CI45336010250, including offline contracts, app/test build, API tests, simulator app tests and artifact/source checks. This covers the saved-search panel and codec. Region7e4714e and visibilitycefddca follow-ups still require their own CI; no merge or parent gitlink update yet.

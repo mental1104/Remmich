@@ -317,6 +317,7 @@ public actor ImmichClient {
                 description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
                 hasAlbums: query.hasAlbums.map { .init(eq: $0) },
                 isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
+                lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
                 model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
                 ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
@@ -376,6 +377,7 @@ public actor ImmichClient {
             city: query.city.isEmpty ? nil : query.city,
             country: query.country.isEmpty ? nil : query.country,
             isFavorite: query.favoritesOnly ? true : nil,
+            lensModel: query.lensModel.isEmpty ? nil : query.lensModel,
             make: query.cameraMake.isEmpty ? nil : query.cameraMake,
             model: query.cameraModel.isEmpty ? nil : query.cameraModel,
             page: pageNumber,
@@ -424,13 +426,14 @@ public actor ImmichClient {
         return result
     }
 
-    /// kind为账号内候选字段，make仅约束型号；返回可读字符串，不请求null候选。
-    public func searchSuggestions(kind: ImmichSearchSuggestionKind, make: String? = nil) async throws -> [String] {
+    /// kind选择账号内候选；make约束型号/镜头，model只约束镜头，返回非null字符串。
+    public func searchSuggestions(kind: ImmichSearchSuggestionKind, make: String? = nil, model: String? = nil) async throws -> [String] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard let field = Components.Schemas.SearchSuggestionType(rawValue: kind.rawValue) else { throw ImmichAPIError.invalidResponse }
         let output = try await makeClient().getSearchSuggestions(.init(query: .init(
             includeNull: false,
-            make: kind == .cameraModel ? make : nil,
+            make: kind == .cameraModel || kind == .cameraLensModel ? make : nil,
+            model: kind == .cameraLensModel ? model : nil,
             _type: field
         )))
         switch output {

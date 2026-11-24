@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
+
 Server: mental1104/immich, local `dev` e69e65fba (official stable v3.4.2).
 Client: mental1104/Remmich, `dev`; upstream `main` 672f02e. Branch spelling is lowercase, matching the existing server.
 

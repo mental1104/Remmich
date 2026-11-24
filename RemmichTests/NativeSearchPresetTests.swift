@@ -57,6 +57,7 @@ struct NativeSearchPresetTests {
         conditions.state = "Synthetic State"
         conditions.make = "Synthetic Make"
         conditions.model = "Synthetic Model"
+        conditions.lensModel = "Synthetic Lens"
         conditions.personIds = ["11111111-1111-4111-8111-111111111111"]
         conditions.mediaType = .image
         conditions.albumStatus = .notInAlbum
@@ -77,6 +78,7 @@ struct NativeSearchPresetTests {
         #expect(captured.state == conditions.state)
         #expect(captured.make == conditions.make)
         #expect(captured.model == conditions.model)
+        #expect(captured.lensModel == conditions.lensModel)
         #expect(captured.orientation == .landscape)
         #expect(captured.exifConditions == conditions.exifConditions)
         #expect(try NativeSearchPresetCodec.restore(captured, timeZone: zone) == query)
@@ -106,6 +108,15 @@ struct NativeSearchPresetTests {
         var invalid = NativeSearchPresetConditions()
         invalid.isFavorite = false
         #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt) }
+    }
+
+    /// 仅镜头条件也能独立保存，不能因没有文本/相机型号而误判为空查询。
+    @Test func roundTripsLensOnlySearch() throws {
+        var query = NativeSearchQuery()
+        query.lensModel = "Synthetic Lens"
+        let conditions = try NativeSearchPresetCodec.capture(query)
+        #expect(conditions.lensModel == "Synthetic Lens")
+        #expect(try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone) == query)
     }
 
     /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
