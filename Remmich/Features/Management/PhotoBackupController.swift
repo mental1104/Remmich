@@ -47,7 +47,7 @@ import Photos
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
     }
 
-    /// 进入页面只冷恢复中断状态和读取配置，不自动扫描、下载iCloud或上传。
+    /// 进入页面只冷恢复并读取配置，不自动扫描/上传；同一页面重读队列时保留尚未扫描的相簿草稿与门禁。
     func load(using manager: LibraryManagementController) async {
         guard let scope = manager.backupScope else { status = "请先连接服务器。"; return }
         let owner = manager.generation
@@ -59,8 +59,12 @@ import Photos
                 return try await store.loadPhotoBackups(scope: scope)
             }
             try Self.validate(manager, owner: owner, scope: scope)
-            apply(journal)
-            status = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
+            apply(journal, restoreConfiguration: !requiresSelectionScan)
+            if requiresSelectionScan {
+                status = "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
+            } else {
+                status = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
+            }
         } catch {
             guard manager.generation == owner else { return }
             status = "无法读取备份恢复资料，未清空队列或开始上传。"

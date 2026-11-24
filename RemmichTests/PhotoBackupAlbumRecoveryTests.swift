@@ -94,6 +94,8 @@ import Testing
         let controller = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: database), exporter: exporter,
                                                albumLoader: { .init(albums: [.init(id: "keep", title: "Synthetic")], limited: false) })
         await controller.load(using: manager)
+        #expect(controller.selected == ["keep", "missing-included"] && controller.excluded == ["missing-excluded"])
+        #expect(controller.allowCloud && !controller.requiresSelectionScan)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let loaded = try await store.loadPhotoBackups(scope: scope)
@@ -102,6 +104,9 @@ import Testing
         controller.removeUnavailableAlbumSelections()
         #expect(controller.selected == ["keep"] && controller.excluded.isEmpty && controller.requiresSelectionScan)
         #expect(controller.jobs.first?.motionAssetID == motionID && controller.jobs.first?.stage == .paused)
+        // 同一页面重新读取真实SQLite队列不能隐式丢弃草稿、恢复旧排除规则或解除新扫描门禁。
+        await controller.load(using: manager)
+        #expect(controller.selected == ["keep"] && controller.excluded.isEmpty && controller.requiresSelectionScan)
         for single in [false, true] {
             let run = controller.resume(using: manager, jobID: single ? id : nil)
             #expect(run == nil)
