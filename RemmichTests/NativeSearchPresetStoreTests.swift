@@ -432,19 +432,20 @@ private final nonisolated class PresetLifecycleProtocol: URLProtocol, @unchecked
     /// 捕获真实HTTP字节并异步服务固定响应；缺少注册或非法输入直接让URLSession失败。
     override func startLoading() {
         do {
-            let request = try PresetCapturedRequest(request)
-            let script = try #require(Self.scripts.withLock { $0[request.url.host ?? ""] })
-            let task = Task { [weak self] in
+            let capturedRequest = try PresetCapturedRequest(request)
+            let script = try #require(Self.scripts.withLock { $0[capturedRequest.url.host ?? ""] })
+            // 显式发送不可变快照与actor，不让Task推断捕获URLProtocol的继承隔离上下文。
+            let task = Task { @Sendable [weak self, script, capturedRequest] in
                 do {
-                    let exchange = try await script.response(for: request)
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
-                    let response = try #require(HTTPURLResponse(url: request.url, statusCode: exchange.status,
+                    let exchange = try await script.response(for: capturedRequest)
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
+                    let response = try #require(HTTPURLResponse(url: capturedRequest.url, statusCode: exchange.status,
                                                                 httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
                     client?.urlProtocol(self, didLoad: Data(exchange.json.utf8))
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
-                    guard let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) else { return }
+                    guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
                     client?.urlProtocol(self, didFailWithError: error)
                 }
             }

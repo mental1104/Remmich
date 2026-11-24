@@ -1,3 +1,10 @@
+## 2026-11-24: Make preset HTTP fixture Task capture explicitly Sendable
+
+- Source: codex/feature-search-completion over364a54f; upstream remains672f02e. No server/API/database/production or workflow change.
+- CI45365856977 passed formatting/offline contracts and compiled the app, then failed the test bundle at NativeSearchPresetStoreTests.swift:437: Task's inferred closure transfer risks a data race under Swift6. API/app/UI execution and screenshots did not run; the other listed Swift files were in the same failed compile batch, not independent proven defects.
+- Capture the immutable Sendable request snapshot and actor explicitly in an @Sendable Task closure, with the existing synchronized URLProtocol held weakly. Keep cancellation, real request/response checks, fixture gates and all business assertions. No compiler checks are relaxed and no production behavior changes.
+- Scoped SwiftFormat and diff checks pass on NAS; repaired Swift compilation and downstream tests require the next CI run. Parent remains verifieda521360; no release/device/prod operation. Rollback this test-only repair restores the known compile failure, so assess before reverting.
+
 ## 2026-11-24: Complete search-state acceptance before integrated CI
 
 - Source: codex/feature-search-completion additionally integrates query-race08d88e4 as5ebd5dd, saved-lifecyclef15ec2d as125d14a and attachment-export1eacd72 as1ad6a84. No upstream sync, server/API/database or production media change. Optional management URLSession configuration injection defaults to the original production construction and retains authentication/cancellation/generation checks.
