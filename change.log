@@ -12,6 +12,13 @@
 - Capture the immutable Sendable request snapshot and actor explicitly in an @Sendable Task closure, with the existing synchronized URLProtocol held weakly. Keep cancellation, real request/response checks, fixture gates and all business assertions. No compiler checks are relaxed and no production behavior changes.
 - Scoped SwiftFormat and diff checks pass on NAS; repaired Swift compilation and downstream tests require the next CI run. Parent remains verifieda521360; no release/device/prod operation. Rollback this test-only repair restores the known compile failure, so assess before reverting.
 
+## 2026-11-24: Real controller takeover acceptance for interrupted backup
+
+- Source: codex/test-backup-account-takeover from f1b53f6; upstream remains672f02e, no upstream synchronization. Only add an isolated test file and a discardable Task return from PhotoBackupController.resume; existing account/busy/confirmation/upload gates and all worker/client behavior remain unchanged. No server/API/schema/workflow/production changes, push or CI execution.
+- Two scenarios exercise actual Controller→coordinator→Worker→three independent SQLite connections→LibraryMutationClient→URLSession: an already-open same-scope window resumes either only Live task L (leaving queued Q paused/unexported) or a normal nil selection. The old primary duplicate request is held after the real motion checkpoint, its manager is revoked, and the new window recovers without a masking reload.
+- Verify independent synthetic SHA1/full request bodies, repeated motion/primary duplicate checks, exact persisted stages/attempts/receipts, final Live pairing GET, counters/revisions, no Q work and temporary-file cleanup. Release and await actual old HTTP responder exit before comparing sorted complete journal snapshots. Failure-before-gate observers, cancellation cleanup and a one-minute test limit prevent orphaned waits; there are no timing sleeps or live network/PhotoKit calls.
+- Scoped SwiftFormat0.64.5 formatting/lint of two Swift files, git diff whitespace checks, one fixed JSON syntax check and two Node22.22.3 SHA1 reference checks passed. Swift/Xcode is absent: compilation, these two cases, actual PhotoKit/iCloud cancellation and device acceptance are unverified. Root schedules unified CI. Rollback this isolated test/Task-handle slice without changing stored backup data or worker recovery behavior.
+
 ## 2026-11-24: Connect durable foreground backup to export, upload and recovery controls
 
 - Source: backup reliability branch over6b35687; upstream remains672f02e. No upstream sync, server/API/database/production or workflow change. Search PR7 CI remains independent.

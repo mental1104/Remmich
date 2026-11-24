@@ -114,9 +114,11 @@ import Photos
         }
     }
 
-    /// id非nil只重试指定任务；nil恢复排队/暂停/失败项目。已完成历史不因继续按钮重新上传。
-    func resume(using manager: LibraryManagementController, jobID: UUID? = nil) {
-        guard !running, !manager.busy, let scope = manager.backupScope, let client = manager.client else { return }
+    /// manager提供当前认证通道；jobID非nil只重试指定任务，nil恢复可重试项，已完成历史不会重传。
+    /// 返回实际执行任务供调用方等待完整退役；nil表示前置门禁拒绝，页面可忽略该句柄。
+    @discardableResult
+    func resume(using manager: LibraryManagementController, jobID: UUID? = nil) -> Task<Void, Never>? {
+        guard !running, !manager.busy, let scope = manager.backupScope, let client = manager.client else { return nil }
         let owner = manager.generation
         running = true
         completed = 0; duplicates = 0; failed = 0
@@ -160,6 +162,7 @@ import Photos
                 }
             }
         }
+        return task
     }
 
     /// id为当前列表中的逻辑任务；只取消本地任务，不删除已发送或已确认的服务器资源。
