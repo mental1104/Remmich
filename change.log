@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## 2026-11-24: Guard deferred local requests and video fallback
 
 - Source: local-media-matching966e3c6; upstream remains672f02e. Recheck the confirmed association when a deferred image request executes and bypass wrapper memory reads so an old request cannot skip current permission/account validation. Preserve the existing remote pipeline cache after a valid local miss.
@@ -10,6 +11,15 @@
 - Display thumbnail/preview/fullsize requests try confirmed same-version Photos current first; actual local success avoids the existing remote pipeline. Local miss or revoked local access falls back only while the original account/context remains valid. Cancellation/account changes throw and do not start old-account remote fallback. Explicit original/export paths remain separate. Ordinary video uses a matched local AVPlayerItem before saved/export/remote paths.
 - Add scoped auto-restore/refresh hooks, account settings entry, strict fresh asset-info getter and a viewer source label distinguishing device Photos from Immich resources/cache. Source labels do not claim network byte counts. No upload, original overwrite, backup-completion or cleanup proof is inferred from display association.
 - Six scoped SwiftFormat/diff checks pass on NAS; app compilation, end-to-end routing tests, matching dependencies and device acceptance are unverified. Root continues integration before pushing one candidate CI. Rollback removes display routing without deleting media or server state.
+=======
+## 2026-11-24: Automatically scan and restore safe local display associations
+
+- Source: independent codex/feature-local-media-scan fromb79bfa2, with reader9251200 and checksum288ed84 dependencies; upstream remains672f02e, no synchronization. Add only new domain/Controller/settings/inventory/observer/atomic-store/test files and docs; root owns actual media/settings/foreground bridges. No shared MediaLibraryController, official mobile, server/API/SQLite/backup/workflow/production/push/CI change.
+- Add explicit initial Photos authorization, authorized inventory with UI yields, <=64 metadata batches, one full read-only stream and strict current-byte fallback batches. Candidates fresh-check exact remote ID/owner/type, explicit non-trash/non-offline/non-edited state, canonical SHA1 and precise revision; hash matches additionally need exact locally computed digest. No match or trash never triggers upload.
+- Persist enabled config/confirmed maps in namespace-isolated atomic versioned JSON. Future/corrupt data rejects overwrite; context changes revoke final write permits. Offline cold restore retains same-version mappings; online enabled refresh is deduplicated per management generation and never asks new permission. Photos notifications invalidate old sources and coalesce foreground refresh. Observable revision enables actual media request invalidation.
+- Add13 functions/31 cases for actual Controller/JSON with synthetic boundaries: unsafe candidates, hash proof,64-item batches, held-response cancellation/switch, offline/cold/automatic recovery, permissions, strict version wire, revoked writes and format/namespace isolation. Seven-file scoped SwiftFormat0.64.5 and diff checks pass; no Swift on NAS, so compilation/runtime/Photos/iPhone/UI acceptance remain unverified. Root integration/CI/device checks still determine end-to-end readiness.
+- Revert this isolated module with its host bridge, retaining recovery files without downgrade. No original mutation/upload/delete/backup proof/space-cleanup claim. See docs/local-media-scanning.md; iPad work stays paused.
+>>>>>>> 6375053 (feat: automatically match and restore local media associations)
 
 ## 2026-11-24: Add local-current SHA1 fallback and read-only checksum lookup
 
