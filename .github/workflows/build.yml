@@ -112,6 +112,11 @@ jobs:
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
         run: bash Scripts/test-search-ui.sh tablet "$RUNNER_TEMP/RemmichSearchUI-tablet" "$DERIVED_DATA_PATH"
 
+      # 测试失败也导出已有截图；未运行设备不生成占位附件，导出失败仍使job失败。
+      - name: Export search UI screenshots and attachment manifests
+        if: ${{ always() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: bash Scripts/export-search-ui-attachments.sh "$RUNNER_TEMP"
+
       - name: Upload PR test results
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -122,9 +127,13 @@ jobs:
             ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult
             ${{ runner.temp }}/RemmichSearchUI-phone/device.json
             ${{ runner.temp }}/RemmichSearchUI-phone/xcodebuild.log
+            ${{ runner.temp }}/RemmichSearchUI-phone/attachments
+            ${{ runner.temp }}/RemmichSearchUI-phone/attachment-export.log
             ${{ runner.temp }}/RemmichSearchUI-tablet/SearchUI.xcresult
             ${{ runner.temp }}/RemmichSearchUI-tablet/device.json
             ${{ runner.temp }}/RemmichSearchUI-tablet/xcodebuild.log
+            ${{ runner.temp }}/RemmichSearchUI-tablet/attachments
+            ${{ runner.temp }}/RemmichSearchUI-tablet/attachment-export.log
           if-no-files-found: ignore
           retention-days: 3
 
