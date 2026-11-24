@@ -6,6 +6,7 @@ nonisolated enum NativeSearchSuggestionKind: String, Sendable {
     case city
     case cameraMake = "camera-make"
     case cameraModel = "camera-model"
+    case cameraLensModel = "camera-lens-model"
 }
 
 /// 界面自己的搜索状态；只有Infrastructure负责转换为网络SDK请求。
@@ -41,6 +42,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
+    var lensModel = ""
     enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
     var orientation: Orientation?
     var hasAlbums: Bool?

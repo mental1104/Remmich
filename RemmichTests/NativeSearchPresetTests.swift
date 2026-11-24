@@ -57,6 +57,7 @@ struct NativeSearchPresetTests {
         conditions.state = "Synthetic State"
         conditions.make = "Synthetic Make"
         conditions.model = "Synthetic Model"
+        conditions.lensModel = "Synthetic Lens"
         conditions.personIds = ["11111111-1111-4111-8111-111111111111"]
         conditions.mediaType = .image
         conditions.albumStatus = .notInAlbum
@@ -77,6 +78,7 @@ struct NativeSearchPresetTests {
         #expect(captured.state == conditions.state)
         #expect(captured.make == conditions.make)
         #expect(captured.model == conditions.model)
+        #expect(captured.lensModel == conditions.lensModel)
         #expect(captured.orientation == .landscape)
         #expect(captured.exifConditions == conditions.exifConditions)
         #expect(try NativeSearchPresetCodec.restore(captured, timeZone: zone) == query)
@@ -106,6 +108,17 @@ struct NativeSearchPresetTests {
         var invalid = NativeSearchPresetConditions()
         invalid.isFavorite = false
         #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt) }
+    }
+
+    /// rating覆盖镜头独立及组合查询；无文本/型号也可保存，评分缺省/null/0/5不丢失。
+    @Test(arguments: [NativeSearchRating.any, .unrated, .stars(0), .stars(5)])
+    func roundTripsLensSearchWithRatings(_ rating: NativeSearchRating) throws {
+        var query = NativeSearchQuery()
+        query.lensModel = "Synthetic Lens"
+        query.rating = rating
+        let conditions = try NativeSearchPresetCodec.capture(query)
+        #expect(conditions.lensModel == "Synthetic Lens")
+        #expect(try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone) == query)
     }
 
     /// 评分缺省/null/0/具体值在保存和复用后不互相混淆，越界评分明确拒绝。

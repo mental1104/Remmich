@@ -1,3 +1,17 @@
+## 2026-11-24: Integrate verified rating baseline into lens search
+
+- Source: codex/feature-search-lens merges dev5cd3acf (PR #4); upstream remains672f02e, no upstream sync or server/API/database/production change. PR #4 head eabc102 passed full CI45346238915, including59 API tests and simulator app tests. Merge and tested head have identical tree9f666980; dev post-merge Build45348642591 is running.
+- Resolve overlapping preset codec/test/log edits by retaining both lens and nullable rating behavior and both regression suites. Extend lens-only round trips to cover Any/Unrated/0/5 combinations, preserving complete saved conditions without partial reuse. No generated sources edited.
+- Local SwiftFormat and diff checks passed; integrated lens Swift execution remains pending its own CI. PR #5 stays draft while dev Build/Tests run, so no concurrent build starts. Parent gitlink remains verified67ec731; real-device/UI acceptance remains unverified.
+- Rollback: revert the lens feature on dev after any future merge; this integration merge preserves published history. No media recovery required. Remaining extended filters, advanced smart pagination and UI acceptance keep the search stage incomplete.
+
+## 2026-11-24: Lens model filters and complete saved-condition reuse
+
+- Source: codex/feature-search-lens from dev67ec731; upstream remains672f02e, no upstream sync. Separate from pending nullable repair PR #4; merge that verified dev baseline before running this follow-up's CI.
+- Add native lens model entry and official account-scoped camera-lens-model suggestions, constrained by selected make/model. Metadata and legacy smart keep the lens condition across their own pagination tokens. Changing make/model invalidates candidates without silently deleting selected query conditions; stale candidate responses cannot publish after account/make/model changes.
+- Capture and restore the existing preset lensModel field, including lens-only queries, without partial reuse. No new server routes, generated operations, API schema or photo writes. The owning Fork's Chinese/EXIF conversion needs the separately tested local one-field server correction; it has not been deployed.
+- Added metadata/smart two-page wire assertions, candidate make/model checks, full and lens-only preset round trips. Local SwiftFormat/diff passed; Swift/wire execution and device/UI acceptance remain pending. Parent server focused109 tests and5 HTTP/isolated-PG cases passed with synthetic records/identity and temporary dependency mappings, without ML or real photos.
+- Rollback: revert this follow-up; existing saved server conditions/media stay intact. Other extended filters and advanced smart pagination remain outstanding; this does not complete the search stage.
 ## 2026-11-24: Match generated date contract fixture to application configuration
 
 - Source: codex/feature-search-rating over8825298; upstream remains672f02e. No upstream sync or application/server/API/database/production behavior change.

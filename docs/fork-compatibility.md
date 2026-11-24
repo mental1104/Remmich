@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
+
 Server: mental1104/immich, local `dev` e69e65fba (official stable v3.4.2).
 Client: mental1104/Remmich, `dev`; upstream `main` 672f02e. Branch spelling is lowercase, matching the existing server.
 
@@ -36,6 +38,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 - Parent integration uses an isolated registered NAS worktree; preserve the dirty original media-AI workspace and all other worktrees. NAS filesystem execute bits may differ; use `git -c core.filemode=false` for this isolated integration's explicit staging rather than committing thousands of permission-only changes.
 
 ## Verification
+
+- PR #4 passed full CI45346238915 at eabc102 (59 API tests, simulator app tests, artifact/source checks) and merged to dev5cd3acf with the same tree. Post-merge Build45348642591 is still running. Lens PR #5 now integrates that baseline while preserving both filters/tests, adds Any/Unrated/0/5 plus lens preset round trips, and stays draft pending its own CI after dev verification. Parent gitlink remains67ec731; no device acceptance or production deployment.
 
 - PR #4 head8825298 failed CI45343739181 after successful app/test compilation and offline checks: one of59 API tests used the default SDK date transcoder but expected the application's millisecond encoding (five timestamp assertions). Simulator app tests were skipped. The fixture now explicitly uses the production ImmichDateTranscoder with all assertions retained; new CI is required before merging or updating the parent gitlink. No application or server behavior changed in this repair.
 

@@ -455,6 +455,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.rating = switch query.rating { case .any: .any; case .unrated: .unrated; case let .stars(value): .stars(value) }
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
+        dto.lensModel = query.lensModel
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
         dto.hasAlbums = query.hasAlbums
         dto.exifConditions = try query.exifConditions.map { condition in
@@ -501,11 +502,12 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
     }
 
-    /// kind指定候选字段，query提供厂商约束；拒绝账号/路由变化后的迟到响应。
+    /// kind指定候选字段，query提供厂商/型号约束；拒绝账号/路由变化后的迟到响应。
     func searchSuggestions(_ kind: NativeSearchSuggestionKind, query: NativeSearchQuery) async throws -> [String] {
         let (client, owner) = try requestContext()
         guard let field = ImmichSearchSuggestionKind(rawValue: kind.rawValue) else { throw NativeSearchError.invalidQuery }
-        let values = try await client.searchSuggestions(kind: field, make: query.cameraMake.isEmpty ? nil : query.cameraMake)
+        let values = try await client.searchSuggestions(kind: field, make: query.cameraMake.isEmpty ? nil : query.cameraMake,
+                                                        model: query.cameraModel.isEmpty ? nil : query.cameraModel)
         try Task.checkCancellation()
         try requireCurrent(owner)
         return Array(Set(values.filter { !$0.isEmpty })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
