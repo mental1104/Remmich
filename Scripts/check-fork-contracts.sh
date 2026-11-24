@@ -9,6 +9,7 @@ swiftc -swift-version 6 \
   Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
+  Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
   Remmich/Domain/Timeline/NativeSearchModels.swift \
   Remmich/Domain/Timeline/NativeSearchPreset.swift \
   Scripts/check-fork-contracts.swift \
