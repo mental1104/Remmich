@@ -1,5 +1,7 @@
 ## 2026-11-24: Account-scoped search filter choices
 
+- Prior run45330859471 reached test compilation and found two test sources still accepting String? rather than the new typed continuation. Corrected ErrorSource/DelayedSource signatures without weakening assertions; next CI must compile and execute these tests.
+
 - Source: codex/feature-search-suggestions over7182bda; upstream remains672f02e. No server/API/database or production change.
 - Add authenticated official GET search suggestions for city, camera make/model; model choices honor the selected make. Keep free text usable on permission/network failure; candidates never use public Photon or coordinates. SDK types stay in Infrastructure and account/route generations reject late responses.
 - Candidate selection updates the same native query; changing make invalidates model choices without silently discarding selected conditions, preserving future atomic preset restoration. Concurrent choice requests remain outside writes and use the existing GET pipeline.

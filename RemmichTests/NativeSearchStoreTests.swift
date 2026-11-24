@@ -65,7 +65,7 @@ private struct ErrorSource: NativeSearchReading {
     let error: NativeSearchError
 
     /// query与continuation不触发网络；原样抛出指定的可安全展示错误。
-    func search(_: NativeSearchQuery, continuation _: String?) async throws -> NativeSearchPage {
+    func search(_: NativeSearchQuery, continuation _: NativeSearchContinuation?) async throws -> NativeSearchPage {
         throw error
     }
 }
@@ -101,7 +101,7 @@ private actor DelayedSource: NativeSearchReading {
     private var waiter: CheckedContinuation<Void, Never>?
 
     /// query/continuation仅满足读取契约；保存响应continuation直到测试显式完成。
-    func search(_: NativeSearchQuery, continuation _: String?) async throws -> NativeSearchPage {
+    func search(_: NativeSearchQuery, continuation _: NativeSearchContinuation?) async throws -> NativeSearchPage {
         await withCheckedContinuation { continuation in
             response = continuation
             waiter?.resume()
