@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- CI simulator repair: Build and Tests independently select an installed iPhone with iOS 27+ using Scripts/select-ci-simulator.sh. The previous fixed iPhone 17 Pro was absent on the runner; this is unrelated to the user's physical iPhone 15 Pro. NAS syntax/synthetic checks passed; GitHub Xcode validation is pending.
+
 - Initial downstream app build for physical iOS succeeded (unsigned compile).
 - Offline write/category contract checks passed, including the multipart upload path, against fixtures only.
 - Full formatting lint and git diff --check passed before final integration.
