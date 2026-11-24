@@ -1,5 +1,7 @@
 ## 2026-11-24: Saved-search data and API contracts
 
+- Prior CI45333108930 found added SearchFilter fields appear after original properties in the generated initializer. Reordered metadata arguments to match actual prepared-schema order; every filter remains. Next CI includes this repair and saved-condition contracts.
+
 - Source: codex/feature-search-presets over8ab2e53; upstream remains672f02e. Adds client contracts for existing fork/search-presets only; no server/API/database/production change.
 - Model every existing preset field, including fields not yet supported by controls. Preserve missing/null/value distinctions for rating/tags and reject unknown condition keys rather than overwrite a lossy decode. Numeric conditions encode server operator names.
 - Add authenticated GET/POST/PATCH/DELETE methods to the explicit mutation client with exact200/201/204 response validation and UUID/name checks. Only GET404/405/501 marks unsupported;401/403/network/schema errors do not. Never automatically retry a preset POST, never change photo data.
