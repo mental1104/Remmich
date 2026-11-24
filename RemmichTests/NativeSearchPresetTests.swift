@@ -164,7 +164,7 @@ struct NativeSearchPresetTests {
     @Test func rejectsPartialRestoration() throws {
         var conditions = NativeSearchPresetConditions()
         conditions.city = "Synthetic City"
-        conditions.tagIds = .null
+        conditions.queryAssetId = "11111111-1111-4111-8111-111111111111"
         #expect(throws: NativeSearchPresetConversionError.self) {
             try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
         }

@@ -11,6 +11,9 @@ struct SearchView: View {
     @State private var selection: Selection?
     @State private var people: [LibraryPerson] = []
     @State private var peopleError: String?
+    @State private var tagChoices: [NativeSearchTag] = []
+    @State private var tagChoicesError: String?
+    @State private var loadingTags = false
     @State private var suggestions: [NativeSearchSuggestionKind: [String]] = [:]
     @State private var suggestionError: String?
     @State private var loadingSuggestions = false
@@ -74,6 +77,38 @@ struct SearchView: View {
                                 Text("Not in an album").tag(Optional(false))
                             }
                             SearchExifEditor(conditions: $query.exifConditions)
+                        }
+                        DisclosureGroup("Tags") {
+                            Toggle("Without tags", isOn: Binding(get: { query.tags == .untagged }, set: { enabled in
+                                if enabled {
+                                    query.tags = .untagged
+                                } else if query.tags == .untagged {
+                                    query.tags = .any
+                                }
+                            }))
+                            Text("Multiple selections match any selected tag or its children.").font(.caption)
+                            if !query.tags.selectedIDs.isEmpty {
+                                Text("Selected tags: \(query.tags.selectedIDs.count)").font(.caption)
+                            }
+                            Button("Clear tag filter") { query.tags = .any }
+                                .disabled(query.tags == .any)
+                            if let tagChoicesError {
+                                Text(tagChoicesError).font(.caption)
+                            }
+                            if !tagChoices.isEmpty {
+                                ScrollView {
+                                    LazyVStack(alignment: .leading) {
+                                        ForEach(tagChoices) { tag in
+                                            Toggle(tag.value, isOn: Binding(get: { query.tags.contains(tag.id) }, set: { selected in
+                                                query.tags.setSelected(tag.id, selected: selected)
+                                            }))
+                                            .disabled(!query.tags.contains(tag.id) && query.tags.selectedIDs.count >= 100)
+                                        }
+                                    }
+                                }.frame(maxHeight: 240)
+                            }
+                            Button(loadingTags ? "Loading tags" : "Load tags") { Task { await loadTags() } }
+                                .disabled(loadingTags)
                         }
                         DisclosureGroup("People") {
                             if let peopleError {
@@ -146,6 +181,9 @@ struct SearchView: View {
             query = .init()
             people = []
             peopleError = nil
+            tagChoices = []
+            tagChoicesError = nil
+            loadingTags = false
             suggestions = [:]
             suggestionError = nil
             loadingSuggestions = false
@@ -172,7 +210,7 @@ struct SearchView: View {
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
-              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
+              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.tags != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
             guard let source else { return }
@@ -186,6 +224,28 @@ struct SearchView: View {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = query.timeZone
         return calendar.startOfDay(for: start) > calendar.startOfDay(for: end)
+    }
+
+    /// 加载当前账号官方标签，不清除所选条件；候选失败或跨账号迟到均不能变成另一账号的列表。
+    private func loadTags() async {
+        guard let source, !loadingTags else { return }
+        let owner = media.management.generation
+        loadingTags = true
+        tagChoicesError = nil
+        defer {
+            if owner == media.management.generation {
+                loadingTags = false
+            }
+        }
+        do {
+            let values = try await source.searchTags()
+            try Task.checkCancellation()
+            guard owner == media.management.generation else { return }
+            tagChoices = values
+        } catch {
+            guard owner == media.management.generation, !Task.isCancelled else { return }
+            tagChoicesError = "Tags could not be loaded. Check permissions and connection. Your filter has been kept."
+        }
     }
 
     /// 按当前账号加载人物；跨账号/端点的迟到候选不可发布，不把权限失败当作空列表。

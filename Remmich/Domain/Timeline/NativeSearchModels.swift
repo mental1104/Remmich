@@ -43,6 +43,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var cameraMake = ""
     var cameraModel = ""
     var lensModel = ""
+    var tags: NativeSearchTagFilter = .any
     enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
     var orientation: Orientation?
     var hasAlbums: Bool?
@@ -55,8 +56,42 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
     var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch || tags != .any)
     }
+}
+
+/// 标签筛选三态；所选多个ID采用任一匹配（含后代），与Web保存条件的结构化语义一致。
+nonisolated enum NativeSearchTagFilter: Hashable, Sendable {
+    case any, untagged, anyOf([String])
+
+    /// 返回当前选中ID，其他两态返回空数组；仅供界面选择，不将空数组编码为查询。
+    var selectedIDs: [String] {
+        if case let .anyOf(ids) = self {
+            return ids
+        }
+        return []
+    }
+
+    /// id是候选UUID；按UUID大小写不敏感比较，以正确呈现既有保存条件。
+    func contains(_ id: String) -> Bool {
+        selectedIDs.contains { $0.caseInsensitiveCompare(id) == .orderedSame }
+    }
+
+    /// id是当前账号候选、selected决定加入/移除；选最后一项取消后恢复不限制，不保留空ID数组。
+    mutating func setSelected(_ id: String, selected: Bool) {
+        guard contains(id) != selected else { return }
+        var ids = selectedIDs.filter { $0.caseInsensitiveCompare(id) != .orderedSame }
+        if selected {
+            ids.append(id)
+        }
+        self = ids.isEmpty ? .any : .anyOf(ids)
+    }
+}
+
+/// Domain标签候选只包含搜索所需字段，Feature不接触SDK类型。
+nonisolated struct NativeSearchTag: Identifiable, Hashable, Sendable {
+    let id: String
+    let value: String
 }
 
 /// 界面评分筛选的三种语义；具体0分不能在保存/复用时变为未指定。

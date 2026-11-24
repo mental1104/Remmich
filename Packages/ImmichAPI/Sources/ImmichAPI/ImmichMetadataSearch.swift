@@ -43,6 +43,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var cameraMake = ""
     public var cameraModel = ""
     public var lensModel = ""
+    public var tags: ImmichSearchTagFilter = .any
     /// 横竖构图来自Fork扩展；未选择则不限制。
     public enum Orientation: String, Sendable { case landscape, portrait }
     public var orientation: Orientation?
@@ -60,7 +61,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
     public var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0) || tags != .any)
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。
@@ -76,6 +77,17 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
     }
+}
+
+/// 标签条件区分不限制、无标签和任一所选标签（含后代）；ID数组须非空且最多100项。
+public enum ImmichSearchTagFilter: Hashable, Sendable {
+    case any, untagged, anyOf([String])
+}
+
+/// 官方账号标签候选，仅保留搜索选择需要的身份和完整层级名称，不提供写入能力。
+public struct ImmichSearchTag: Hashable, Sendable {
+    public let id: String
+    public let value: String
 }
 
 /// 不限制、未评分和具体评分不能共用一个Optional；0保留为合法的结构化查询值。

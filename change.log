@@ -1,3 +1,11 @@
+## 2026-11-24: Native tag search and complete saved-condition reuse
+
+- Source: codex/feature-search-tags from advanced-smart9969913; upstream remains672f02e, no upstream sync. No server/API/database/schema snapshot change, deployment, tag management or photo write. The existing local Fork-smart implementation is not deployed.
+- Add official authenticated GET /tags candidates through the existing operation filter, with full hierarchical names and native Domain mapping. Candidate failures remain errors, cancellation is checked, and account/endpoint generation changes prevent stale publication. Enable no tag mutation operation and edit no generated Swift; record the unchanged schema provenance.
+- Preserve tag presets as missing = unrestricted, null = no tags, value = any selected tag or descendants. Metadata and Fork-smart share hasTags.eq:false/tagIds.any mapping; smart with active tags requires the complete structured Fork route so it cannot silently adopt the legacy all-tags meaning. Missing extensions retain conditions and report unsupported. Reject invalid/empty/duplicate/over100 ID sets before network or partial preset reuse.
+- Add tag controls, explicit clear, candidate load and selected count without clearing saved IDs when candidates fail. Synthetic tests cover official candidate GET/errors, all three states across two metadata/smart pages, invalid-before-send, full preset round trips and selection transitions. NAS SwiftFormat and diff checks passed; no Swift compiler is available here, so package/simulator tests and iPhone15 Pro/iPad Pro2022 acceptance remain unverified pending parent-managed CI. No CI/workflow action was triggered by this subtask.
+- Rollback: revert this isolated client feature; server presets/media remain intact. Other extended filters and UI/device acceptance remain outside this subtask, so the search stage is not declared complete.
+
 ## 2026-11-24: Native advanced smart search through the Fork cursor contract
 
 - Source: codex/feature-search-advanced-smart from dev293c3e8; upstream remains672f02e, no upstream sync. No server/API/schema/database change in this client commit and no production deployment. Owning server implementation aa9aa667f is local and not deployed.
