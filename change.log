@@ -1,3 +1,11 @@
+## 2026-11-24: Connect durable foreground backup to export, upload and recovery controls
+
+- Source: backup reliability branch over6b35687; upstream remains672f02e. No upstream sync, server/API/database/production or workflow change. Search PR7 CI remains independent.
+- Replace the in-memory upload loop with explicit scan/persist then confirmed queue resume. Restore interrupted states without automatic uploading; add single-item retry/cancel, saved cloud consent and retained per-account receipts. Single retry pauses unrelated queued tasks. Full snapshots are limited to explicit operations and cycle boundaries; upload transitions use indexed per-job checkpoints.
+- Add cancellable PhotoKit chunk-to-disk export using requestData/cancelDataRequest, source revalidation and explicit unsupported RAW+JPEG handling. Serial worker persists before every resource/network side effect, verifies actual primary identity/owner/type/non-trash and Live Photo association, and stops on network/permission/unknown outcomes without automatic write replay.
+- Add account-generation checks plus namespace retirement serialization across windows/quick same-account return. A new worker waits for previous cancellation/pause cleanup; the management channel is reserved for a run. Temporary exports are removed; no phone or server originals are deleted/overwritten.
+- Added real-SQLite/synthetic-disk worker scenarios for checkpoint order, photos/videos/Live Photo, mismatch/network stop, cancellation/revoked-context late receipts and one-item retry. NAS scoped SwiftFormat and diff checks passed; Swift compilation/test execution, actual PhotoKit/iCloud/HTTP media and device acceptance remain unverified. This work is not yet pushed/CI-tested/merged. See docs/photo-backup-reliability.md for limits and rollback; automatic/background backup and album sync/exclusion remain open.
+
 ## 2026-11-24: Reject lossy edit documents and mismatched photo receipts
 
 - Source: backup integration branch over46ab21f; upstream remains672f02e. Client-only fix shared with the parallel visual editor; no server/API/schema, original-media or production changes.

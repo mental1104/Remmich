@@ -239,6 +239,25 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         try change(&jobs[index])
     }
 
+    /// id为nil时明确恢复可重试项；指定id时只运行这一项，其他queued暂停，避免单项重试隐式启动整队。
+    /// 单次线性转换供显式恢复使用，不进入逐项上传热循环；完成/取消历史保持不动。
+    mutating func resumeForVerification(only id: UUID? = nil) throws {
+        if let id {
+            guard jobs.contains(where: { $0.id == id && [.queued, .paused, .failed].contains($0.stage) }) else {
+                throw PhotoBackupStateError.invalidTransition
+            }
+        }
+        for index in jobs.indices {
+            if id == nil || jobs[index].id == id {
+                if [.queued, .paused, .failed].contains(jobs[index].stage) {
+                    jobs[index].queueForVerification()
+                }
+            } else if jobs[index].stage == .queued {
+                jobs[index].pause()
+            }
+        }
+    }
+
     /// 进程中断后恢复为可明确继续的暂停状态；已完成/失败/取消保持原样。
     mutating func recoverInterrupted() {
         for index in jobs.indices {

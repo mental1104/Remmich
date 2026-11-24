@@ -12,6 +12,12 @@ final class LibraryManagementController {
     private var account: AccountSession?
     private let configurationFactory: (() -> URLSessionConfiguration)?
 
+    /// 只暴露当前认证身份的持久namespace，不向备份UI传递token；端点临时不可用时不启动任务。
+    var backupScope: MediaAccountScope? {
+        guard client != nil, let account else { return nil }
+        return MediaAccountScope(session: account)
+    }
+
     /// configurationFactory可为每个客户端提供隔离会话配置；nil保持现有生产构造与取消行为。
     /// 注入配置仅改变传输来源，不替换LibraryMutationClient的鉴权、序列化、状态码或代际检查。
     init(configurationFactory: (() -> URLSessionConfiguration)? = nil) {
