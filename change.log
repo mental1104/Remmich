@@ -1,3 +1,9 @@
+## 2026-11-24: Seed current edited cache fixtures for existing lifecycle regressions
+
+- Source: runtime-fixesbd986e5 over candidate424a22a; upstream remains672f02e. Source review traces the remaining8 App issues to obsolete positive fixtures: four groups seed legacy one.jpg/asset.jpg files, and ready-cache jobs omit the required size/edited query. New production guards correctly refuse these old inputs, causing intended metadata/place/account tests to enter unintended network/failure paths.
+- Seed actual displayThumbnailFilename paths and matching relativeFileKey in account/place/statistics positive fixtures, keeping sourceRevision's original ISO contract. Ready-cache jobs now use the exact displayThumbnailURL; blocked/stale/partial/failed states and all assertions remain intact. No product guard is relaxed; existing legacy, old queued request and subsecond negative tests remain.
+- Scoped formatting/diff checks pass; repaired Swift runtime remains unexecuted. A separately discovered same-second manifest/undelivered-body risk is not fixed or explained away by these fixture changes and requires a production patch. No server/API/schema/workflow/production data changes; rollback only these fixture updates.
+
 ## 2026-11-24: Align runtime assertions with shipped reference search and edited media contracts
 
 - Source: codex/fix-candidate-runtime-contracts from424a22a; upstream remains672f02e. Actual App log artifact14922273023 from CI45394307543 reports830 tests/106 suites and11 issues. Three issues are stale contracts: supported reference-image restoration expected rejection, and two media URLs expected the pre-edited query string. Cache-related issues remain under separate source review; the run is still executing UI checks and no replacement is triggered.
