@@ -46,4 +46,69 @@ struct NativeSearchPresetTests {
         #expect(conditions.rating == .value(0))
         #expect(conditions.tagIds == .value(["11111111-1111-4111-8111-111111111111"]))
     }
+
+    /// 保存后在相同时区恢复所有已支持条件，跨夏令时仍保持用户选定的日历日。
+    @Test func restoresFullQueryAcrossDaylightSavingBoundary() throws {
+        let zone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+        var conditions = NativeSearchPresetConditions()
+        conditions.query = .init(value: "Synthetic", type: .ocr)
+        conditions.city = "Synthetic City"
+        conditions.make = "Synthetic Make"
+        conditions.model = "Synthetic Model"
+        conditions.personIds = ["11111111-1111-4111-8111-111111111111"]
+        conditions.mediaType = .image
+        conditions.albumStatus = .notInAlbum
+        conditions.orientation = .landscape
+        conditions.takenAfter = "2026-03-08"
+        conditions.takenBefore = "2026-11-01"
+        conditions.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400)]
+        let query = try NativeSearchPresetCodec.restore(conditions, timeZone: zone)
+        #expect(query.mode == .ocr)
+        #expect(query.media == .image)
+        #expect(query.hasAlbums == false)
+        #expect(query.personIDs == conditions.personIds)
+        let captured = try NativeSearchPresetCodec.capture(query)
+        #expect(captured.takenAfter == "2026-03-08")
+        #expect(captured.takenBefore == "2026-11-01")
+        #expect(captured.city == conditions.city)
+        #expect(captured.make == conditions.make)
+        #expect(captured.model == conditions.model)
+        #expect(captured.orientation == .landscape)
+        #expect(captured.exifConditions == conditions.exifConditions)
+        #expect(try NativeSearchPresetCodec.restore(captured, timeZone: zone) == query)
+    }
+
+    /// 文件名登记使用服务端metadata类型，空查询不创建无意义登记。
+    @Test func capturesFilenameAndRejectsEmptyQuery() throws {
+        var query = NativeSearchQuery()
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.capture(query) }
+        query.text = "  Synthetic.JPG  "
+        let conditions = try NativeSearchPresetCodec.capture(query)
+        #expect(conditions.query?.type == .metadata)
+        #expect(conditions.query?.value == "Synthetic.JPG")
+    }
+
+    /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
+    @Test func rejectsPartialRestoration() throws {
+        var conditions = NativeSearchPresetConditions()
+        conditions.city = "Synthetic City"
+        conditions.rating = .null
+        #expect(throws: NativeSearchPresetConversionError.self) {
+            try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
+        }
+    }
+
+    /// 非法日期、倒序日期及重复数值运算符均不能成为可执行搜索。
+    @Test func rejectsInvalidConditions() throws {
+        var conditions = NativeSearchPresetConditions()
+        conditions.takenAfter = "2026-02-30"
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt) }
+        conditions.takenAfter = "2026-11-02"
+        conditions.takenBefore = "2026-11-01"
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt) }
+        conditions.takenAfter = nil
+        conditions.takenBefore = nil
+        conditions.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400), .init(field: .iso, comparison: .atLeast, value: 800)]
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt) }
+    }
 }

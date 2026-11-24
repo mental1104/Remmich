@@ -1,3 +1,12 @@
+## 2026-11-24: Native saved-search management and atomic reuse
+
+- Source: codex/feature-search-presets over d6e5963; upstream remains672f02e. No upstream sync, server/API/database changes or production access.
+- Wire a SwiftUI saved-search panel into SearchView: explicit account-scoped loading, create/rename/apply, confirmed complete replacement and delete. Failed saves keep the name draft; account/endpoint changes clear drafts, capability and list state. All operations use the existing management session without refreshing the photo index.
+- Add full-query capture/restoration with Gregorian day semantics, numeric/UUID/date validation and all-or-nothing application. Unsupported saved fields are preserved but cannot be applied yet. Rename re-reads all conditions; replacement re-reads the name. The existing server API has no CAS, so concurrent cross-client edits remain last-writer-wins.
+- Never automatically replay writes. Failed or cancelled operations invalidate freshness and require an explicit reload before further writes. Replacement confirmation captures the intended query before waiting. No photo deletion or original overwrite.
+- Added synthetic codec tests for DST days/full restoration, filename mapping, empty queries, invalid dates and duplicate EXIF slots. Local SwiftFormat and diff checks passed. CI45333843152 at prior d6e5963 has passed formatting, offline CRUD contracts and app compilation; API/app tests are still running and do not validate this follow-up. New UI/codec runtime validation awaits the next CI. No real-device acceptance; remaining search filters and smart/advanced combination are not complete.
+- Rollback: revert this follow-up; saved conditions remain on the server and photo data is unchanged. Parent gitlink stays on previously verified0af1897 until child validation succeeds.
+
 ## 2026-11-24: Saved-search data and API contracts
 
 - Prior CI45333108930 found added SearchFilter fields appear after original properties in the generated initializer. Reordered metadata arguments to match actual prepared-schema order; every filter remains. Next CI includes this repair and saved-condition contracts.

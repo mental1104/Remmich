@@ -32,6 +32,7 @@ struct SearchView: View {
                     Text("Videos").tag(NativeSearchQuery.Media.video)
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
+                SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
                 DisclosureGroup("Filters") {
                     VStack {
                         Picker("Search mode", selection: $query.mode) {
