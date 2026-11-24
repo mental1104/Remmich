@@ -38,6 +38,8 @@ final class MediaLibraryController {
     let savedPhotosLibrary: SavedPhotosLibrary?
     let localMediaMatches: LocalMediaMatchController
     @ObservationIgnored private let localPhotoReader: any LocalPhotoMediaReading
+    @ObservationIgnored private let localLivePhotoReader: any LocalLivePhotoMediaReading
+    @ObservationIgnored private let localLivePhotoRemote: (any LocalMediaMatchingReading)?
     private var mediaReadOrigins: [MediaReadOriginKey: MediaReadOrigin] = [:]
     private static let savedPhotosFiles = MediaExportFiles(
         root: FileManager.default.temporaryDirectory.appending(path: "RemmichSavedPhotos", directoryHint: .isDirectory)
@@ -88,24 +90,31 @@ final class MediaLibraryController {
     private var cachedProfileImageURL: URL?
     private var profileImageCacheRevision = 0
 
-    /// 默认沿用现有网络/导出依赖；profileImageSession隔离头像传输，匹配/Photos注入仍走真实媒体入口。
+    /// 默认沿用现有网络/导出依赖；profileImageSession隔离头像，localLivePhotoReader/remote仅替换本机读取与fresh详情来源。
+    /// imageDataLoader/exports提供原图片与导出服务，localMediaMatches/localPhotoReader保留普通本机路由；remote为nil时使用当前鉴权client。
     init(imageDataLoader: (any DataLoading)? = nil, exports: MediaExportController? = nil,
          localMediaMatches: LocalMediaMatchController? = nil,
-         localPhotoReader: any LocalPhotoMediaReading = PhotoKitLocalPhotoMediaReader(), profileImageSession: URLSession = .shared)
+         localPhotoReader: any LocalPhotoMediaReading = PhotoKitLocalPhotoMediaReader(), profileImageSession: URLSession = .shared,
+         localLivePhotoReader: any LocalLivePhotoMediaReading = PhotoKitLocalLivePhotoMediaReader(), remote: (any LocalMediaMatchingReading)? = nil)
     {
         self.imageDataLoader = imageDataLoader
         self.exports = exports ?? MediaExportController()
         self.localMediaMatches = localMediaMatches ?? LocalMediaMatchController()
         self.localPhotoReader = localPhotoReader
+        self.localLivePhotoReader = localLivePhotoReader
+        localLivePhotoRemote = remote
         self.profileImageSession = profileImageSession
         savedPhotosLibrary = nil
     }
 
+    /// Saved Photos仍由独立库和scope提供媒体；专用远端配对helper在此模式直接miss，不复用原片导出。
     init(savedPhotosLibrary: SavedPhotosLibrary, scope: MediaAccountScope) {
         self.savedPhotosLibrary = savedPhotosLibrary
         self.scope = scope
         localMediaMatches = LocalMediaMatchController()
         localPhotoReader = PhotoKitLocalPhotoMediaReader()
+        localLivePhotoReader = PhotoKitLocalLivePhotoMediaReader()
+        localLivePhotoRemote = nil
         profileImageSession = .shared
         imageDataLoader = nil
         exports = MediaExportController()
@@ -432,6 +441,70 @@ final class MediaLibraryController {
             recordMediaOrigin(.devicePhotos, assetID: assetID, revision: revision)
         }
         return item
+    }
+
+    /// stillAssetID/revision绑定当前展示，motionAssetID必须与fresh配对一致；nil才可用既有远端motion，本helper绝不读远端媒体。
+    /// targetPixels为本机展示像素，沿用4096单边上限；原片导出、上传或备份完成不属于返回对象的语义。
+    /// 先验证远端pair与真实本机motion摘要，再准备current PHLivePhoto并重新确认pair；取消/换号/端点失效必须抛出。
+    func localLivePhoto(stillAssetID: String, revision: Date, motionAssetID: String, targetPixels: MediaPixelSize) async throws -> PHLivePhoto? {
+        try Task.checkCancellation()
+        guard savedPhotosLibrary == nil, let scope, let motionID = UUID(uuidString: motionAssetID),
+              let association = localMediaMatches.association(assetID: stillAssetID, revision: revision),
+              association.localIdentity.mediaKind == .livePhoto else { return nil }
+        let remote: any LocalMediaMatchingReading
+        if let localLivePhotoRemote {
+            remote = localLivePhotoRemote
+        } else if let client = management.client {
+            remote = client
+        } else {
+            return nil
+        }
+        let accountGeneration = management.generation
+        let validate: @MainActor () throws -> Void = {
+            try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        }
+        let currentAssociation: @MainActor () -> Bool = {
+            self.localMediaMatches.association(assetID: stillAssetID, revision: revision) == association
+        }
+        do {
+            try validate()
+            let still = try await remote.localMediaAsset(stillAssetID)
+            try validate()
+            guard currentAssociation() else { return nil }
+            let motion = try await remote.localMediaAsset(motionAssetID)
+            try validate()
+            guard currentAssociation(), let before = LocalLivePhotoRemotePair.verified(still: still, motion: motion, association: association,
+                                                                                       ownerID: scope.userID, expectedMotionID: motionID) else { return nil }
+            // still元数据关联不能替代motion证明；只接受reader实际读完的同源pairedVideo摘要。
+            let proof = try await localLivePhotoReader.motionProof(for: association.localIdentity, validateContext: validate)
+            try validate()
+            guard currentAssociation(), let proof, proof.source.identity == association.localIdentity,
+                  proof.digest.sha1Base64 == before.motionChecksum else { return nil }
+            let pixels = MediaPixelSize(width: min(4096, targetPixels.width), height: min(4096, targetPixels.height))
+            let native = try await localLivePhotoReader.livePhoto(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
+            try validate()
+            guard currentAssociation(), let native else { return nil }
+            // native准备跨越异步边界；重新读取两个对象，不能沿用可能已重配/编辑/离线的初始pair。
+            let finalStill = try await remote.localMediaAsset(stillAssetID)
+            try validate()
+            guard currentAssociation() else { return nil }
+            let finalMotion = try await remote.localMediaAsset(motionAssetID)
+            try validate()
+            guard currentAssociation(), LocalLivePhotoRemotePair.verified(still: finalStill, motion: finalMotion, association: association,
+                                                                          ownerID: scope.userID, expectedMotionID: motionID) == before else { return nil }
+            recordMediaOrigin(.devicePhotos, assetID: stillAssetID, revision: revision)
+            return native
+        } catch {
+            // 当前合法账号的metadata/本机不足可回源；Task或已退休上下文绝不能借nil继续旧账号网络路径。
+            try validate()
+            if error is CancellationError {
+                throw error
+            }
+            if case LibraryWriteError.changedAccount = error {
+                throw CancellationError()
+            }
+            return nil
+        }
     }
 
     /// 每次await前后保持账号/端点代际；失效抛取消避免旧账户回源，本机权限/版本变化另按local miss处理。
