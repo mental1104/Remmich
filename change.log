@@ -1,3 +1,9 @@
+## 2026-11-24: Keep batch reload Sendable inference outside requirement macros
+
+- Source: candidatec258df2; upstream remains672f02e. CI45390035103 ended compilation failure with two macro diagnostics originating at BatchAssetManagementStoreTests.swift:117/259: a captured factory parameter lost its Sendable requirement during macro forwarding. Earlier nan and viewer diagnostics are gone; app links, but combined products and runtime checks are incomplete.
+- Evaluate the actual reload call before passing its optional Task to require. Preserve the real Sendable factory, nonnil-task assertion, waiting and all state/HTTP assertions; no production concurrency checks, tests or CI gates are relaxed.
+- Scoped SwiftFormat/diff checks passed; the next actual CI must validate the fix. No server/API/data/production/signing changes. Rollback restores the known macro forwarding failure.
+
 ## 2026-11-24: Disambiguate the crop test's nonfinite CGSize input
 
 - Source: candidate85f96c8; upstream remains672f02e. CI45388361344 ended compilation failure with one source diagnostic at AssetEditCropInteractionTests.swift:57: ambiguous nan. The prior nested macro error is gone, and the app links; combined test products and API/app/UI execution remain incomplete.

@@ -114,7 +114,8 @@ struct BatchAssetManagementStoreTests {
         #expect(await fixture.script.requests().count == (status == 403 ? 3 : 2))
         #expect(!store.hasFreshData && !store.isWorking && fixture.manager.revision == 1)
         #expect(store.start(plan, manager: fixture.manager) == nil)
-        let reread = try #require(store.reload(album: batchAlbum, scope: .active, factory: { source }, manager: fixture.manager))
+        let reloadTask = store.reload(album: batchAlbum, scope: .active, factory: { source }, manager: fixture.manager)
+        let reread = try #require(reloadTask)
         await reread.value
         #expect(store.hasFreshData && store.selectedIDs.isEmpty)
         #expect(throws: BatchAssetManagementError.self) { try store.prepare(.favorite(false), manager: fixture.manager) }
@@ -256,7 +257,9 @@ private nonisolated func batchSession(endpoint: URL, user: String = "owner") -> 
 @MainActor private func loadBatch(_ store: BatchAssetManagementStore, source: BatchReadFixture,
                                   manager: LibraryManagementController, scope: BatchAssetScope = .active) async throws
 {
-    let read = try #require(store.reload(album: batchAlbum, scope: scope, factory: { source }, manager: manager))
+    // 在宏外让factory按真实@Sendable参数求解，避免#require的参数捕获转发丢失闭包约束。
+    let reloadTask = store.reload(album: batchAlbum, scope: scope, factory: { source }, manager: manager)
+    let read = try #require(reloadTask)
     await read.value
     #expect(store.hasFreshData && !store.isLoading)
 }
