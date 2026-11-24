@@ -20,7 +20,9 @@ jobs:
     name: Build
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: xcode-27
-    timeout-minutes: 45
+    # run45367778128因45分钟上限取消；job日志404、run日志为空ZIP，未取得业务断言正文。
+    # 已观测串行编译/API/App/phone/tablet约10+2+13+13+13分钟；保留全部检查，给证据上传留出预算。
+    timeout-minutes: 75
     env:
       DERIVED_DATA_PATH: ${{ github.workspace }}/.ci/DerivedData
 
@@ -81,13 +83,58 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             | xcbeautify
 
-      # 就绪PR实际执行测试，避免只编译测试包就合入dev；不增加新触发方式。
+      # 先保留可编译产品；compiled-only收据和独立artifact不能替代最终tested-revision/成功链。
+      - name: Archive compiled PR test products before tests
+        id: compiled-products
+        if: ${{ github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        env:
+          PR_SOURCE_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test -d "$DERIVED_DATA_PATH/Build/Products"
+          printf '%s\n' "$GITHUB_SHA" > "$DERIVED_DATA_PATH/Build/compiled-revision"
+          printf 'status=compiled-only\nsource_revision=%s\ncheckout_revision=%s\nrun_id=%s\n' \
+            "$PR_SOURCE_REVISION" "$GITHUB_SHA" "$GITHUB_RUN_ID" \
+            > "$DERIVED_DATA_PATH/Build/compilation-receipt.txt"
+          cp "$DERIVED_DATA_PATH/Build/compilation-receipt.txt" "$RUNNER_TEMP/remmich-compilation-receipt.txt"
+          tar -C "$DERIVED_DATA_PATH/Build" \
+            -czf "$RUNNER_TEMP/remmich-compiled-test-products.tar.gz" \
+            Products \
+            compiled-revision \
+            compilation-receipt.txt
+
+      - name: Upload compiled PR products without test approval
+        if: ${{ github.event_name == 'pull_request' && steps.compiled-products.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-compiled-products-unverified
+          path: |
+            ${{ runner.temp }}/remmich-compiled-test-products.tar.gz
+            ${{ runner.temp }}/remmich-compilation-receipt.txt
+          if-no-files-found: error
+          retention-days: 3
+
+      # 编译成功的就绪PR执行原有检查；较早测试/证据上传失败也不能跳过后续业务检查。
       - name: Test API package before PR merge
-        if: ${{ github.event_name == 'pull_request' }}
-        run: swift test --jobs 2 --package-path Packages/ImmichAPI
+        id: api-tests
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          swift test --jobs 2 --package-path Packages/ImmichAPI 2>&1 \
+            | tee "$RUNNER_TEMP/RemmichAPITests.log"
+
+      # 每阶段立即保留已有输出，避免后续超时丢掉已经结束的阶段；不改变其失败结论。
+      - name: Upload API test evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.api-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-api-test-evidence
+          path: ${{ runner.temp }}/RemmichAPITests.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Test app logic before PR merge
-        if: ${{ github.event_name == 'pull_request' }}
+        id: app-tests
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
         run: |
           set -o pipefail
           xcodebuild test-without-building \
@@ -100,17 +147,55 @@ jobs:
             -jobs 2 \
             -parallel-testing-enabled NO \
             -only-testing:RemmichTests \
-            COMPILER_INDEX_STORE_ENABLE=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 \
+            | tee "$RUNNER_TEMP/RemmichPRTests.log" \
             | xcbeautify
+
+      - name: Upload app logic evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.app-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-app-test-evidence
+          path: |
+            ${{ runner.temp }}/RemmichPRTests.log
+            ${{ runner.temp }}/RemmichPRTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 3
 
       # 同一runner串行复用联合产品；前一项测试失败仍执行另一设备，失败状态不被吞掉。
       - name: Test search UI on iPhone before PR merge
+        id: search-ui-phone
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
         run: bash Scripts/test-search-ui.sh phone "$RUNNER_TEMP/RemmichSearchUI-phone" "$DERIVED_DATA_PATH"
 
+      - name: Upload iPhone search evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.search-ui-phone.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-search-phone-evidence
+          path: |
+            ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult
+            ${{ runner.temp }}/RemmichSearchUI-phone/device.json
+            ${{ runner.temp }}/RemmichSearchUI-phone/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Test search UI on iPad before PR merge
+        id: search-ui-tablet
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
         run: bash Scripts/test-search-ui.sh tablet "$RUNNER_TEMP/RemmichSearchUI-tablet" "$DERIVED_DATA_PATH"
+
+      - name: Upload iPad search evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.search-ui-tablet.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-search-tablet-evidence
+          path: |
+            ${{ runner.temp }}/RemmichSearchUI-tablet/SearchUI.xcresult
+            ${{ runner.temp }}/RemmichSearchUI-tablet/device.json
+            ${{ runner.temp }}/RemmichSearchUI-tablet/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       # 测试失败也导出已有截图；未运行设备不生成占位附件，导出失败仍使job失败。
       - name: Export search UI screenshots and attachment manifests
@@ -123,6 +208,8 @@ jobs:
         with:
           name: remmich-pr-test-results
           path: |
+            ${{ runner.temp }}/RemmichAPITests.log
+            ${{ runner.temp }}/RemmichPRTests.log
             ${{ runner.temp }}/RemmichPRTests.xcresult
             ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult
             ${{ runner.temp }}/RemmichSearchUI-phone/device.json
