@@ -52,6 +52,7 @@ jobs:
           swiftformat --lint --config .swiftformat \
             Remmich \
             RemmichTests \
+            RemmichUITests \
             Packages/ImmichAPI/Sources \
             Packages/ImmichAPI/Tests
 
@@ -62,11 +63,15 @@ jobs:
         run: bash Scripts/select-ci-simulator.sh
 
       - name: Build app and test bundles
+        id: test-build
+        env:
+          # PR一次构建逻辑/UI联合产品；dev保留既有Build→Tests产物约定。
+          TEST_BUILD_SCHEME: ${{ github.event_name == 'pull_request' && 'RemmichSearchUI' || 'Remmich' }}
         run: |
           set -o pipefail
           xcodebuild build-for-testing \
             -project Remmich.xcodeproj \
-            -scheme Remmich \
+            -scheme "$TEST_BUILD_SCHEME" \
             -configuration Debug \
             -destination "$IPHONE_DESTINATION" \
             -derivedDataPath "$DERIVED_DATA_PATH" \
@@ -87,7 +92,7 @@ jobs:
           set -o pipefail
           xcodebuild test-without-building \
             -project Remmich.xcodeproj \
-            -scheme Remmich \
+            -scheme RemmichSearchUI \
             -configuration Debug \
             -destination "$IPHONE_DESTINATION" \
             -derivedDataPath "$DERIVED_DATA_PATH" \
@@ -98,12 +103,28 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             | xcbeautify
 
+      # 同一runner串行复用联合产品；前一项测试失败仍执行另一设备，失败状态不被吞掉。
+      - name: Test search UI on iPhone before PR merge
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: bash Scripts/test-search-ui.sh phone "$RUNNER_TEMP/RemmichSearchUI-phone" "$DERIVED_DATA_PATH"
+
+      - name: Test search UI on iPad before PR merge
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: bash Scripts/test-search-ui.sh tablet "$RUNNER_TEMP/RemmichSearchUI-tablet" "$DERIVED_DATA_PATH"
+
       - name: Upload PR test results
         if: ${{ always() && github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remmich-pr-test-results
-          path: ${{ runner.temp }}/RemmichPRTests.xcresult
+          path: |
+            ${{ runner.temp }}/RemmichPRTests.xcresult
+            ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult
+            ${{ runner.temp }}/RemmichSearchUI-phone/device.json
+            ${{ runner.temp }}/RemmichSearchUI-phone/xcodebuild.log
+            ${{ runner.temp }}/RemmichSearchUI-tablet/SearchUI.xcresult
+            ${{ runner.temp }}/RemmichSearchUI-tablet/device.json
+            ${{ runner.temp }}/RemmichSearchUI-tablet/xcodebuild.log
           if-no-files-found: ignore
           retention-days: 3
 

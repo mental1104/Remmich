@@ -6,6 +6,10 @@ struct SearchView: View {
     let media: MediaLibraryController
     let assetDetails: any AssetDetailReading
     let showAccount: () -> Void
+    private let searchReader: (any NativeSearchReading)?
+    #if DEBUG
+        private var searchCompletion: ((NativeSearchQuery) -> Void)?
+    #endif
     @State private var query = NativeSearchQuery()
     @State private var store = NativeSearchStore()
     @State private var selection: Selection?
@@ -23,6 +27,38 @@ struct SearchView: View {
     @State private var loadingDevices = false
     @Namespace private var viewerNamespace
 
+    /// source保留账号候选读取，media/assetDetails复用原生显示，showAccount打开账号入口。
+    /// searchReader仅供显式依赖注入；正常调用省略它，仍使用真实账号仓库，不产生演示结果。
+    init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+         showAccount: @escaping () -> Void, searchReader: (any NativeSearchReading)? = nil)
+    {
+        self.source = source
+        self.media = media
+        self.assetDetails = assetDetails
+        self.showAccount = showAccount
+        self.searchReader = searchReader
+    }
+
+    #if DEBUG
+        /// 仅DEBUG的观察重载；source/media/details/account/reader语义同正常初始化。
+        /// searchCompletion接收已结束store发布检查的条件，不改结果；Release没有此回调接口。
+        init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+             showAccount: @escaping () -> Void, searchReader: (any NativeSearchReading)?,
+             searchCompletion: @escaping (NativeSearchQuery) -> Void)
+        {
+            self.init(source: source, media: media, assetDetails: assetDetails, showAccount: showAccount, searchReader: searchReader)
+            self.searchCompletion = searchCompletion
+        }
+    #endif
+
+    /// 返回当前注入读取器或正常账号仓库；nil保留未连接状态，不创建网络替身。
+    private var activeSearchReader: (any NativeSearchReading)? {
+        if let searchReader {
+            return searchReader
+        }
+        return source
+    }
+
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
     private struct Selection: Identifiable {
         let id = UUID()
@@ -39,6 +75,7 @@ struct SearchView: View {
                     Text("Videos").tag(NativeSearchQuery.Media.video)
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
+                .accessibilityIdentifier("search-media")
                 if let reference = query.queryAssetID {
                     referenceCard(reference)
                 }
@@ -56,6 +93,7 @@ struct SearchView: View {
                                 Text(mode.title).tag(mode)
                             }
                         }
+                        .accessibilityIdentifier("search-mode")
                         SearchChoiceField(title: "Country", text: $query.country, values: suggestions[.country])
                         SearchChoiceField(title: "State or province", text: $query.state, values: suggestions[.state])
                         SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
@@ -72,6 +110,7 @@ struct SearchView: View {
                                 .accessibilityIdentifier("search-load-devices")
                         }
                         Toggle("Favorites only", isOn: $query.favoritesOnly)
+                            .accessibilityIdentifier("search-favorites")
                         Toggle("Archived only", isOn: $query.archivedOnly)
                         Picker("Rating", selection: $query.rating) {
                             Text("Any rating").tag(NativeSearchRating.any)
@@ -161,10 +200,12 @@ struct SearchView: View {
                         }
                     }.textFieldStyle(.roundedBorder)
                 }.padding(.horizontal)
+                    .accessibilityIdentifier("search-filters")
                 if let error = store.error {
                     Text(error).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("search-error")
                     Button("Retry") { Task {
-                        if let source {
+                        if let source = activeSearchReader {
                             if store.hasSearched, store.continuation == nil {
                                 await store.search(query, source: source)
                             } else {
@@ -172,6 +213,7 @@ struct SearchView: View {
                             }
                         }
                     } }
+                    .accessibilityIdentifier("search-retry")
                 }
                 if invalidDateRange {
                     Text("End date must not be earlier than start date.").foregroundStyle(.secondary)
@@ -180,6 +222,7 @@ struct SearchView: View {
                     ContentUnavailableView(store.hasSearched ? "No results" : "Search your library",
                                            systemImage: "magnifyingglass",
                                            description: Text("Choose a search mode or metadata filters."))
+                        .accessibilityIdentifier("search-empty-state")
                 }
                 LazyVGrid(columns: [.init(.adaptive(minimum: 100, maximum: 180), spacing: 2)], spacing: 2) {
                     ForEach(store.assets) { asset in
@@ -189,6 +232,7 @@ struct SearchView: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
+                        .accessibilityIdentifier("search-result-\(asset.id)")
                         .contextMenu {
                             Button("Find similar photos", systemImage: "photo.on.rectangle.angled") {
                                 referencePreview = asset
@@ -202,17 +246,20 @@ struct SearchView: View {
                 }
                 if store.continuation != nil, !store.isLoading {
                     Button("Load more") { Task {
-                        if let source {
+                        if let source = activeSearchReader {
                             await store.loadMore(source: source)
                         }
                     } }
+                    .accessibilityIdentifier("search-load-more")
                 }
                 if !store.assets.isEmpty {
                     Text("Loaded \(store.assets.count) items").font(.caption)
+                        .accessibilityIdentifier("search-loaded-count")
                 }
             }.padding(.vertical)
         }
         .navigationBarTitleDisplayMode(.inline)
+        .scrollDismissesKeyboard(.interactively)
         .searchable(text: Binding(get: { query.text }, set: {
             query.useSearchText($0)
             referencePreview = nil
@@ -262,8 +309,12 @@ struct SearchView: View {
               || query.mediaCategory != nil || query.resolution != nil || query.panoramasOnly else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
-            guard let source else { return }
-            await store.search(query, source: source)
+            guard let source = activeSearchReader else { return }
+            let requested = query
+            await store.search(requested, source: source)
+            #if DEBUG
+                searchCompletion?(requested)
+            #endif
         } catch { /* 取消防抖无需显示错误。 */ }
     }
 
