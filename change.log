@@ -1,3 +1,11 @@
+## 2026-11-24: Account-scoped durable backup journal and recovery semantics
+
+- Source: codex/feature-backup-reliability over4a01d68; upstream remains672f02e. No upstream sync, server/API/production migration, CI or original-media operation.
+- Add typed source/version, job stages, safe failure reasons and journal state transitions. Preserve confirmed motion/primary identities; interrupted export/upload/verification restores paused, never complete or automatic replay. Live Photo cannot complete from a motion-only receipt. Explicit scans preserve order/deduplicate, cancel obsolete unfinished versions and revalidate prior completed receipts instead of assuming server retention.
+- Reuse existing authenticated MediaAccountScope and per-account SQLite files via an independent photo_backups auxiliary table, without changing existing schema/cache versions. Read/write validate namespace and journal version; deletion tombstones and existing-account guards prevent late write resurrection. No credentials, media bytes or private paths are persisted.
+- Add real-SQLite Swift scenarios for cold recovery, partial pairing receipts, account isolation and deletion/late writes; domain cases cover scan ordering/version replacement, incomplete pairing and future-version rejection. Scoped SwiftFormat and diff checks passed. Swift compilation/test execution remains pending; this journal is not yet wired to PhotoBackupView or an upload worker, so persistent user backup is not declared available.
+- Remaining and rollback are explicit in docs/photo-backup-reliability.md. Continue exporter/worker/UI cancellation/retry/account generation wiring and subsequent background/album/RAW+JPEG work. No private media, device-space cleanup, permanent deletion, release or production deployment.
+
 ## 2026-11-24: Shared contracts for parallel editing and album management
 
 - Source: codex/feature-backup-reliability from search PR7 head364a54f; user explicitly authorizes concurrent stages2–5. Upstream remains672f02e; no server/API/database/production changes. These client changes are separate from the currently tested search branch.

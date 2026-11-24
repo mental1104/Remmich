@@ -37,6 +37,34 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         return try JSONDecoder().decode(MediaExportJournal.self, from: Data(json.utf8))
     }
 
+    /// scope来自当前认证账号；读取该账号原片备份日志，不存在时返回空日志，不重建已移除账号。
+    /// 旧版本/损坏或跨namespace的日志抛错，调用方不得以空值覆盖恢复资料。
+    func loadPhotoBackups(scope: MediaAccountScope) throws -> PhotoBackupJournal {
+        guard try canRead(scope) else { return .init(namespace: scope.cacheNamespace) }
+        let db = try preparedDatabase(scope: scope)
+        try createPhotoBackupSchema(db)
+        guard let json = try db.scalarText("SELECT payload FROM main.photo_backups WHERE scope=?", [.text(scope.cacheNamespace)]) else {
+            return .init(namespace: scope.cacheNamespace)
+        }
+        let journal = try JSONDecoder().decode(PhotoBackupJournal.self, from: Data(json.utf8))
+        try journal.validate(namespace: scope.cacheNamespace)
+        return journal
+    }
+
+    /// journal为调用方已完成的单次状态转换，scope为同一账号；SQLite原子替换后才可执行下一外部副作用。
+    /// 账号必须仍存在；晚到写入不能恢复Clear Local Data已删除的账号或写入另一账号日志。
+    func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {
+        try journal.validate(namespace: scope.cacheNamespace)
+        guard try canRead(scope) else { throw CancellationError() }
+        let db = try preparedDatabase(scope: scope)
+        guard try db.scalarInt64("SELECT COUNT(*) FROM scopes WHERE scope=?", [.text(scope.cacheNamespace)]) == 1 else {
+            throw CancellationError()
+        }
+        try createPhotoBackupSchema(db)
+        let json = try String(decoding: JSONEncoder().encode(journal), as: UTF8.self)
+        try db.execute("INSERT INTO main.photo_backups(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload", [.text(scope.cacheNamespace), .text(json)])
+    }
+
     private struct AlbumCatalogState: Codable {
         let summaries: [TimelineBucketSummary]
         let revision: String
@@ -2104,6 +2132,11 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
 
     private func createMediaExportSchema(_ database: SQLiteConnection) throws {
         try database.execute("CREATE TABLE IF NOT EXISTS main.media_exports(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE, payload TEXT NOT NULL)")
+    }
+
+    /// 仅在当前账号首次使用备份日志时创建独立辅助表，不改既有缓存schema或用户资料；删除账号时级联回收。
+    private func createPhotoBackupSchema(_ database: SQLiteConnection) throws {
+        try database.execute("CREATE TABLE IF NOT EXISTS main.photo_backups(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE, payload TEXT NOT NULL)")
     }
 
     private func createPlaceSchema(_ database: SQLiteConnection) throws {
