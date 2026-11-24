@@ -134,7 +134,7 @@ import Photos
                     try journal.resumeForVerification(only: jobID)
                     try await store.savePhotoBackups(journal, scope: scope)
                     try Self.validate(manager, owner: owner, scope: scope)
-                    total = journal.jobs.count { $0.stage == .queued }
+                    self.total = journal.jobs.count { $0.stage == .queued }
                     let cloud = journal.allowCloud
                     // management占用整个执行周期，防止多个窗口同时通过同一写通道执行队列。
                     return try await manager.perform(publishChange: false) { _ in

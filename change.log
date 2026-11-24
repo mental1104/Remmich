@@ -1,3 +1,9 @@
+## 2026-11-24: Make the backup coordinator's captured UI state explicit
+
+- Source: candidate62623eb; upstream remains672f02e. CI45379628014 failed compilation at19:05 with an explicit-self requirement in PhotoBackupController.swift:137 and a separate viewer-summary initializer mismatch. No API/app/UI execution or compiled artifact was produced.
+- Qualify the queue total mutation with self inside the escaping coordinator closure. This preserves the MainActor boundary, queue selection and upload semantics; no compiler check is disabled. The independent viewer repair is coordinated separately before one new candidate CI.
+- Scoped SwiftFormat/diff checks passed; repaired Swift compilation awaits the next actual run. No server/API/database/production/signing change. Rollback this isolated source repair restores the known compiler error.
+
 ## 2026-11-24: Preserve early compilation and per-stage CI evidence
 
 - Source: integrated CI fix09a438c over candidatec9c3aba; upstream remains672f02e. Existing triggers, draft gate, runner, business tests and final release/tested-revision gate remain intact; no server, production, signing or paid-runner change.
