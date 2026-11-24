@@ -358,6 +358,8 @@ struct AppShellView: View {
         .onChange(of: exportScenePhase, initial: true) { _, phase in
             media.exports.sceneActivityChanged(active: phase == .active)
             if phase == .active {
+                // 恢复当前账号本机关联；只检查已有权限，重复前台事件复用当前扫描，不主动弹授权框。
+                media.localMediaMatches.restoreAndRefresh(using: media.management, scope: media.scope)
                 Task { await media.exports.reconcile() }
             }
         }

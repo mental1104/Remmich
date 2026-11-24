@@ -12,6 +12,7 @@ swiftc -swift-version 6 \
   Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
   Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
   Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \
+  Remmich/Domain/LocalMedia/LocalMediaAssociation.swift \
   Remmich/Domain/Timeline/NativeSearchModels.swift \
   Remmich/Domain/Timeline/NativeSearchPreset.swift \
   Scripts/check-fork-contracts.swift \

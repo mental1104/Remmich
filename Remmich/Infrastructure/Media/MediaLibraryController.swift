@@ -83,19 +83,21 @@ final class MediaLibraryController {
     private var warmedThumbnailURLs: [String: URL] = [:]
     private(set) var thumbnailInventoryRevision = 0
     private let profileImageCache = ProfileImageCache()
+    private let profileImageSession: URLSession
     private var profileImageCacheTask: Task<Void, Never>?
     private var cachedProfileImageURL: URL?
     private var profileImageCacheRevision = 0
 
-    /// 默认沿用现有网络/导出依赖；可注入匹配状态与只读Photos适配，测试必须走真实媒体入口而非复制选择规则。
+    /// 默认沿用现有网络/导出依赖；profileImageSession隔离头像传输，匹配/Photos注入仍走真实媒体入口。
     init(imageDataLoader: (any DataLoading)? = nil, exports: MediaExportController? = nil,
          localMediaMatches: LocalMediaMatchController? = nil,
-         localPhotoReader: any LocalPhotoMediaReading = PhotoKitLocalPhotoMediaReader())
+         localPhotoReader: any LocalPhotoMediaReading = PhotoKitLocalPhotoMediaReader(), profileImageSession: URLSession = .shared)
     {
         self.imageDataLoader = imageDataLoader
         self.exports = exports ?? MediaExportController()
         self.localMediaMatches = localMediaMatches ?? LocalMediaMatchController()
         self.localPhotoReader = localPhotoReader
+        self.profileImageSession = profileImageSession
         savedPhotosLibrary = nil
     }
 
@@ -104,6 +106,7 @@ final class MediaLibraryController {
         self.scope = scope
         localMediaMatches = LocalMediaMatchController()
         localPhotoReader = PhotoKitLocalPhotoMediaReader()
+        profileImageSession = .shared
         imageDataLoader = nil
         exports = MediaExportController()
         var configuration = ImagePipeline.Configuration()
@@ -1242,7 +1245,8 @@ final class MediaLibraryController {
                 namespace: scope.cacheNamespace,
                 userID: session.userID,
                 endpoint: endpoint,
-                accessToken: session.accessToken
+                accessToken: session.accessToken,
+                session: profileImageSession
             )
             guard !Task.isCancelled, self.scope == scope else { return }
             switch result {
@@ -1615,11 +1619,13 @@ private actor ProfileImageCache {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// session只负责头像请求，默认宿主沿用shared；测试可实例注入受限URLSession而不污染全局协议。
     func refresh(
         namespace: String,
         userID: String,
         endpoint: URL,
-        accessToken: String
+        accessToken: String,
+        session: URLSession
     ) async -> RefreshResult {
         let url = endpoint
             .appending(path: "users")
@@ -1628,7 +1634,7 @@ private actor ProfileImageCache {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else {
                 return .failed("The server returned an invalid response.")
             }

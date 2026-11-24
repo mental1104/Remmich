@@ -1,3 +1,9 @@
+## 2026-11-24: Finish local-media lifecycle and isolate routing-test transport
+
+- Source: local-media-matching4b8d560; upstream remains672f02e. The candidate now integrates the matcher, current PhotoKit reader, local checksum lookup, account-isolated association persistence, settings entry and actual image/video routing. On returning to the foreground, restore or refresh the current scope with existing authorization; repeated events reuse the active operation.
+- Include the Foundation-only association domain in the explicit offline contract compilation inputs. Permit instance-level profile URLSession injection so actual media-routing fixtures can block unrelated avatar HTTP without changing global URL protocols; production keeps shared-session behavior.
+- Scoped two-file SwiftFormat, bash syntax and whitespace checks pass on NAS. The previous424a22a compiled candidate did not pass app/UI runtime validation; these fixes and the local-media feature have not yet been compiled or executed in Swift. Unified CI and actual Photos/device acceptance remain required. No workflow, server/API, production or original-media change; rollback removes the local routing/module and retains isolated recovery documents.
+
 ## 2026-11-24: Guard deferred local requests and video fallback
 
 - Source: local-media-matching966e3c6; upstream remains672f02e. Recheck the confirmed association when a deferred image request executes and bypass wrapper memory reads so an old request cannot skip current permission/account validation. Preserve the existing remote pipeline cache after a valid local miss.
