@@ -4,7 +4,7 @@ import OpenAPIRuntime
 import OpenAPIURLSession
 import OSLog
 
-/// 账号API封装，保留可更新凭据与固定传输边界；Fork高级搜索使用独立可取消读取协议。
+/// 账号API封装，保留可更新凭据与固定传输边界；随机与Fork高级搜索使用受限可取消前台读取。
 public actor ImmichClient {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -61,6 +61,12 @@ public actor ImmichClient {
             transport: ImmichNetworkSession.routeCheckTransport,
             routeCheckSession: ImmichNetworkSession.routeCheck
         )
+    }
+
+    /// 为交互管理读取创建不缓存、禁cookie/重定向的前台SDK客户端；apiURL/credential须来自已验证会话。
+    /// 仍使用相同只读策略、鉴权和日期编码；不配置持久GET传输或后台索引缓存。
+    public static func foregroundReadClient(apiURL: URL, credential: ImmichCredential) -> ImmichClient {
+        ImmichClient(apiURL: apiURL, credential: credential, transport: ImmichSearchNetwork.transport)
     }
 
     public func setCredential(_ credential: ImmichCredential?) {
@@ -224,6 +230,33 @@ public actor ImmichClient {
         } catch {
             throw Self.map(error)
         }
+    }
+
+    /// 从官方随机入口读取一批可见照片；size为1–1000，默认60，不返回或伪造分页游标。
+    /// 每次调用重新由服务器随机抽样；排除视频、归档、锁定和回收站，取消与HTTP错误不转为空批次。
+    public func randomPhotos(size: Int = 60) async throws -> [ImmichTimelineAsset] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            // 交互随机抽样复用受限前台传输，不将POST条件放入只记录URL的持久GET日志。
+            let client = Client(serverURL: apiURL, configuration: .init(dateTranscoder: Self.dateTranscoder),
+                                transport: forkSmartTransport, middlewares: [AuthenticationMiddleware(credential: credential)])
+            let output = try await client.searchRandom(.init(body: .json(.init(
+                filter: .init(trashedAt: .init(eq: .null), _type: .init(eq: .IMAGE), visibility: .init(eq: .timeline)),
+                size: size, withExif: true
+            ))))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let values = try response.body.json
+                guard values.count <= size,
+                      values.allSatisfy({ $0._type == .IMAGE && $0.visibility == .timeline && !$0.isTrashed })
+                else { throw ImmichAPIError.invalidResponse }
+                return values.map(Self.timelineAsset)
+            case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
     }
 
     public func albums() async throws -> [ImmichAlbum] {

@@ -614,6 +614,114 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
     }
 
+    /// 当前账号读取一批服务器随机照片；无分页位置，迟到响应在账号/端点变更后拒绝发布。
+    func randomPhotos() async throws -> [TimelineAssetSummary] {
+        let (client, owner) = try requestContext()
+        do {
+            let values = try await client.randomPhotos(size: 60)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 本人待整理使用真实前台相簿列表与Fork目录，不复用索引已完成GET；ownerID来自当前界面会话。
+    /// 缺扩展返回nil，错误原样抛出，两条读取都必须仍属于同一原repo代际。
+    func pendingAlbums(ownerID: String) async throws -> [AlbumSummary]? {
+        let (_, owner) = try requestContext()
+        let client = try managementClient(owner: owner)
+        do {
+            async let values = client.albums()
+            async let directory = forkAlbumDirectory()
+            let (albums, groups) = try await (values, directory)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            guard let groups else { return nil }
+            return PendingAlbumSelection.select(albums.map(Self.map), directory: groups, ownerID: ownerID)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 为当前管理动作创建绑定原仓库代际的前台读取器；它不复制会话生命周期，也不走索引GET缓存。
+    func managementTimelineReader() async throws -> any TimelineReading {
+        let (_, owner) = try requestContext()
+        try Task.checkCancellation()
+        return ManagementTimelineReader(repository: self, owner: owner)
+    }
+
+    /// 每次读取先验证原代际，随后使用同一真实凭据的前台通道；测试loader也不经过持久队列。
+    private func managementClient(owner: UInt64) throws -> ImmichClient {
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        guard let activeEndpoint, let session else { throw TimelineReadError.routeUnavailable }
+        if let readLoader {
+            return ImmichClient(apiURL: activeEndpoint, credential: .bearer(session.accessToken),
+                                transport: ImmichQueuedReadTransport(loader: readLoader))
+        }
+        return ImmichClient.foregroundReadClient(apiURL: activeEndpoint, credential: .bearer(session.accessToken))
+    }
+
+    /// query为管理需要的准确相簿范围；owner固定创建时原repo代际，返回本次实际HTTP桶列表。
+    private func managementBuckets(query: TimelineQuery, owner: UInt64) async throws -> [TimelineBucketSummary] {
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.timelineBuckets(query: Self.map(query))
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map { .init(id: .init(rawValue: $0.id), assetCount: $0.assetCount) }
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// bucket/query决定本次真实前台GET；owner使旧读取器在换账号或端点后失效，响应也必须再次检查。
+    private func managementAssets(bucket: TimelineBucketID, query: TimelineQuery, owner: UInt64) async throws -> [TimelineAssetSummary] {
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.timelineAssets(in: bucket.rawValue, query: Self.map(query))
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 管理相簿不产生全局回忆，沿用AlbumTimelineReader的空回忆语义；空结果同样受原代际和取消保护。
+    private func managementMemories(owner: UInt64) throws -> [TimelineMemorySummary] {
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        return []
+    }
+
+    /// 只保留原repo与固定发布代际；所有网络读取回到原actor验证，不能脱离原生命周期继续读取旧账户。
+    private nonisolated struct ManagementTimelineReader: TimelineReading {
+        let repository: ImmichTimelineRepository
+        let owner: UInt64
+
+        /// query原样交给原仓库前台读取，返回当前响应而非共享collection缓存。
+        func bucketSummaries(query: TimelineQuery) async throws -> [TimelineBucketSummary] {
+            try await repository.managementBuckets(query: query, owner: owner)
+        }
+
+        /// bucketID/query定义管理成员读取范围，owner检查覆盖请求前后。
+        func assets(in bucketID: TimelineBucketID, query: TimelineQuery) async throws -> [TimelineAssetSummary] {
+            try await repository.managementAssets(bucket: bucketID, query: query, owner: owner)
+        }
+
+        /// 管理相簿不返回回忆；仍通过原repo拒绝失效代际与取消任务。
+        func memories() async throws -> [TimelineMemorySummary] {
+            try await repository.managementMemories(owner: owner)
+        }
+    }
+
     func albums() async throws -> [AlbumSummary] {
         let (client, requestGeneration) = try requestContext()
         let albums = try await client.albums()

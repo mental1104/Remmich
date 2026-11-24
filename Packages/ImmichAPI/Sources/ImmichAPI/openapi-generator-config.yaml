@@ -23,6 +23,7 @@ filter:
     - getTimeBucket
     - searchAssets
     - searchSmart
+    - searchRandom
     - getSearchSuggestions
     - getAssetInfo
     - searchMemories

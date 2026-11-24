@@ -23,7 +23,8 @@ public struct ImmichQueuedReadTransport: ClientTransport {
         let isMetadata = operationID == "searchAssets" && request.path == "/search/metadata"
         let isSmart = operationID == "searchSmart" && request.path == "/search/smart"
         let isForkSmart = operationID == "forkSearchSmart" && request.path == "/fork/search/smart"
-        if request.method == .post, isMetadata || isSmart || isForkSmart, body != nil {
+        let isRandom = operationID == "searchRandom" && request.path == "/search/random"
+        if request.method == .post, isMetadata || isSmart || isForkSmart || isRandom, body != nil {
             return try await searchTransport.send(request, body: body, baseURL: baseURL, operationID: operationID)
         }
         guard request.method == .get, body == nil,

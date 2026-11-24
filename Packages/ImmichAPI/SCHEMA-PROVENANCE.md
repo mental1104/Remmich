@@ -1,5 +1,7 @@
 # Immich OpenAPI snapshot
 
+2026-11-24 organization follow-up: enable the existing official `searchRandom` operation in the generator filter. Its pinned RandomSearchDto already contains structured filter/size/withExif, and its success response is an unpaged AssetResponseDto array. No raw/prepared schema or generated Swift is edited; prepared SHA remains0e9eb423c0ad7781803312d24aff0574b050f3a7028ef8cb2a6f5d6fad703db3. Native random browsing sends explicit IMAGE/timeline/non-trash scope and does not invent cursor pagination. New Swift wire tests await macOS CI.
+
 - Source: sibling checkout `../immich/open-api/immich-openapi-specs.json`
 - Upstream commit: `520a70891b0e0fdb3f7d3fbca18232bfee322916`
 - Upstream describe: `v3.1.0-447-g520a70891`

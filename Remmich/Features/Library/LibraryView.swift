@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// 原生Library导航保留已有集合，同时提供真实随机照片与本人待整理相簿的独立入口。
 struct LibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.displayScale) private var displayScale
@@ -42,6 +43,7 @@ struct LibraryView: View {
     private let verticalPadding: CGFloat = 8
     private let panelAvatarInset: CGFloat = 12
 
+    /// 集合卡沿用现有卡片转场；组织入口仅在真实仓库与媒体通道可用时出现，不填充演示结果。
     var body: some View {
         let preferences = opening.preferences
         GeometryReader { geometry in
@@ -80,6 +82,21 @@ struct LibraryView: View {
                                 collectionCard(.recentlyTaken, source: collectionSource, media: media, assetDetails: assetDetails)
                                 collectionCard(.recentlyAdded, source: collectionSource, media: media, assetDetails: assetDetails)
                                 collectionCard(.favorites, source: collectionSource, media: media, assetDetails: assetDetails)
+                                LibraryHubLink {
+                                    LibraryRandomPhotosView(source: collectionSource, media: media, assetDetails: assetDetails)
+                                } label: {
+                                    LibraryCollectionCard(title: "Random photos", symbol: "shuffle", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-random-photos")
+                                LibraryHubLink {
+                                    LibraryPendingAlbumsView(source: collectionSource, ownerID: session.userID, media: media,
+                                                             assetDetails: assetDetails, context: collectionNavigation)
+                                } label: {
+                                    LibraryCollectionCard(title: "Pending albums", symbol: "tray", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-pending-albums")
                                 if preferences?.memoriesEnabled == true, !opening.memories.isConfirmedEmpty {
                                     LibraryMemoriesCard(source: collectionSource, media: media, assetDetails: assetDetails,
                                                         context: collectionNavigation, catalog: opening.memories,
