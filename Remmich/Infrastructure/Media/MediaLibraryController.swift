@@ -205,6 +205,8 @@ final class MediaLibraryController {
         Self.logger.info("App shell appeared startupElapsedMs=\(startupElapsed)")
     }
 
+    /// descriptor固定资源/规格，priority为当前界面优先级，useSavedPhotos允许复用同模式离线回执。
+    /// 远程派生图明确选edited=true并隔离旧缓存；显式original及本地Saved Photos保持原有读取语义。
     func imageRequest(
         for descriptor: MediaRequestDescriptor,
         priority: ImageRequest.Priority = .normal,
@@ -274,12 +276,15 @@ final class MediaLibraryController {
         }
         if useSavedPhotos, let scope, let pipeline,
            let tier = MediaExportTier.allCases.first(where: { $0.derivative == descriptor.derivative }),
-           exports.savedReceipt(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier) != nil
+           exports.savedReceipt(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier,
+                                requiredSourceMode: tier.requiredDisplaySourceMode) != nil
         {
             let remote = imageRequest(for: descriptor, priority: priority, useSavedPhotos: false)
             let exports = exports
-            var request = ImageRequest(id: "saved-photos|" + descriptor.cacheKey(in: scope), data: {
-                if let data = try await exports.localImageData(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier) {
+            var request = ImageRequest(id: "saved-photos|" + Self.displayCacheKey(for: descriptor, scope: scope), data: {
+                if let data = try await exports.localImageData(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier,
+                                                               requiredSourceMode: tier.requiredDisplaySourceMode)
+                {
                     guard await self.scope == scope else { throw CancellationError() }
                     return data
                 }
@@ -312,7 +317,7 @@ final class MediaLibraryController {
         var urlRequest = URLRequest(url: url)
         urlRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
         var request = ImageRequest(urlRequest: urlRequest)
-        request.imageID = descriptor.cacheKey(in: scope)
+        request.imageID = Self.displayCacheKey(for: descriptor, scope: scope)
         if isCacheOnly {
             // A saved URL supplies request identity, not permission to connect.
             // Nuke checks both cache layers before rejecting a cache-only miss.
@@ -354,10 +359,12 @@ final class MediaLibraryController {
         return request
     }
 
+    /// request为实际图片读取身份，descriptor固定导出资产/规格/版本；记录真缓存键，避免新展示误读旧未编辑数据。
     private func registerExportRequest(_ request: ImageRequest, descriptor: MediaRequestDescriptor) {
         let key = "\(descriptor.assetID)|\(descriptor.updatedAt.timeIntervalSince1970)|\(descriptor.derivative.rawValue)"
         guard let scope else { return }
-        let id = descriptor.cacheKey(in: scope)
+        // 展示派生图改用edited=true之后，导出回执须记实际请求身份；不能误读同revision的旧未编辑缓存。
+        let id = request.imageID ?? descriptor.cacheKey(in: scope)
         // Nuke stores original response bytes without thumbnail/processors,
         // while its public cache API can also store an encoded Thumbnail.
         // Only Thumbnail may use that variant: never substitute processed
@@ -391,6 +398,7 @@ final class MediaLibraryController {
         }
     }
 
+    /// assetID/revision/tier固定显式导出范围；返回已有同模式原始响应字节，无匹配时nil，不回退旧未编辑键或联网。
     func exportCachedData(assetID: String, revision: Date, tier: MediaExportTier) async -> Data? {
         let managedURL = tier == .thumbnail ? warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: assetID, revision: revision)] : nil
         if let url = managedURL,
@@ -402,7 +410,9 @@ final class MediaLibraryController {
         let key = "\(assetID)|\(revision.timeIntervalSince1970)|\(tier.derivative.rawValue)"
         let stored = await exportManifestLoad?.value ?? [:]
         var seen = Set<String>()
-        let identities = ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter { seen.insert($0).inserted }
+        let identities = ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter {
+            Self.isCompatibleExportIdentity($0, tier: tier) && seen.insert($0).inserted
+        }
         return await Task.detached(priority: .utility) { () -> Data? in
             for identity in identities {
                 if let data = cache.cachedData(for: identity), !data.isEmpty {
@@ -419,8 +429,7 @@ final class MediaLibraryController {
         return [.thumbnail]
     }
 
-    /// Menu availability only: look up this asset's registered keys and check
-    /// file existence. Reading/validating media belongs to the selected save.
+    /// asset固定菜单范围；仅检查该资产同模式缓存键/文件存在，不解码或联网，实际验证仍在显式保存流程。
     func exportCachedTiers(for asset: TimelineAssetSummary) async -> Set<MediaExportTier> {
         guard let owner = scope else { return [] }
         let cache = pipeline?.configuration.dataCache
@@ -430,7 +439,9 @@ final class MediaLibraryController {
         func keys(assetID: String, tier: MediaExportTier) -> [String] {
             let key = "\(assetID)|\(asset.thumbnailRevision.timeIntervalSince1970)|\(tier.derivative.rawValue)"
             var seen = Set<String>()
-            return ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter { seen.insert($0).inserted }
+            return ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter {
+                Self.isCompatibleExportIdentity($0, tier: tier) && seen.insert($0).inserted
+            }
         }
         let candidates = Dictionary(uniqueKeysWithValues: MediaExportTier.choices(video: asset.mediaKind == .video, live: asset.livePhotoVideoID != nil)
             .map { ($0, keys(assetID: asset.id, tier: $0)) })
@@ -668,11 +679,13 @@ final class MediaLibraryController {
         return url
     }
 
+    /// descriptor/scope为已验证展示记录，fileURL由新版缩略图manifest提供，priority/trace保留现有调度与诊断。
+    /// 返回独立edited缓存身份的本地读取；不自行声称旧无模式文件是编辑结果。
     private func managedThumbnailRequest(for descriptor: MediaRequestDescriptor, scope: MediaAccountScope, fileURL: URL,
                                          priority: ImageRequest.Priority, trace: TimelineContentTrace? = nil) -> ImageRequest
     {
         var request = ImageRequest(
-            id: descriptor.cacheKey(in: scope),
+            id: Self.displayCacheKey(for: descriptor, scope: scope),
             data: {
                 if let trace {
                     Self.logger.info(
@@ -1159,6 +1172,25 @@ final class MediaLibraryController {
         return pipeline
     }
 
+    /// descriptor固定资产、版本与解码规格；远程展示派生图单独命名，旧未编辑响应不能命中新语义。
+    /// original/video保持既有身份；本地Photos模式在调用此函数前已独立返回，不改变原片或视频读取。
+    private static func displayCacheKey(for descriptor: MediaRequestDescriptor, scope: MediaAccountScope) -> String {
+        switch descriptor.derivative {
+        case .thumbnail, .preview, .fullSize:
+            // 同一秒内编辑提交和派生完成也可能各自更新资源；保留Date精度，不能沿用省略小数的旧身份。
+            "server-edited-v1|" + descriptor.cacheKey(in: scope) + "|\(descriptor.updatedAt.timeIntervalSinceReferenceDate)"
+        case .original, .videoPlayback: descriptor.cacheKey(in: scope)
+        }
+    }
+
+    /// identity为既有导出manifest中的键，tier决定是否为展示派生图；旧未编辑键不能为新任务提供已编辑来源。
+    /// 明确original/playback保留既有键兼容性，不改变原片下载或回退策略。
+    private static func isCompatibleExportIdentity(_ identity: String, tier: MediaExportTier) -> Bool {
+        tier.requiredDisplaySourceMode == nil || identity.hasPrefix("server-edited-v1|") || identity.hasPrefix("saved-photos|server-edited-v1|")
+    }
+
+    /// descriptor决定官方资源路径及展示规格，apiURL是已验证端点或仅离线身份。
+    /// 展示优先已编辑派生图；original/video不附加edited，保留原片下载、分享与回退边界。
     private static func mediaURL(
         for descriptor: MediaRequestDescriptor,
         apiURL: URL
@@ -1177,11 +1209,11 @@ final class MediaLibraryController {
         )
         switch descriptor.derivative {
         case .thumbnail:
-            components?.queryItems = [.init(name: "size", value: "thumbnail")]
+            components?.queryItems = [.init(name: "size", value: "thumbnail"), .init(name: "edited", value: "true")]
         case .preview:
-            components?.queryItems = [.init(name: "size", value: "preview")]
+            components?.queryItems = [.init(name: "size", value: "preview"), .init(name: "edited", value: "true")]
         case .fullSize:
-            components?.queryItems = [.init(name: "size", value: "fullsize")]
+            components?.queryItems = [.init(name: "size", value: "fullsize"), .init(name: "edited", value: "true")]
         case .original, .videoPlayback:
             break
         }

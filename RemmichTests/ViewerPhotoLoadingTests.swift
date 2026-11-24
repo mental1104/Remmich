@@ -8,15 +8,17 @@ import UIKit
 @Suite("Viewer photo loading", .serialized)
 @MainActor
 struct ViewerPhotoLoadingTests {
+    /// selected覆盖当前页和相邻预载页；普通查看只读取明确edited=true的预览，不能隐式拉原片。
     @Test(arguments: [true, false])
     func ordinaryViewingRequestsPreviewOnly(selected: Bool) async throws {
         let fixture = try await makeFixture(selected: selected)
         defer { fixture.close() }
         try await waitUntil { fixture.state.metadata.last?.source == .preview }
-        #expect(fixture.loader.urls.map(\.query) == ["size=preview"])
+        #expect(fixture.loader.urls.map(\.query) == ["size=preview&edited=true"])
         #expect(fixture.loader.urls.allSatisfy { $0.lastPathComponent == "thumbnail" })
     }
 
+    /// 原片由显式requestID触发，后续页面任务重启不会重新降级或改变原片查询语义。
     @Test func originalRequiresExplicitRequestAndSurvivesTaskRestart() async throws {
         let fixture = try await makeFixture()
         defer { fixture.close() }
@@ -24,6 +26,8 @@ struct ViewerPhotoLoadingTests {
         fixture.state.requestID = 1
         try await waitUntil { fixture.state.metadata.last?.source == .original }
         #expect(fixture.loader.urls.map(\.lastPathComponent) == ["thumbnail", "original"])
+        // 原图仍需显式操作，且不继承展示预览的edited查询。
+        #expect(fixture.loader.urls.last?.query == nil)
         #expect(fixture.state.metadata.last?.pixelSize == .init(width: 64, height: 48))
 
         let previousCount = fixture.state.metadata.count
@@ -33,11 +37,12 @@ struct ViewerPhotoLoadingTests {
         #expect(fixture.loader.urls.count == 2)
     }
 
+    /// 展示预览失败仍保留已有缩略图；edited查询变化不能绕过失败fixture或引入自动原片回退。
     @Test func unavailablePreviewKeepsTheThumbnailWithoutFetchingOriginal() async throws {
         let fixture = try await makeFixture(failsPreview: true)
         defer { fixture.close() }
         try await waitUntil { fixture.loader.completedCount == 1 }
-        #expect(fixture.loader.urls.map(\.query) == ["size=preview"])
+        #expect(fixture.loader.urls.map(\.query) == ["size=preview&edited=true"])
         #expect(fixture.state.metadata.last?.source == .thumbnail)
         func containsThumbnail(_ view: UIView) -> Bool {
             (view as? UIImageView)?.image === fixture.thumbnail || view.subviews.contains(where: containsThumbnail)
@@ -157,6 +162,7 @@ private final class PhotoDataLoader: DataLoading, @unchecked Sendable {
         lock.withLock { completed }
     }
 
+    /// request为真实查看器读取；按size查询模拟预览失败，其余返回合成字节，不执行HTTP。
     func loadData(with request: URLRequest,
                   didReceiveData: @escaping @Sendable (Data, URLResponse) -> Void,
                   completion: @escaping @Sendable (Error?) -> Void) -> any Nuke.Cancellable
@@ -166,7 +172,7 @@ private final class PhotoDataLoader: DataLoading, @unchecked Sendable {
         let work = Task {
             await Task.yield()
             guard !Task.isCancelled else { return }
-            if failsPreview, url.query == "size=preview" {
+            if failsPreview, URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains(.init(name: "size", value: "preview")) == true {
                 completion(URLError(.notConnectedToInternet))
             } else {
                 let data = url.lastPathComponent == "original" ? original : preview

@@ -17,10 +17,11 @@ struct LibraryIndexSynchronizationTests {
         let record = try #require(snapshot.assets.first)
         let directory = fixture.cacheURL.appending(path: Self.scope.cacheNamespace).appending(path: "thumbnail")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data([1]).write(to: directory.appending(path: "one.jpg"))
+        let displayFilename = LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: record.updatedAt)
+        try Data([1]).write(to: directory.appending(path: displayFilename))
         try await store.upsert(derivatives: [.init(assetID: asset.id, derivative: .thumbnail, pixelSize: nil,
                                                    sourceRevision: record.updatedAt.ISO8601Format(),
-                                                   relativeFileKey: "thumbnail/one.jpg", byteCount: 1, digest: "fixture",
+                                                   relativeFileKey: "thumbnail/\(displayFilename)", byteCount: 1, digest: "fixture",
                                                    isVerified: true, lastAccessedAt: .now, completedAt: .now)], scope: Self.scope)
         let media = MediaLibraryController()
         let controller = LibraryIndexController(source: source, store: store, media: media,
@@ -157,11 +158,12 @@ struct LibraryIndexSynchronizationTests {
         let record = try #require(snapshot.assets.first)
         let directory = fixture.cacheURL.appending(path: Self.scope.cacheNamespace).appending(path: "thumbnail")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appending(path: "one.jpg")
+        let displayFilename = LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: record.updatedAt)
+        let file = directory.appending(path: displayFilename)
         try Data([1]).write(to: file)
         try await store.upsert(derivatives: [.init(assetID: asset.id, derivative: .thumbnail, pixelSize: nil,
                                                    sourceRevision: record.updatedAt.ISO8601Format(),
-                                                   relativeFileKey: "thumbnail/one.jpg", byteCount: 1, digest: "fixture",
+                                                   relativeFileKey: "thumbnail/\(displayFilename)", byteCount: 1, digest: "fixture",
                                                    isVerified: true, lastAccessedAt: .now, completedAt: .now)], scope: Self.scope)
         let details = SuspendedBackgroundAssetDetails()
         let controller = LibraryIndexController(source: source, store: store, assetDetails: details,
@@ -635,7 +637,7 @@ struct LibraryIndexSynchronizationTests {
                     derivative: .thumbnail,
                     pixelSize: nil,
                     sourceRevision: asset.updatedAt.ISO8601Format(),
-                    relativeFileKey: "thumbnail/cached-asset.jpg",
+                    relativeFileKey: "thumbnail/\(LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt))",
                     byteCount: 1234,
                     digest: "digest",
                     isVerified: true,
@@ -776,7 +778,7 @@ struct LibraryIndexSynchronizationTests {
                     derivative: .thumbnail,
                     pixelSize: nil,
                     sourceRevision: asset.updatedAt.ISO8601Format(),
-                    relativeFileKey: "thumbnail/asset.jpg",
+                    relativeFileKey: "thumbnail/\(LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt))",
                     byteCount: 100,
                     digest: "digest",
                     isVerified: true,
@@ -829,7 +831,7 @@ struct LibraryIndexSynchronizationTests {
                     derivative: .thumbnail,
                     pixelSize: nil,
                     sourceRevision: asset.updatedAt.ISO8601Format(),
-                    relativeFileKey: "thumbnail/asset.jpg",
+                    relativeFileKey: "thumbnail/\(LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt))",
                     byteCount: 100,
                     digest: "digest",
                     isVerified: true,
@@ -879,14 +881,14 @@ struct LibraryIndexSynchronizationTests {
             .appending(path: Self.scope.cacheNamespace, directoryHint: .isDirectory)
             .appending(path: MediaDerivative.thumbnail.rawValue, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
-        let existingFile = thumbnailDirectory.appending(path: "existing.bin")
+        let existingFile = thumbnailDirectory.appending(path: "edited-v1-existing.bin")
         try Data("existing".utf8).write(to: existingFile)
         let existingRecord = try LibraryIndexDerivativeRecord(
             assetID: asset.id,
             derivative: .thumbnail,
             pixelSize: nil,
             sourceRevision: asset.updatedAt.ISO8601Format(),
-            relativeFileKey: "thumbnail/existing.bin",
+            relativeFileKey: "thumbnail/edited-v1-existing.bin",
             byteCount: Int64(Data(contentsOf: existingFile).count),
             digest: "existing-digest",
             isVerified: true,
@@ -1182,7 +1184,7 @@ struct LibraryIndexSynchronizationTests {
             derivative: kind,
             pixelSize: nil,
             sourceRevision: "revision",
-            relativeFileKey: "\(kind.rawValue)/missing.bin",
+            relativeFileKey: "\(kind.rawValue)/edited-v1-missing.bin",
             byteCount: bytes,
             digest: "digest",
             isVerified: true,

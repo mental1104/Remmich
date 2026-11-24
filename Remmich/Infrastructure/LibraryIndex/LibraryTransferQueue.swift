@@ -333,8 +333,8 @@ actor LibraryTransferQueue {
                              errorCode: components.first { $0.state == .failed }?.errorCode))
     }
 
-    /// Import complete pairs first, rather than occupying import workers with
-    /// earlier requests that the native session has not delivered yet.
+    /// assets/owner限定当前资产及验证通道，两个ID集合为已存的图/元数据；返回可导入配对及交付游标。
+    /// 只接受明确edited=true的缩略图完成体，旧同revision响应不能阻塞或冒充当前配对。
     func readyCacheAssets(_ assets: [LibraryIndexAssetRecord], owner: LibraryTransferOwner,
                           thumbnailIDs: Set<String>, metadataIDs: Set<String>) throws -> (ids: Set<String>, revision: UInt64)
     {
@@ -343,7 +343,9 @@ actor LibraryTransferQueue {
         let ready = assets.filter { asset in
             let responses = jobs[asset.id, default: []].filter { $0.sourceRevision == asset.updatedAt.ISO8601Format() }
             func available(_ kind: LibraryTransferKind) -> Bool {
-                responses.contains { $0.kind == kind && ($0.state == .completed || $0.state == .failed) }
+                responses.contains { $0.kind == kind && ($0.state == .completed || $0.state == .failed)
+                    && (kind != .thumbnail || $0.url == LibraryThumbnailCache.displayThumbnailURL(assetID: asset.id, endpoint: owner.endpoint))
+                }
             }
             return (thumbnailIDs.contains(asset.id) || available(.thumbnail))
                 && (metadataIDs.contains(asset.id) || available(.metadata))
@@ -539,7 +541,8 @@ actor LibraryTransferQueue {
         try? persist()
     }
 
-    /// Only a bounded look-ahead is submitted to the OS, not the whole library.
+    /// assets只取有界窗口，scope/endpoint为验证通道，两个ID集合避免重复预取已完成的图/元数据。
+    /// 持久化明确edited展示请求，必要时取消旧语义cache对；不改原片导出或账号/队列生命周期。
     func prefetchCache(
         _ assets: [LibraryIndexAssetRecord], scope: MediaAccountScope, endpoint: URL,
         thumbnailIDs: Set<String>, metadataIDs: Set<String>
@@ -549,13 +552,13 @@ actor LibraryTransferQueue {
         for asset in assets.prefix(Self.cacheLookAheadAssets) {
             let revision = asset.updatedAt.ISO8601Format()
             discard(journal.discardStaleCacheAsset(asset.id, revision: revision))
-            if !thumbnailIDs.contains(asset.id),
-               var components = URLComponents(url: endpoint.appending(path: "assets/\(asset.id)/thumbnail"), resolvingAgainstBaseURL: false)
-            {
-                components.queryItems = [.init(name: "size", value: "thumbnail")]
-                if let url = components.url {
-                    _ = try? journal.job(url: url, kind: .thumbnail, owner: owner, sourceRevision: revision)
-                }
+            let thumbnailURL = LibraryThumbnailCache.displayThumbnailURL(assetID: asset.id, endpoint: endpoint)
+            // 冷启动旧队列可能包含同源版本的未编辑缩略图；丢弃该资产旧cache对，防止旧完成体被当作已准备展示。
+            if journal.jobs.contains(where: { $0.kind == .thumbnail && $0.assetID == asset.id && $0.url != thumbnailURL }) {
+                discard(journal.remove(lane: "cache", assetID: asset.id))
+            }
+            if !thumbnailIDs.contains(asset.id), let url = thumbnailURL {
+                _ = try? journal.job(url: url, kind: .thumbnail, owner: owner, sourceRevision: revision)
             }
             if !metadataIDs.contains(asset.id) {
                 _ = try? journal.job(url: endpoint.appending(path: "assets/\(asset.id)"), kind: .metadata, owner: owner, sourceRevision: revision)
