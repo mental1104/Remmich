@@ -1,3 +1,9 @@
+## 2026-11-24: Align runtime assertions with shipped reference search and edited media contracts
+
+- Source: codex/fix-candidate-runtime-contracts from424a22a; upstream remains672f02e. Actual App log artifact14922273023 from CI45394307543 reports830 tests/106 suites and11 issues. Three issues are stale contracts: supported reference-image restoration expected rejection, and two media URLs expected the pre-edited query string. Cache-related issues remain under separate source review; the run is still executing UI checks and no replacement is triggered.
+- Preserve and strengthen assertions: reference plus city must round-trip; malformed/non-v4 references and text/reference conflict must fail as a whole. Thumbnail/preview must contain exactly size and edited=true, retaining path/auth/size identity checks. No production code, assertion removal, compiler setting or CI gate changes.
+- Scoped SwiftFormat/diff checks pass on NAS; repaired Swift test execution remains unverified. No server/API/schema/production/signing changes. Revert this test-only contract update independently if superseded.
+
 ## 2026-11-24: Make new management HTTP fixture captures explicitly Sendable
 
 - Source: candidatea207b3b; upstream remains672f02e. CI45392189009/job138438516772 ended compilation failure with one source diagnostic at AlbumDirectoryManagementTests.swift:481: sending a Task closure risks a race. The previous batch macro errors are absent. App linking is not combined build/test success; API/app/UI execution remains incomplete.

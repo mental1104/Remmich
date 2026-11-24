@@ -988,6 +988,7 @@ struct RemmichTests {
         #expect(local.urlRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer ui-test-token")
     }
 
+    /// 缺失本机缓存回退到已编辑展示缩略图；精确检查两个参数，不能退回旧未编辑响应。
     @Test @MainActor func missingIndexedThumbnailFallsBackToActiveRoute() throws {
         let media = MediaLibraryController()
         let endpoint = try url("http://immich.local/api")
@@ -1012,7 +1013,10 @@ struct RemmichTests {
         let request = try #require(media.imageRequest(for: descriptor))
 
         #expect(request.url?.path == "/api/assets/missing-local-asset/thumbnail")
-        #expect(request.url?.query == "size=thumbnail")
+        let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        #expect(query.count == 2)
+        #expect(query.first { $0.name == "size" }?.value == "thumbnail")
+        #expect(query.first { $0.name == "edited" }?.value == "true")
         #expect(request.urlRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer ui-test-token")
     }
 
@@ -1092,6 +1096,7 @@ struct RemmichTests {
         #expect(display.targetPixels == targetPixels)
     }
 
+    /// 查看器预览保留目标像素和preview规格，同时明确请求服务端已编辑版本。
     @Test @MainActor func viewerPreviewUsesTheSizedPreviewDerivative() throws {
         let media = MediaLibraryController()
         media.configure(session: .fixture, activeEndpoint: AccountSession.fixture.apiURL)
@@ -1107,7 +1112,10 @@ struct RemmichTests {
         #expect(descriptor.derivative == .preview)
         #expect(descriptor.targetPixels == targetPixels)
         #expect(request.url?.path == "/api/assets/viewer-preview-asset/thumbnail")
-        #expect(request.url?.query == "size=preview")
+        let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        #expect(query.count == 2)
+        #expect(query.first { $0.name == "size" }?.value == "preview")
+        #expect(query.first { $0.name == "edited" }?.value == "true")
     }
 
     @Test func fullSizeRedirectKeepsAuthorizationOnTheImmichOrigin() throws {
