@@ -1148,6 +1148,7 @@ struct AssetViewerView: View {
             {
                 LivePhotoPlaybackView(
                     assetID: asset.id,
+                    assetRevision: asset.thumbnailRevision,
                     motionAssetID: motionAssetID,
                     media: media,
                     isHeld: livePhotoPlaybackAssetID == asset.id,

@@ -1,6 +1,10 @@
 # 本机Live Photo动态配对与宿主整合
 
-这是从本地优先候选44dbafd独立继续的工作，不在该候选正在运行的CI45412142375中。当前仅先落下远端配对领域与详情DTO，PhotoKit reader、原生PhotosUI视图和实际宿主桥接分别整合；不得将这些独立组件当成已交付的本机动态播放。
+这是从本地优先候选44dbafd独立继续的工作。当前候选a7138e0的CI45418380493已联合编译，API步骤通过并进入App测试；本文native动态整合不在该受测提交中，不能复用其收据宣称编译或验收通过。
+
+远端配对领域/详情DTO、专用PhotoKit proof与native reader、PHLivePhotoView组件、音频请求controller、严格Live still SHA1政策及实际查看器/MediaLibraryController桥接现已整合。宿主在任何原有远端motion准备之前等待已验证本机结果；账号/版本/来源失效或退后台取消准备，只有当前合法miss才回退。
+
+每次长按轮换播放token并为native建立新view身份；松手/页面退出立即退休旧回调。音频请求有独立UUID所有权，旧成功/失败不改变或停用新轮声音。native读取必须匹配完整motion proof快照，前后重读远端pair；无CloudID的严格未编辑Live可仅对still SHA1建立静态关联，不能由此推断motion相同。
 
 44dbafd的Live Photo静态帧可以本机命中，但既有LivePhotoPlaybackView打开时会预备远端motion；因此还需在任何远端预备之前选择已验证本机动态。不能因为still匹配就推断配对视频相同，也不能把photoLive PHAsset传给仅承诺video的requestPlayerItem。
 
@@ -8,4 +12,6 @@
 
 后续宿主必须将独立本机pairedVideo字节证明与motion checksum相等后，才请求PhotoKit current PHLivePhoto（network=false）；本机源/权限、账号/端点代际、关联及远端pair版本均需前后复核。首版仅支持可证明未调整的唯一photo+pairedVideo；已编辑/复合/资源不明走原有安全回退。目标是避免Immich媒体下载，允许必要fresh元数据，不导出原片或写设备照片。
 
-领域新增3函数/26场景，实际3个Swift文件格式与diff检查通过。NAS无Swift/Xcode；这些测试未编译/执行，真实PHLivePhoto对象、Photos授权及系统动画/音频仍未验。不会用PHLivePhoto()伪造可播放正例。无API/SDK/数据库/生产/CI配置或当前PR头变更。回退独立源码/宿主桥接不删除媒体或恢复资料。
+领域、reader、真实Media路由、native组件命令、音频非合作取消及Live still流式SHA1均有对应新增测试；格式与diff检查通过。NAS无Swift/Xcode，native分支测试仍未编译/执行，真实PHLivePhoto成功对象、Photos授权及系统动画/音频仍未验；当前nil回调/命令与取消测试不能证明真实播放或最终非nil后的双fresh分支通过。不会用PHLivePhoto()伪造可播放正例；公开重建API的本地合成pair格式仍需独立实验证据。
+
+无服务端/API/SDK/数据库/生产/当前PR头或workflow变更；现有CLI契约编译输入新增两个纯Foundation领域文件。回退独立源码/宿主桥接不删除媒体或恢复资料。本文候选须在旧CI终态后整合进PR，再跑唯一新验证链。
