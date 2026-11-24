@@ -2,6 +2,7 @@ import Foundation
 import ImmichAPI
 import OSLog
 
+/// 真实Immich读取适配器；持有当前账号/端点代际，拒绝把旧上下文响应发布给Feature。
 actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReading, AlbumReading {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -19,12 +20,16 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     private var client: ImmichClient?
     private var generation: UInt64 = 0
     private let transfers: LibraryTransferQueue?
+    private let readLoader: ImmichQueuedReadTransport.Loader?
     private var collectionStore: SQLiteLibraryIndexStore?
     private var collectionReads: [TimelineQuery: LibraryOpeningBuckets] = [:]
     private var collectionRequests: [String: Task<any Sendable, Error>] = [:]
 
-    init(transfers: LibraryTransferQueue? = nil) {
+    /// transfers为原持久读取队列；readLoader仅替换HTTP字节来源，仍经过SDK只读策略、认证和本层代际检查。
+    /// 默认nil沿用原生产传输；不在生产构造点注入替身，也不改变搜索POST的受限前台传输。
+    init(transfers: LibraryTransferQueue? = nil, readLoader: ImmichQueuedReadTransport.Loader? = nil) {
         self.transfers = transfers
+        self.readLoader = readLoader
     }
 
     @discardableResult
@@ -55,7 +60,10 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             client = nil
             return true
         }
-        if let transfers {
+        if let readLoader {
+            client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
+                                  transport: ImmichQueuedReadTransport(loader: readLoader))
+        } else if let transfers {
             let owner = LibraryTransferOwner(session: session, endpoint: endpoint)
             client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
                                   transport: ImmichQueuedReadTransport { request, operation in

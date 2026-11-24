@@ -36,14 +36,32 @@ struct NativeSearchTagTests {
             let conditions = try NativeSearchPresetCodec.capture(query)
             #expect(try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone).tags == tags)
         }
-        for ids in [[], ["invalid"], [Self.firstID, Self.firstID.uppercased()], Array(repeating: Self.firstID, count: 101)] {
+        for ids in [[], ["invalid"], [Self.firstID, Self.firstID.uppercased()], syntheticNativeTagIDs(count: 101),
+                    ["aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"], ["aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa"],
+                    ["00000000-0000-0000-0000-000000000000"]]
+        {
             var conditions = NativeSearchPresetConditions()
             conditions.city = "Synthetic City"
             conditions.tagIds = .value(ids)
             #expect(throws: NativeSearchPresetConversionError.self) {
                 try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
             }
+            var query = NativeSearchQuery()
+            query.tags = .anyOf(ids)
+            #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.capture(query) }
         }
+    }
+
+    /// 100个不同UUID的顺序和数量在编码/解码后完整往返，不因去重检查掩盖数量边界。
+    @Test func roundTripsOneHundredDistinctTagIDs() throws {
+        var query = NativeSearchQuery()
+        query.tags = .anyOf(syntheticNativeTagIDs(count: 100))
+        let conditions = try NativeSearchPresetCodec.capture(query)
+        let data = try JSONEncoder().encode(conditions)
+        let decoded = try JSONDecoder().decode(NativeSearchPresetConditions.self, from: data)
+        let restored = try NativeSearchPresetCodec.restore(decoded, timeZone: query.timeZone)
+        #expect(restored == query)
+        #expect(restored.tags.selectedIDs.count == 100)
     }
 
     /// 选择按UUID大小写不敏感；取消最后一项恢复不限制，未改变的绑定值不能清除另一态。
@@ -63,4 +81,9 @@ struct NativeSearchTagTests {
         filter.setSelected(Self.secondID, selected: false)
         #expect(filter == .any)
     }
+}
+
+/// count为1–101的测试边界；返回互异UUID v4，101项只违反数量上限，不同时违反重复ID约束。
+private nonisolated func syntheticNativeTagIDs(count: Int) -> [String] {
+    (1 ... count).map { String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012llx", UInt64($0)) }
 }

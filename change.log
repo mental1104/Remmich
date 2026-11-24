@@ -14,6 +14,15 @@
 - Add SDK wire tests for every category/resolution pair on both routes and two pages, independent/omitted conditions, plus full/standalone native preset round trips. Scoped SwiftFormat0.64.5 lint and diff checks passed; Swift compilation/test execution and iPhone/iPad acceptance remain pending CI. No private media access or special viewer implementation.
 - Parent remains on its verified child baseline until pushed child integration passes CI. Rollback: revert this feature/schema-input additions, retaining server presets and media. Overall search stage remains incomplete.
 
+## 2026-11-24: Match tag UUID contracts and isolate late candidates
+
+- Source: codex/fix-search-tags-contract fromaa90693; upstream remains672f02e, no upstream sync. No server/API/schema/database/production or workflow changes. Existing native tag behavior and missing/null/value semantics remain intact.
+- Validate selected and returned tag IDs as UUID v4 with the RFC variant, matching the owning server's structured IdsFilter. Native preset capture/restore rejects unsupported UUID versions/variants atomically; SDK rejects them before sending or publishing candidates. Add invalid-version/variant fixtures on both boundaries.
+- Replace the ambiguous101-duplicate-ID fixture with101 distinct valid IDs; add100-distinct-ID positive tests for metadata/Fork-smart two-page bodies and native encoded preset round trips. Duplicate IDs remain a separate rejected case, so count and uniqueness constraints no longer mask each other.
+- Add an internal optional readLoader initializer parameter to ImmichTimelineRepository, defaultnil. Production constructors remain unchanged. Injected bytes still pass through generated GET construction, read-only policy, authentication, queued-read route checks, response decoding and repository generation checks; search POST retains its restricted foreground transport. No global URLProtocol registration or extra credentials are introduced.
+- New tag-only isolation fixtures delay a valid SDK GET response, then switch account on the same endpoint, switch endpoint within the same account, or clear/reconfigure the session. Current-context candidates succeed before the obsolete response is released; old results must fail with staleGeneration. The fixture also asserts exact GET paths and synthetic Bearer headers, without network or persistent media reads.
+- Local SwiftFormat0.64.5 formatting/lint and git diff checks passed. NAS has no Swift compiler; new package/app tests have not executed and await root's integrated macOS CI. No push, merge or CI trigger in this subtask. Rollback by reverting this repair; saved conditions and media need no recovery.
+
 ## 2026-11-24: Native tag search and complete saved-condition reuse
 
 - Source: codex/feature-search-tags from advanced-smart9969913; upstream remains672f02e, no upstream sync. No server/API/database/schema snapshot change, deployment, tag management or photo write. The existing local Fork-smart implementation is not deployed.

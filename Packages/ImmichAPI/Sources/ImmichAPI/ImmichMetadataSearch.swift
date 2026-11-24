@@ -105,6 +105,12 @@ public enum ImmichSearchResolution: String, CaseIterable, Sendable {
 /// 标签条件区分不限制、无标签和任一所选标签（含后代）；ID数组须非空且最多100项。
 public enum ImmichSearchTagFilter: Hashable, Sendable {
     case any, untagged, anyOf([String])
+
+    /// value为候选或保存的标签ID；只有服务端IdsFilter接受的UUID v4及RFC variant返回true。
+    static func isValidID(_ value: String) -> Bool {
+        guard let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuid.6 & 0xF0 == 0x40 && uuid.uuid.8 & 0xC0 == 0x80
+    }
 }
 
 /// 官方账号标签候选，仅保留搜索选择需要的身份和完整层级名称，不提供写入能力。

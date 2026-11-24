@@ -383,15 +383,15 @@ public actor ImmichClient {
         return .init(eq: value)
     }
 
-    /// tags为三态过滤；返回任一匹配的ID数组或nil，空/重复/非法UUID在请求前拒绝。
+    /// tags为三态过滤；返回任一匹配的ID数组或nil，空/重复/非UUID v4在请求前拒绝。
     private func selectedSearchTagIDs(_ tags: ImmichSearchTagFilter) throws -> [String]? {
         guard case let .anyOf(ids) = tags else { return nil }
-        guard (1 ... 100).contains(ids.count), ids.allSatisfy({ UUID(uuidString: $0) != nil }),
+        guard (1 ... 100).contains(ids.count), ids.allSatisfy(ImmichSearchTagFilter.isValidID),
               Set(ids.map { $0.lowercased() }).count == ids.count else { throw ImmichAPIError.invalidResponse }
         return ids
     }
 
-    /// 读取当前凭据可见的官方标签候选；返回完整层级名称，不进行标签或资产写入。
+    /// 读取当前凭据可见的官方标签候选；返回完整层级名称，拒绝重复/非UUID v4身份，不写入标签或资产。
     public func searchTags() async throws -> [ImmichSearchTag] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         do {
@@ -402,7 +402,7 @@ public actor ImmichClient {
                 let tags = try response.body.json
                 guard Set(tags.map { $0.id.lowercased() }).count == tags.count else { throw ImmichAPIError.invalidResponse }
                 return try tags.map { tag in
-                    guard UUID(uuidString: tag.id) != nil, !tag.value.isEmpty else { throw ImmichAPIError.invalidResponse }
+                    guard ImmichSearchTagFilter.isValidID(tag.id), !tag.value.isEmpty else { throw ImmichAPIError.invalidResponse }
                     return ImmichSearchTag(id: tag.id.lowercased(), value: tag.value)
                 }
             case let .undocumented(statusCode, _):

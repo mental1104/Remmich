@@ -77,7 +77,7 @@ nonisolated enum NativeSearchPresetCodec {
         case .missing: query.tags = .any
         case .null: query.tags = .untagged
         case let .value(ids):
-            guard (1 ... 100).contains(ids.count), ids.allSatisfy({ UUID(uuidString: $0) != nil }),
+            guard (1 ... 100).contains(ids.count), ids.allSatisfy(NativeSearchTagFilter.isValidID),
                   Set(ids.map { $0.lowercased() }).count == ids.count else { throw NativeSearchPresetConversionError.invalid }
             query.tags = .anyOf(ids)
         }

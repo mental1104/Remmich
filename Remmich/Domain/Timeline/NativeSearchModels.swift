@@ -112,6 +112,12 @@ nonisolated enum NativeSearchResolution: String, Codable, CaseIterable, Sendable
 nonisolated enum NativeSearchTagFilter: Hashable, Sendable {
     case any, untagged, anyOf([String])
 
+    /// value为保存或选择的标签ID；只接受与服务端结构化搜索同义的UUID v4及RFC variant。
+    static func isValidID(_ value: String) -> Bool {
+        guard let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuid.6 & 0xF0 == 0x40 && uuid.uuid.8 & 0xC0 == 0x80
+    }
+
     /// 返回当前选中ID，其他两态返回空数组；仅供界面选择，不将空数组编码为查询。
     var selectedIDs: [String] {
         if case let .anyOf(ids) = self {

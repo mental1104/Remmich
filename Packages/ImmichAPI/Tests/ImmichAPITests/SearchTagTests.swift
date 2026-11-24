@@ -54,6 +54,26 @@ struct SearchTagTests {
         }
     }
 
+    /// mode覆盖metadata/Fork-smart；100个不同UUID必须在首屏及续页完整发送，证明上限包含100。
+    @Test(arguments: [ImmichMetadataSearch.Mode.fileName, .smart])
+    func acceptsOneHundredDistinctTagIDs(_ mode: ImmichMetadataSearch.Mode) async throws {
+        var query = ImmichMetadataSearch()
+        query.mode = mode
+        query.text = "synthetic"
+        query.city = "Synthetic City"
+        query.tags = .anyOf(syntheticTagIDs(count: 100))
+        let transport = ImmichQueuedReadTransport(searchTransport: TagFilterTransport(mode: mode, tags: query.tags)) { _, _ in
+            Issue.record("Tag search POST must not enter the GET queue")
+            throw CancellationError()
+        }
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
+        let first = try await client.search(query)
+        #expect(first.continuation == (mode == .smart ? .forkCursor("tag-next") : .cursor("tag-next")))
+        let last = try await client.search(query, continuation: first.continuation)
+        #expect(last.continuation == nil)
+    }
+
     /// 非法、空、重复或超量ID不能作为任一匹配条件发送；匿名候选读取也必须先拒绝。
     @Test func rejectsInvalidTagSelectionsBeforeSending() async throws {
         let transport = TagNeverSendTransport()
@@ -61,7 +81,10 @@ struct SearchTagTests {
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
         let anonymous = ImmichClient(apiURL: url, transport: transport)
         await #expect(throws: ImmichAPIError.unauthorized) { try await anonymous.searchTags() }
-        for ids in [[], ["invalid"], [Self.firstID, Self.firstID.uppercased()], Array(repeating: Self.firstID, count: 101)] {
+        for ids in [[], ["invalid"], [Self.firstID, Self.firstID.uppercased()], syntheticTagIDs(count: 101),
+                    ["aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa"], ["aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa"],
+                    ["00000000-0000-0000-0000-000000000000"]]
+        {
             for mode in [ImmichMetadataSearch.Mode.fileName, .smart] {
                 var query = ImmichMetadataSearch()
                 query.mode = mode
@@ -70,6 +93,21 @@ struct SearchTagTests {
                 await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
             }
         }
+    }
+
+    /// id覆盖UUID版本和variant错误；候选响应不得把不能执行的ID发布为可选择标签。
+    @Test(arguments: ["aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa", "aaaaaaaa-aaaa-4aaa-7aaa-aaaaaaaaaaaa"])
+    func rejectsCandidateIDsOutsideTheServerContract(_ id: String) async throws {
+        let transport = ImmichQueuedReadTransport { request, _ in
+            let url = try #require(request.url)
+            let response = try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                                        headerFields: ["Content-Type": "application/json"]))
+            let json = #"[{"id":"\#(id)","name":"Synthetic","value":"Synthetic","createdAt":"2026-11-01T00:00:00Z","updatedAt":"2026-11-01T00:00:00Z"}]"#
+            return (Data(json.utf8), response)
+        }
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.searchTags() }
     }
 
     /// status是官方标签读取失败；401/403/404不被改为空候选或不受限查询。
@@ -86,6 +124,11 @@ struct SearchTagTests {
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
         await #expect(throws: ImmichClient.map(status: status)) { try await client.searchTags() }
     }
+}
+
+/// count为1–101的测试边界；返回有序、互异且固定版本/variant的UUID，不依赖随机数。
+private func syntheticTagIDs(count: Int) -> [String] {
+    (1 ... count).map { String(format: "aaaaaaaa-aaaa-4aaa-8aaa-%012llx", UInt64($0)) }
 }
 
 /// 检查最终HTTP JSON的标签与其他条件，返回完整合成终页。
