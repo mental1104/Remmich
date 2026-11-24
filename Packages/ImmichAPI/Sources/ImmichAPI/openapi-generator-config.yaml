@@ -29,6 +29,7 @@ filter:
     - getAllAlbums
     - getAlbumInfo
     - getAllPeople
+    - getAllTags
     - getAllSharedLinks
     - getPartners
     - getUniqueOriginalPaths

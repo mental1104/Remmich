@@ -456,6 +456,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
         dto.lensModel = query.lensModel
+        dto.tags = switch query.tags { case .any: .any; case .untagged: .untagged; case let .anyOf(ids): .anyOf(ids) }
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
         dto.mediaCategory = try query.mediaCategory.map { category in
             guard let mapped = ImmichSearchMediaCategory(rawValue: category.rawValue) else { throw NativeSearchError.invalidQuery }
@@ -514,6 +515,16 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             }
             throw NativeSearchError.unavailable
         }
+    }
+
+    /// 当前账号标签候选不写入持久索引；身份/端点变化后的迟到响应必须丢弃。
+    func searchTags() async throws -> [NativeSearchTag] {
+        let (client, owner) = try requestContext()
+        let values = try await client.searchTags()
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        return values.map { NativeSearchTag(id: $0.id, value: $0.value) }
+            .sorted { $0.value.localizedStandardCompare($1.value) == .orderedAscending }
     }
 
     /// kind指定候选字段，query提供厂商/型号约束；拒绝账号/路由变化后的迟到响应。

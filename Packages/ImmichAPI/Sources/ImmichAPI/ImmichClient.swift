@@ -332,6 +332,7 @@ public actor ImmichClient {
     /// query为完整原生条件；metadata/Fork智能路径共用同一映射，非法日期或原子条件在网络前拒绝。
     private func structuredSearchFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.SearchFilter {
         guard query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        let tagIDs = try selectedSearchTagIDs(query.tags)
         let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
         let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
         if let after, let before, after > before {
@@ -343,6 +344,7 @@ public actor ImmichClient {
             country: query.country.isEmpty ? nil : .init(eq: query.country),
             description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
             hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+            hasTags: query.tags == .untagged ? .init(eq: false) : nil,
             isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
             lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
             make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
@@ -353,6 +355,7 @@ public actor ImmichClient {
             personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
             rating: ratingFilter(query.rating),
             state: query.state.isEmpty ? nil : .init(eq: query.state),
+            tagIds: tagIDs.map { .init(any: $0) },
             takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
             trashedAt: .init(eq: .null),
             _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
@@ -378,6 +381,34 @@ public actor ImmichClient {
         guard let resolution else { return nil }
         guard let value = Components.Schemas.MediaResolution(rawValue: resolution.rawValue) else { throw ImmichAPIError.invalidResponse }
         return .init(eq: value)
+    }
+
+    /// tags为三态过滤；返回任一匹配的ID数组或nil，空/重复/非法UUID在请求前拒绝。
+    private func selectedSearchTagIDs(_ tags: ImmichSearchTagFilter) throws -> [String]? {
+        guard case let .anyOf(ids) = tags else { return nil }
+        guard (1 ... 100).contains(ids.count), ids.allSatisfy({ UUID(uuidString: $0) != nil }),
+              Set(ids.map { $0.lowercased() }).count == ids.count else { throw ImmichAPIError.invalidResponse }
+        return ids
+    }
+
+    /// 读取当前凭据可见的官方标签候选；返回完整层级名称，不进行标签或资产写入。
+    public func searchTags() async throws -> [ImmichSearchTag] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        do {
+            let output = try await makeClient().getAllTags(.init())
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let tags = try response.body.json
+                guard Set(tags.map { $0.id.lowercased() }).count == tags.count else { throw ImmichAPIError.invalidResponse }
+                return try tags.map { tag in
+                    guard UUID(uuidString: tag.id) != nil, !tag.value.isEmpty else { throw ImmichAPIError.invalidResponse }
+                    return ImmichSearchTag(id: tag.id.lowercased(), value: tag.value)
+                }
+            case let .undocumented(statusCode, _):
+                throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
     }
 
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。

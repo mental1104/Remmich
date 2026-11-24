@@ -39,6 +39,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
         result.lensModel = query.lensModel.isEmpty ? nil : query.lensModel
+        result.tagIds = switch query.tags { case .any: .missing; case .untagged: .null; case let .anyOf(ids): .value(ids) }
         result.personIds = query.personIDs.isEmpty ? nil : query.personIDs
         result.mediaType = switch query.media { case .all: nil; case .image: .image; case .video: .video }
         result.albumStatus = query.hasAlbums.map { $0 ? .inAlbum : .notInAlbum }
@@ -53,7 +54,7 @@ nonisolated enum NativeSearchPresetCodec {
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
-            || result.lensModel != nil || result.rating != .missing
+            || result.lensModel != nil || result.rating != .missing || result.tagIds != .missing
             || result.isPanorama != nil || result.mediaCategory != nil || result.resolution != nil
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
@@ -64,13 +65,20 @@ nonisolated enum NativeSearchPresetCodec {
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
         guard conditions.queryAssetId == nil,
-              conditions.deviceModels == nil,
-              conditions.tagIds == .missing
+              conditions.deviceModels == nil
         else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
         guard conditions.isArchive != false, conditions.isFavorite != false, conditions.isPanorama != false else { throw NativeSearchPresetConversionError.invalid }
         query.archivedOnly = conditions.isArchive == true
         query.favoritesOnly = conditions.isFavorite == true
+        switch conditions.tagIds {
+        case .missing: query.tags = .any
+        case .null: query.tags = .untagged
+        case let .value(ids):
+            guard (1 ... 100).contains(ids.count), ids.allSatisfy({ UUID(uuidString: $0) != nil }),
+                  Set(ids.map { $0.lowercased() }).count == ids.count else { throw NativeSearchPresetConversionError.invalid }
+            query.tags = .anyOf(ids)
+        }
         switch conditions.rating {
         case .missing: query.rating = .any
         case .null: query.rating = .unrated
