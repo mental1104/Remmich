@@ -6,6 +6,7 @@ accessModifier: internal
 typeOverrides:
   schemas:
     NumberFilterNullable: ImmichNullableNumberFilter
+    DateFilterNullable: ImmichNullableDateFilter
     NullableLegacySearchRating: ImmichNullableRatingValue
 filter:
   operations:

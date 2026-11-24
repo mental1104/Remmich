@@ -1,3 +1,12 @@
+## 2026-11-24: Nullable dates preserve default non-trash search scope
+
+- Source: codex/feature-search-rating overb962351; upstream remains672f02e. No upstream sync, server/API/database/production change.
+- Extend the same nullable encoding repair to the existing DateFilterNullable schema through a documented type override. Preserve all six official date operators and absent/null/date states; no schema snapshot or generated Swift edits.
+- Normal metadata search and the existing standalone video list now explicitly send trashedAt.eq:null, avoiding accidental inclusion of trashed assets through an empty/omitted filter. Archived search remains archive-only, without trashed content. The server's structured API defaults remain unchanged.
+- Add a metadata wire assertion, a video regression, generated-SDK ISO8601/date-null checks and date-filter round trips. Local SwiftFormat/diff checks passed; these tests await CI together with the rating repair. No physical-device acceptance or private-media access.
+- Baseline evidence: dev67ec731 passed post-merge Build45340652820 and Tests45341601145, including package/simulator app tests and tested-revision receipt. Those results do not validate this follow-up. PR #4 remains draft until this commit is pushed and marked ready; no paid runner or concurrent build introduced.
+- Rollback: revert this follow-up/config; no media recovery. Reverting restores the known default-scope defect and must be assessed before release. Full extended-search and synthetic UI work remain outstanding.
+
 ## 2026-11-24: Preserve unrated legacy smart search
 
 - Source: codex/feature-search-rating overb27ed08; upstream remains672f02e, no upstream sync or server/database/production change.

@@ -297,7 +297,7 @@ public actor ImmichClient {
         }
     }
 
-    /// 按文件名和已选字段读取真实资源；query 不变，cursor 为上页原始令牌，size 为1–1000。
+    /// 按文件名和已选字段读取非回收站资源；query不变，cursor为上页原始令牌，size为1–1000。
     /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
@@ -326,6 +326,7 @@ public actor ImmichClient {
                 rating: ratingFilter(query.rating),
                 state: query.state.isEmpty ? nil : .init(eq: query.state),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
+                trashedAt: .init(eq: .null),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
                 visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
                 iso: numericFilter(.iso, conditions: query.exifConditions),
@@ -463,6 +464,7 @@ public actor ImmichClient {
         }
     }
 
+    /// 读取时间线中的非回收站视频；cursor为服务端令牌、size为1–1000，返回可继续分页的实际视频。
     public func videoAssets(cursor: String? = nil, size: Int = 100) async throws -> ImmichVideoPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
@@ -470,6 +472,7 @@ public actor ImmichClient {
             let output = try await makeClient().searchAssets(.init(body: .json(.init(
                 cursor: cursor,
                 filter: .init(
+                    trashedAt: .init(eq: .null),
                     _type: .init(eq: .VIDEO),
                     visibility: .init(eq: .timeline)
                 ),

@@ -8,6 +8,8 @@
 - Prepared SHA-256: `15ca29352b3cbe04993c6ba7767e960c0cf7f76d89345354f74d850435533833`
 - Copied: 2026-09-27
 
+2026-11-24 nullable-date follow-up: the existing DateFilterNullable schema is also mapped to a handwritten Codable type so trashedAt.eq:null survives encoding. All six date operators remain available, with Date values handled by the SDK's ISO8601 strategy. This adds no schema transformation; the prepared hash above remains unchanged. Generated-SDK wire tests are included and await CI.
+
 2026-11-24 nullable-rating follow-up: extract the original SmartSearchDto.rating leaf unchanged into NullableLegacySearchRating and replace the inline leaf with a reference. The generator's documented typeOverrides maps that leaf and NumberFilterNullable to handwritten Codable types, allowing explicit null while retaining omitted fields. Normalizing the reference back to its leaf produces a document identical to the prior prepared snapshot; min/max/nullable/history and every other schema value are preserved. Raw upstream hash remains unchanged, preparation is idempotent, and generated Swift remains build-plugin output. New Swift compilation/wire tests are pending; this is not a server API change.
 - Transformations: `Scripts/prepare-immich-schema.py` removes deprecated flat metadata request fields. It retains `SearchAssetResponseDto.nextPage`, now used for official legacy smart pagination, alongside metadata `nextCursor`. It also limits the authenticated user config decoder to map settings and the optional external domain used for shared links. This lets Remmich load maps from server responses that omit unrelated fields such as `theme`.
 
