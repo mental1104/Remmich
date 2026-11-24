@@ -74,7 +74,8 @@ final class AlbumsStore {
         didShowCover = true
     }
 
-    func load() async {
+    /// fresh为true表示写入后明确重载；必须调用前台能力，缺失/失败时保留旧展示并显示错误，不伪造刷新。
+    func load(fresh: Bool = false) async {
         generation &+= 1
         let request = generation
         isLoading = true
@@ -88,7 +89,13 @@ final class AlbumsStore {
         do {
             guard !Task.isCancelled, request == generation else { return }
             async let directory = reader.forkAlbumDirectory()
-            let values = try await reader.albums()
+            let values: [AlbumSummary]
+            if fresh {
+                guard let foreground = reader as? any ManagementAlbumReading else { throw TimelineReadError.routeUnavailable }
+                values = try await foreground.foregroundAlbums()
+            } else {
+                values = try await reader.albums()
+            }
             let forkResult: ForkAlbumDirectory?
             let forkError: String?
             do {

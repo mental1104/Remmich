@@ -1,3 +1,10 @@
+## 2026-11-24: Connect parallel management slices to the real Albums page
+
+- Source: codex/feature-parallel-client-slices integrates backupf1b53f6, organization309dd5c, batchb10dcc4, directorycfe4421, editoree01628/be0a181/494bb1c over searchb26fa53. Upstream remains672f02e; no server/API/production changes or workflow execution.
+- Pass actual source/media into AlbumManagementView and publish the repository's existing foreground timeline capability, making batch members/cover reachable. Add explicit foreground album-list reads through the authenticated SDK; write revisions, management dismissal and manual refresh bypass completed index GETs. Failed fresh reads retain old display with an error rather than reporting old cached content as newly loaded.
+- Add actual AlbumsStore old/new/failed-source scenarios and repeated real repository→SDK→HTTP reads with new response bytes. Scoped SwiftFormat/diff checks passed; Swift compilation and these tests remain unexecuted on NAS. Viewer bridge, account-takeover acceptance and other committed slices are being integrated separately before the unified CI candidate.
+- Preserve every feature's independent commits and actual validation notes. Tonight21:00 Asia/Shanghai is the user's requested candidate-build target; this does not mark stages2–5 complete or authorize deployment, signing-secret transfer or untested dev merges.
+
 ## 2026-11-24: Make preset HTTP fixture Task capture explicitly Sendable
 
 - Source: codex/feature-search-completion over364a54f; upstream remains672f02e. No server/API/database/production or workflow change.

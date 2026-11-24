@@ -722,6 +722,21 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
     }
 
+    /// 写入后的相簿列表必须绕过已完成索引GET；每次响应前后仍核对原仓库账号/端点代际。
+    func foregroundAlbums() async throws -> [AlbumSummary] {
+        let (_, owner) = try requestContext()
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.albums()
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
     func albums() async throws -> [AlbumSummary] {
         let (client, requestGeneration) = try requestContext()
         let albums = try await client.albums()
