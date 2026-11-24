@@ -297,7 +297,7 @@ public actor ImmichClient {
         }
     }
 
-    /// 按文件名和已选字段读取真实资源；query 不变，cursor 为上页原始令牌，size 为1–1000。
+    /// 按文件名和已选字段读取非回收站资源；query不变，cursor为上页原始令牌，size为1–1000。
     /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
@@ -323,8 +323,10 @@ public actor ImmichClient {
                 originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
                 originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
                 personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+                rating: ratingFilter(query.rating),
                 state: query.state.isEmpty ? nil : .init(eq: query.state),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
+                trashedAt: .init(eq: .null),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
                 visibility: .init(eq: query.archivedOnly ? .archive : .timeline),
                 iso: numericFilter(.iso, conditions: query.exifConditions),
@@ -381,6 +383,7 @@ public actor ImmichClient {
             page: pageNumber,
             personIds: query.personIDs.isEmpty ? nil : query.personIDs,
             query: text,
+            rating: legacyRating(query.rating),
             size: size,
             state: query.state.isEmpty ? nil : query.state,
             takenAfter: after,
@@ -402,6 +405,28 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
         case let .undocumented(statusCode, _):
             throw Self.map(status: statusCode)
+        }
+    }
+
+    /// rating来自界面；nil表示不限制，显式null筛选未评分，0–5按具体数值比较。
+    private func ratingFilter(_ rating: ImmichSearchRating) throws -> ImmichNullableNumberFilter? {
+        switch rating {
+        case .any: return nil
+        case .unrated: return .init(eq: .null)
+        case let .stars(value):
+            guard (0 ... 5).contains(value) else { throw ImmichAPIError.invalidResponse }
+            return .init(eq: .number(Double(value)))
+        }
+    }
+
+    /// rating为旧式smart评分；null保留未评分，1–5为具体值，拒绝0及越界而非悄悄省略。
+    private func legacyRating(_ rating: ImmichSearchRating) throws -> ImmichNullableRatingValue? {
+        switch rating {
+        case .any: return nil
+        case .unrated: return .null
+        case let .stars(value):
+            guard (1 ... 5).contains(value) else { throw ImmichAPIError.invalidResponse }
+            return .stars(value)
         }
     }
 
@@ -439,6 +464,7 @@ public actor ImmichClient {
         }
     }
 
+    /// 读取时间线中的非回收站视频；cursor为服务端令牌、size为1–1000，返回可继续分页的实际视频。
     public func videoAssets(cursor: String? = nil, size: Int = 100) async throws -> ImmichVideoPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
@@ -446,6 +472,7 @@ public actor ImmichClient {
             let output = try await makeClient().searchAssets(.init(body: .json(.init(
                 cursor: cursor,
                 filter: .init(
+                    trashedAt: .init(eq: .null),
                     _type: .init(eq: .VIDEO),
                     visibility: .init(eq: .timeline)
                 ),

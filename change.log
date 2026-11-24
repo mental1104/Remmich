@@ -1,3 +1,36 @@
+## 2026-11-24: Match generated date contract fixture to application configuration
+
+- Source: codex/feature-search-rating over8825298; upstream remains672f02e. No upstream sync or application/server/API/database/production behavior change.
+- CI45343739181 compiled app/test bundles and passed formatting/offline contracts. API testing ran59 tests in17 suites; one date test failed five strict timestamp assertions because its raw generated Client used the SDK default date transcoder instead of the application's ImmichDateTranscoder. The default emits whole seconds; the application emits milliseconds. Simulator app tests were skipped after this failure.
+- Configure the fixture with the same date transcoder used by ImmichClient.makeClient. Keep all exact timestamp/null/operator assertions; do not alter production serialization or generated code. Local SwiftFormat and diff checks passed; repaired Swift tests require a new CI run before merge.
+- Parent gitlink remains verified67ec731. PR #4 is ready but must not merge until the repaired head passes; PR #5 stays draft. Real-device acceptance remains unverified. Rollback: revert this test-only repair; no media recovery required.
+
+## 2026-11-24: Nullable dates preserve default non-trash search scope
+
+- Source: codex/feature-search-rating overb962351; upstream remains672f02e. No upstream sync, server/API/database/production change.
+- Extend the same nullable encoding repair to the existing DateFilterNullable schema through a documented type override. Preserve all six official date operators and absent/null/date states; no schema snapshot or generated Swift edits.
+- Normal metadata search and the existing standalone video list now explicitly send trashedAt.eq:null, avoiding accidental inclusion of trashed assets through an empty/omitted filter. Archived search remains archive-only, without trashed content. The server's structured API defaults remain unchanged.
+- Add a metadata wire assertion, a video regression, generated-SDK ISO8601/date-null checks and date-filter round trips. Local SwiftFormat/diff checks passed; these tests await CI together with the rating repair. No physical-device acceptance or private-media access.
+- Baseline evidence: dev67ec731 passed post-merge Build45340652820 and Tests45341601145, including package/simulator app tests and tested-revision receipt. Those results do not validate this follow-up. PR #4 remains draft until this commit is pushed and marked ready; no paid runner or concurrent build introduced.
+- Rollback: revert this follow-up/config; no media recovery. Reverting restores the known default-scope defect and must be assessed before release. Full extended-search and synthetic UI work remain outstanding.
+
+## 2026-11-24: Preserve unrated legacy smart search
+
+- Source: codex/feature-search-rating overb27ed08; upstream remains672f02e, no upstream sync or server/database/production change.
+- The existing server legacy smart DTO accepts null for unrated. Extract its original nullable integer leaf into a named reference during schema preparation and apply the documented generator type override, so an explicit enum null survives the outer Optional's encoding. Existing page tokens and fields stay unchanged;0 remains outside legacy smart's1–5/null contract.
+- Normalize the reference back to its original leaf and compare the entire document: all JSON values match the prior snapshot. Raw official SHA remains4e15b581…; prepared SHA is15ca2935…. Python3.8 execution/syntax and preparation idempotence passed. Update provenance; generated Swift was not edited.
+- Extend SDK wire tests for smart absent/null/1/5; UI no longer blocks unrated smart. Local SwiftFormat/diff checks pass; new Swift code still awaits CI. Current bcaf66f CI45338292119 passed build/API tests and is running simulator app tests; it cannot validate this follow-up.
+- Rollback: revert this follow-up plus its generated-input preparation/config changes, preserving saved server conditions and media. Search stage remains incomplete due other filters,0/advanced smart pagination and synthetic UI coverage.
+
+## 2026-11-24: Rating filters with explicit null semantics
+
+- Source: codex/feature-search-rating overbcaf66f; upstream remains672f02e. No upstream sync, server/API/schema/database/production change.
+- Add Any/Unrated/0–5 rating controls and native-to-SDK mapping. Saved presets preserve missing/null/value and reject out-of-range ratings; a saved unrated condition is no longer rejected as unsupported. Update the unsupported-condition regression to use still-unsupported tags.
+- Use Swift OpenAPI Generator1.13.1's documented typeOverrides for NumberFilterNullable: a handwritten Codable type preserves absent/null/number for eq/ne plus all existing comparison/list operators. Do not modify generated sources or the OpenAPI snapshot. This addresses generator nullable omission documented in apple/swift-openapi-generator#419; reference: https://github.com/apple/swift-openapi-generator/blob/1.13.1/Sources/swift-openapi-generator/Documentation.docc/Articles/Configuring-the-generator.md#type-overrides.
+- Metadata can express exact0–5 and unrated null; legacy smart preserves1–5 with its existing numeric page contract. Unrated/0 smart combinations remain explicitly unavailable pending structured/ranked pagination, alongside other advanced combinations; this follow-up does not finish the search stage.
+- Add SDK wire assertions for absent/null/0/boundaries, legacy stars, invalid-before-send, all nullable operators, and native preset round trips. Local SwiftFormat and diff checks passed; these new tests have not run in Swift yet. Existing bcaf66f CI45338292119 is still compiling and cannot validate this follow-up. No real-device validation.
+- Rollback: revert this follow-up including generator config; no saved conditions or media need deletion/recovery. Parent gitlink remains0af1897.
+
 ## 2026-11-24: Favorite and archive search conditions
 
 - Validation follow-up: ca271bb passed the complete CI45336010250, including offline contracts, app/test build, API tests, simulator app tests and artifact/source checks. This covers the saved-search panel and codec. Region7e4714e and visibilitycefddca follow-ups still require their own CI; no merge or parent gitlink update yet.

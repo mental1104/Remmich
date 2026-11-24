@@ -452,6 +452,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.state = query.state
         dto.favoritesOnly = query.favoritesOnly
         dto.archivedOnly = query.archivedOnly
+        dto.rating = switch query.rating { case .any: .any; case .unrated: .unrated; case let .stars(value): .stars(value) }
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }

@@ -37,6 +37,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     /// false表示不限制收藏/保留时间线，true才增加收藏或归档条件。
     var favoritesOnly = false
     var archivedOnly = false
+    var rating: NativeSearchRating = .any
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
@@ -48,6 +49,16 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var takenAfter: Date?
     var takenBefore: Date?
     var timeZone = TimeZone.current
+}
+
+/// 界面评分筛选的三种语义；具体0分不能在保存/复用时变为未指定。
+nonisolated enum NativeSearchRating: Hashable, Sendable {
+    case any, unrated, stars(Int)
+
+    /// 0分不在旧式smart的1–5/null契约内，须明确提示组合限制，不静默丢弃。
+    var requiresStructuredSearch: Bool {
+        switch self { case .any, .unrated: false; case let .stars(value): value == 0 }
+    }
 }
 
 /// 可独立编辑的EXIF条件；相同字段/运算符只有一个稳定槽位。
