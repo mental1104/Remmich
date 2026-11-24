@@ -13,6 +13,7 @@ struct AlbumManagementView: View {
     @State private var error: String?
     @State private var showsRename = false
     @State private var managingPhotos: ManagedAlbum?
+    @State private var showsDirectory = false
 
     /// controller维护写入账号代际；source/media由真实Albums页传入，默认nil保留既有基础管理入口。
     init(controller: LibraryManagementController, source: (any TimelineReading)? = nil,
@@ -33,6 +34,10 @@ struct AlbumManagementView: View {
             Form {
                 if let error {
                     Section { Text(error).foregroundStyle(.red) }
+                }
+                Section("Album directory") {
+                    Button("Manage categories and groups") { showsDirectory = true }
+                        .disabled(controller.client == nil)
                 }
                 Section("创建相簿") {
                     TextField("相簿名称", text: $name)
@@ -59,6 +64,9 @@ struct AlbumManagementView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() }.disabled(controller.busy) } }
             .task(id: controller.generation) { await load() }
             .onChange(of: controller.generation) { _, _ in dismiss() }
+            .sheet(isPresented: $showsDirectory, onDismiss: { Task { await load() } }) {
+                AlbumDirectoryManagementView(controller: controller)
+            }
             .sheet(item: $managingPhotos, onDismiss: { Task { await load() } }) { album in
                 if let managementSource, let media {
                     BatchAssetManagementView(album: .init(id: album.id, name: album.albumName),

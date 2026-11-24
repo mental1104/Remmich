@@ -7,6 +7,7 @@ swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/LibraryMutationClient.swift \
   Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
+  Remmich/Domain/Management/AlbumDirectoryManagement.swift \
   Remmich/Domain/Timeline/NativeSearchModels.swift \
   Remmich/Domain/Timeline/NativeSearchPreset.swift \
   Scripts/check-fork-contracts.swift \

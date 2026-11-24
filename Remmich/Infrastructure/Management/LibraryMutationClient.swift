@@ -1,8 +1,9 @@
 import CryptoKit
 import Foundation
 
+/// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
-    case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName
+    case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
     case http(Int)
 
     var errorDescription: String? {
@@ -14,6 +15,7 @@ nonisolated enum LibraryWriteError: LocalizedError {
         case .malformedResponse: "服务器返回的数据不符合约定，未确认操作成功。"
         case .trashedDuplicate: "服务器回收站中已有此文件，请先决定是否恢复；未标记为备份成功。"
         case .invalidPresetName: "Enter a saved search name of 1 to 100 characters."
+        case .invalidDirectoryName: "Enter a category name of 1 to 100 characters. The default category is reserved."
         case let .http(code): "服务器返回 HTTP \(code)。请检查权限、版本和连接；不自动重试写操作。"
         }
     }
@@ -205,6 +207,86 @@ final nonisolated class LibraryMutationClient: Sendable {
         guard (1 ... 100).contains(name.utf16.count) else { throw LibraryWriteError.invalidPresetName }
         struct Body: Encodable { let name: String; let conditions: NativeSearchPresetConditions }
         return try JSONEncoder().encode(Body(name: name, conditions: conditions))
+    }
+
+    /// 每次真实读取当前账号目录；仅该可选GET的404/405/501表示扩展未安装，鉴权失败继续抛出。
+    func albumDirectoryState() async throws -> ForkAlbumDirectory.State? {
+        do {
+            let data = try await send("GET", ["fork", "album-categories"], expectedStatus: 200)
+            let result = try JSONDecoder().decode(ForkAlbumDirectory.State.self, from: data)
+            let ids = result.categories.map(\.id)
+            guard Set(ids).count == ids.count, ids.allSatisfy({ UUID(uuidString: $0) != nil }),
+                  Set(result.groups.map(\.groupName)).count == result.groups.count,
+                  result.groups.allSatisfy({ ids.contains($0.categoryId) }) else { throw LibraryWriteError.malformedResponse }
+            return result
+        } catch let LibraryWriteError.http(status) where [404, 405, 501].contains(status) {
+            return nil
+        }
+    }
+
+    /// 真实读取所有可见相簿的目录字段；不复用持久索引GET缓存，缺少分组字段仍可兼容解码。
+    func directoryAlbums() async throws -> [ManagedDirectoryAlbum] {
+        let data = try await send("GET", ["albums"], expectedStatus: 200)
+        let result = try JSONDecoder().decode([ManagedDirectoryAlbum].self, from: data)
+        guard Set(result.map(\.id)).count == result.count,
+              result.allSatisfy({ UUID(uuidString: $0.id) != nil }) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// name按Fork规则trim/校验；只有201和匹配名称、有效UUID的大组确认创建，不自动重放POST。
+    func createAlbumCategory(name: String) async throws -> ForkAlbumDirectory.Category {
+        let (title, body) = try albumCategoryBody(name)
+        let data = try await send("POST", ["fork", "album-categories"], body: body, expectedStatus: 201)
+        let result = try JSONDecoder().decode(ForkAlbumDirectory.Category.self, from: data)
+        guard UUID(uuidString: result.id) != nil, result.name == title else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id为自有真实大组UUID，name为新名；200、相同ID及匹配名称共同确认，重名409由服务端裁决。
+    func renameAlbumCategory(_ id: String, name: String) async throws -> ForkAlbumDirectory.Category {
+        let id = try validID(id)
+        let (title, body) = try albumCategoryBody(name)
+        let data = try await send("PATCH", ["fork", "album-categories", id], body: body, expectedStatus: 200)
+        let result = try JSONDecoder().decode(ForkAlbumDirectory.Category.self, from: data)
+        guard result.id.lowercased() == id.lowercased(), result.name == title else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id为自有大组UUID；仅204确认，服务端级联移除个人映射，分组回默认且不删除相簿/照片。
+    func deleteAlbumCategory(_ id: String) async throws {
+        _ = try await send("DELETE", ["fork", "album-categories", validID(id)], expectedStatus: 204)
+    }
+
+    /// groupName为当前账号可见分组，空串代表未分组；categoryID为自有大组或nil回默认，必须显式编码null。
+    func assignAlbumGroup(_ groupName: String, categoryID: String?) async throws {
+        let category = try categoryID.map(validID)
+        var body: [String: Any] = ["groupName": groupName.trimmingCharacters(in: .whitespacesAndNewlines)]
+        body["categoryId"] = category.map { $0 as Any } ?? NSNull()
+        _ = try await send("PUT", ["fork", "album-categories", "group"],
+                           body: JSONSerialization.data(withJSONObject: body), expectedStatus: 204)
+    }
+
+    /// id为相簿UUID，groupName为目标分组；nil/空白显式写null，只有200和ID/字段回执一致才确认。
+    /// 此字段属于相簿本身，其他有权限客户端可见；权限检查保留服务端album.update语义。
+    func setAlbumGroup(_ id: String, groupName: String?) async throws -> ManagedDirectoryAlbum {
+        let id = try validID(id)
+        let name = groupName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let body: [String: Any] = ["customGroupName": name.isEmpty ? NSNull() : name as Any]
+        let data = try await send("PATCH", ["albums", id], body: JSONSerialization.data(withJSONObject: body), expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedDirectoryAlbum.self, from: data)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard result.id.lowercased() == id.lowercased(), result.groupName == name,
+              object?.keys.contains("customGroupName") == true else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// name为用户输入；返回trim名称及唯一name字段的JSON，禁止把虚拟默认名称持久化为实体。
+    private func albumCategoryBody(_ name: String) throws -> (String, Data) {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1 ... 100).contains(title.utf16.count), title != "默认" else { throw LibraryWriteError.invalidDirectoryName }
+        // 大组命令只允许发送名称字段，不混入客户端状态或其他相簿属性。
+        struct Body: Encodable { let name: String }
+        return try (title, JSONEncoder().encode(Body(name: title)))
     }
 
     func asset(_ id: String) async throws -> ManagedAsset {
