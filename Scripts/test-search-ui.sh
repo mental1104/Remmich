@@ -4,6 +4,7 @@
 # 第三个参数存在时只执行唯一联合scheme xctestrun，缺失/歧义直接失败，绝不偷偷重新构建。
 # 依赖：Xcode、jq；第三参数省略时保留本地构建测试入口。启动等待默认180秒，可用REMMICH_UI_BOOT_TIMEOUT_SECONDS限定1–600秒。
 # CI复用select-ci-simulator写入的IPHONE_SIMULATOR_ID；tablet只关闭这个本链iPhone，普通Mac不关闭其他设备。
+# 仅CI tablet首次bootstatus等待超时会重启本次选定iPad一次；不重试实际UI测试，也不抹除或重启其他设备。
 # 输出：设备/runtime信息、准备及xcodebuild日志和含截图的xcresult；失败保留产物并返回非零。
 set -euo pipefail
 
@@ -13,6 +14,7 @@ REMMICH_UI_PREBUILT="${3:-}"
 REMMICH_UI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REMMICH_UI_BOOT_TIMEOUT_SECONDS="${REMMICH_UI_BOOT_TIMEOUT_SECONDS:-180}"
 REMMICH_UI_PREPARE_PID=""
+REMMICH_UI_PREPARE_TIMED_OUT=false
 if [[ ! "$REMMICH_UI_BOOT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$REMMICH_UI_BOOT_TIMEOUT_SECONDS" -gt 600 ]; then
     echo "Simulator boot timeout must be an integer from 1 to 600 seconds." >&2
     exit 2
@@ -46,14 +48,17 @@ remmich_ui_stop_preparation() {
 }
 
 # 参数为完整准备命令及其独立argv，输出追加到现有证据日志；成功返回0、原失败原样返回、超时返回124。
+# 每次重置TIMED_OUT，仅本函数计时到期才置true，不能把simctl自行返回124误判为可恢复超时。
 # 用Bash自身计时和单个受控子进程实现，macOS无需GNU timeout或额外安装工具。
 remmich_ui_prepare() {
+    REMMICH_UI_PREPARE_TIMED_OUT=false
     printf 'Simulator preparation: %s\n' "$*" | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log"
     "$@" >> "$REMMICH_UI_OUTPUT/xcodebuild.log" 2>&1 &
     REMMICH_UI_PREPARE_PID=$!
     local started=$SECONDS
     while kill -0 "$REMMICH_UI_PREPARE_PID" 2>/dev/null; do
         if (( SECONDS - started >= REMMICH_UI_BOOT_TIMEOUT_SECONDS )); then
+            REMMICH_UI_PREPARE_TIMED_OUT=true
             printf 'Simulator preparation timed out after %s seconds.\n' "$REMMICH_UI_BOOT_TIMEOUT_SECONDS" | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log" >&2
             remmich_ui_stop_preparation
             return 124
@@ -156,13 +161,26 @@ if [ "$REMMICH_UI_DEVICE" = tablet ] && [ "${GITHUB_ACTIONS:-}" = true ]; then
     fi
 fi
 
-# Booted/Booting目标不重复boot，仍必须等bootstatus成功；未知/过渡关闭状态明确失败，不循环重启设备。
+# Booted/Booting目标不重复boot，仍必须等bootstatus成功；未知/过渡关闭状态明确失败。
 case "$(jq -r .state <<< "$REMMICH_UI_SELECTION")" in
     Shutdown) remmich_ui_prepare xcrun simctl boot "$REMMICH_UI_UDID" ;;
     Booted|Booting) ;;
     *) echo "Selected simulator has an unsupported preparation state." | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log" >&2; exit 2 ;;
 esac
-remmich_ui_prepare xcrun simctl bootstatus "$REMMICH_UI_UDID" -b
+REMMICH_UI_BOOTSTATUS_RESULT=0
+remmich_ui_prepare xcrun simctl bootstatus "$REMMICH_UI_UDID" -b || REMMICH_UI_BOOTSTATUS_RESULT=$?
+if [ "$REMMICH_UI_BOOTSTATUS_RESULT" -ne 0 ]; then
+    if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$REMMICH_UI_DEVICE" = tablet ] && [ "$REMMICH_UI_PREPARE_TIMED_OUT" = true ]; then
+        # 首次原生输出和124已保留在追加日志；只恢复本轮明确选中的iPad，第二次不再进入此分支。
+        printf 'CI tablet bootstatus timed out with exit code %s; restarting selected simulator %s once.\n' \
+            "$REMMICH_UI_BOOTSTATUS_RESULT" "$REMMICH_UI_UDID" | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log" >&2
+        remmich_ui_prepare xcrun simctl shutdown "$REMMICH_UI_UDID"
+        remmich_ui_prepare xcrun simctl boot "$REMMICH_UI_UDID"
+        remmich_ui_prepare xcrun simctl bootstatus "$REMMICH_UI_UDID" -b
+    else
+        exit "$REMMICH_UI_BOOTSTATUS_RESULT"
+    fi
+fi
 
 # 串行执行避免两个UI runner同时旋转模拟器；构建模式保留代码生成和插件安全检查。
 xcodebuild "${REMMICH_UI_TEST_ACTION[@]}" \
