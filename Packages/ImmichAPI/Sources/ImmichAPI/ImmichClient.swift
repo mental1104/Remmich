@@ -756,6 +756,27 @@ public actor ImmichClient {
         } catch { throw Self.map(error) }
     }
 
+    /// 管理页显式包含隐藏人物；page/size沿用官方分页，默认浏览people方法保持不变。
+    /// 调用方使用前台client避免已完成GET缓存；取消/HTTP/非法分页错误继续抛出。
+    public func managementPeople(page: Int, size: Int) async throws -> ImmichManagementPeoplePage {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard page >= 1, (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().getAllPeople(.init(query: .init(page: page, size: size, withHidden: true)))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let result = try response.body.json
+                guard result.total >= 0, result.people.count <= size else { throw ImmichAPIError.invalidResponse }
+                return ImmichManagementPeoplePage(people: result.people.map {
+                    .init(id: $0.id, name: $0.name, isHidden: $0.isHidden, updatedAt: $0.updatedAt)
+                }, hasNextPage: result.hasNextPage ?? (page <= result.total / size && page * size < result.total))
+            case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
+    }
+
     public func sharedLinks(serverURL: URL) async throws -> [ImmichSharedLink] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         do {

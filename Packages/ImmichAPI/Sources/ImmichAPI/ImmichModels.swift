@@ -366,6 +366,20 @@ public struct ImmichPeoplePage: Sendable {
     public let hasNextPage: Bool
 }
 
+/// 人物管理读取保留隐藏状态和真实缩略图修订；不改变既有人物浏览/缓存模型的解码契约。
+public struct ImmichManagementPerson: Sendable {
+    public let id: String
+    public let name: String
+    public let isHidden: Bool
+    public let updatedAt: Date?
+}
+
+/// 官方人物分页结果；管理页逐页读取完整列表后才发布，失败不冒充空列表。
+public struct ImmichManagementPeoplePage: Sendable {
+    public let people: [ImmichManagementPerson]
+    public let hasNextPage: Bool
+}
+
 public struct ImmichPartner: Identifiable, Sendable {
     public let id: String
     public let name: String

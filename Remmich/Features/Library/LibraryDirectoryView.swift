@@ -118,6 +118,17 @@ final class LibraryDirectoryStore {
         error = nil
     }
 
+    /// 管理页完整fresh读取后同步原生浏览；撤销尚在途的旧目录读取，避免重放旧姓名或已隐藏人物。
+    func adoptManagedPeople(_ people: [ManagedPerson]) {
+        loadTask?.cancel()
+        loadTask = nil
+        entries = people.filter { !$0.isHidden }.map {
+            .person(.init(id: $0.id, name: $0.name, updatedAt: $0.updatedAt ?? .distantPast))
+        }
+        finished = true
+        error = nil
+    }
+
     func adoptIndexedPartners(_ partners: [LibraryPartner]) {
         guard loadTask == nil else { return }
         entries = partners.map(LibraryDirectoryEntry.partner)
@@ -345,12 +356,21 @@ private struct LibraryDirectoryView: View {
     let assetDetails: any AssetDetailReading
     let context: LibraryCollectionNavigation
     let placesMapSource: LibraryPlacesMapSource?
+    @State private var showsPeopleManagement = false
     @Namespace private var cardTransition
 
     var body: some View {
         Group {
             if directory == .places {
                 placesPage
+            } else if directory == .people {
+                directoryContent.safeAreaInset(edge: .top, spacing: 0) {
+                    LibraryPageHeader(title: directory.rawValue) {
+                        Button("Manage") { showsPeopleManagement = true }
+                            .accessibilityIdentifier("people-manage-entry")
+                    }
+                }
+                .toolbar(.hidden, for: .navigationBar)
             } else {
                 directoryContent.libraryPageHeader(directory.rawValue)
             }
@@ -360,6 +380,13 @@ private struct LibraryDirectoryView: View {
                 await store.loadNext(directory, source: source)
             }
         }
+        .sheet(isPresented: $showsPeopleManagement) {
+            let owner = media.management.generation
+            PeopleManagementView(source: source, media: media, owner: owner, onFresh: store.adoptManagedPeople,
+                                 onAttemptFinished: { media.management.publishChanges(ifGeneration: owner) })
+                .id(owner)
+        }
+        .onChange(of: media.management.generation) { _, _ in showsPeopleManagement = false }
     }
 
     private var placesPage: some View {

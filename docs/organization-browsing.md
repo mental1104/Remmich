@@ -30,9 +30,9 @@ Rollback this client feature and generator operation selection; no server data o
 
 | Slice | Next concrete behavior and owning source |
 | --- | --- |
-| People management | Add confirmed name/hidden/merge actions to existing People browsing, using current official people controller permissions (`person.update`, `person.merge`) and precise responses. Distinguish merging identities from deleting photos. |
+| People management | Implemented in the following independent slice: native Manage sheet, personal rename, hide/show and directed two-person merge with fresh reads, confirmations and exact receipts. Swift/device/server acceptance remains pending; [people management](people-management.md) records the boundaries. Birth dates, favorites, face reassignment and feature-face selection remain outside this slice. |
 | Official native stacks | Browse members and add primary/create/merge/unstack actions via official `/api/stacks` read/create/update/delete permissions. `StackCreateDto.assetIds` requires at least two IDs and first becomes primary; do not substitute scene grouping for this relationship. |
 | Fork scene stacks | Read authenticated `POST /api/fork/scene-stacks/query` with at most5000 currently loaded IDs; response `available/groups{id,coverId,members}` is an outer presentation layer. Validate complete/non-overlapping visible members, preserve original stack semantics, handle unavailable/invalid evidence by showing the original timeline, and retain a user switch. |
 | Steam scene presentation | Reuse existing backend grouping evidence and rendering policy. The current scene reply exposes IDs/cover/members, **not game names or engine controls**; first inspect the actual manifest/data contract before promising game labels. Keep GPU/scanning/model scheduling on the server. |
 
-These follow-ups are not implemented by the two new Library entries. Their UI, write confirmation and separate contract/device acceptance remain outstanding.
+The random/pending entries do not implement the remaining stack/scene/Steam slices. The separate people-management slice is implemented in source with unexecuted Swift/device acceptance; it does not complete stage5.
