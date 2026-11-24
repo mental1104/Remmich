@@ -1,3 +1,11 @@
+## 2026-11-24: Preserve early compilation and per-stage CI evidence
+
+- Source: integrated CI fix09a438c over candidatec9c3aba; upstream remains672f02e. Existing triggers, draft gate, runner, business tests and final release/tested-revision gate remain intact; no server, production, signing or paid-runner change.
+- Search run45367778128 is authoritatively completed/cancelled at18:37:51 Asia/Shanghai. Check annotation says45m limit exceeded. Compilation/API stages succeeded; App/phone stages failed, tablet status remained stale after cancellation. Job logs404, complete-run ZIP empty and artifact0 provide no specific business assertion, so no speculative app fix is made.
+- Increase the existing serial job budget to75m based on observed10+2+13+13+13m stages plus uploads. Immediately archive/upload successful compilation with distinct compiled-only source/checkout SHA receipt, without claiming tested approval. Preserve raw API/App stdout+stderr and upload each API/App/phone/tablet stage's available evidence before later work. Earlier test/evidence failures cannot silently skip subsequent checks; pipeline failures remain nonzero.
+- Static YAML parsing,15 extracted bash syntax checks, seven unique artifact names, exact trigger/draft/runner/final-gate comparison and real synthetic exit65 pipefail/tee/xcbeautify checks passed in the CI slice. Candidate336-file SwiftFormat, shell and diff checks passed. Actual new candidate CI remains pending ready-PR execution; no test/device/install success is inferred from static results. Root coordinates one macOS chain for PR8.
+- Rollback this CI-only evidence/budget change independently while retaining saved logs/receipts and original release gates. A compiled-only product is not a successful Tests receipt or a signed device package.
+
 ## 2026-11-24: Connect parallel management slices to the real Albums page
 
 - Source: codex/feature-parallel-client-slices integrates backupf1b53f6, organization309dd5c, batchb10dcc4, directorycfe4421, editoree01628/be0a181/494bb1c over searchb26fa53. Upstream remains672f02e; no server/API/production changes or workflow execution.
