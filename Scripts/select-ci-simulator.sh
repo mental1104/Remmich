@@ -9,7 +9,9 @@ set -euo pipefail
 simulator_id=$(xcrun simctl list devices available --json | jq -r '
   [.devices | to_entries[]
    | select(.key | contains(".iOS-"))
-   | (.key | split("iOS-")[1] | split("-") | map(tonumber)) as $version
+   # 新运行时标识可能带机型后缀，仅提取开头的数字版本段。
+   | (.key | capture("iOS-(?<version>[0-9]+(?:-[0-9]+)*)").version
+      | split("-") | map(tonumber)) as $version
    | select($version[0] >= 27)
    | .value[]
    | select(.isAvailable == true and (.name | startswith("iPhone")))
