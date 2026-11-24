@@ -33,6 +33,9 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var text = ""
     var mode: Mode = .fileName
     var media: Media = .all
+    var mediaCategory: NativeSearchMediaCategory?
+    var resolution: NativeSearchResolution?
+    var panoramasOnly = false
     var country = ""
     var state = ""
     /// false表示不限制收藏/保留时间线，true才增加收藏或归档条件。
@@ -55,8 +58,32 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
     var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch
+                || mediaCategory != nil || resolution != nil || panoramasOnly)
     }
+}
+
+/// 原生搜索与保存条件共用的来源类别；不等同于照片/视频资源类型。
+nonisolated enum NativeSearchMediaCategory: String, Codable, CaseIterable, Sendable {
+    case phoneVideo = "phone-video", screenshot, deltaScreenshot = "delta-screenshot"
+    case steamScreenshot = "steam-screenshot", switchScreenshot = "switch-screenshot", nintendo3dsScreenshot = "3ds-screenshot"
+
+    /// 返回可见类别名称；识别逻辑由服务端维护。
+    var title: String {
+        switch self {
+        case .phoneVideo: "Phone videos"
+        case .screenshot: "Screenshots"
+        case .deltaScreenshot: "Delta screenshots"
+        case .steamScreenshot: "Steam screenshots"
+        case .switchScreenshot: "Nintendo Switch screenshots"
+        case .nintendo3dsScreenshot: "Nintendo 3DS screenshots"
+        }
+    }
+}
+
+/// 可保存和恢复的分辨率档位，原始值保持Web登记协议。
+nonisolated enum NativeSearchResolution: String, Codable, CaseIterable, Sendable {
+    case hd = "720p", fullHD = "1080p", twoK = "2k", fourK = "4k"
 }
 
 /// 界面评分筛选的三种语义；具体0分不能在保存/复用时变为未指定。

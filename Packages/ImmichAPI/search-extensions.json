@@ -22,6 +22,30 @@
         },
         "orientation": {
           "$ref": "#/components/schemas/MediaOrientationFilter"
+        },
+        "isPanorama": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isPhoneVideo": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isNintendo3dsScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isSwitchScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isSteamScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isDeltaScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "resolution": {
+          "$ref": "#/components/schemas/MediaResolutionFilter"
         }
       }
     },
@@ -41,6 +65,30 @@
         },
         "orientation": {
           "$ref": "#/components/schemas/MediaOrientationFilter"
+        },
+        "isPanorama": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isPhoneVideo": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isNintendo3dsScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isSwitchScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isSteamScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "isDeltaScreenshot": {
+          "$ref": "#/components/schemas/BoolFilter"
+        },
+        "resolution": {
+          "$ref": "#/components/schemas/MediaResolutionFilter"
         }
       }
     },
@@ -59,6 +107,26 @@
       "enum": [
         "landscape",
         "portrait"
+      ],
+      "type": "string"
+    },
+    "MediaResolutionFilter": {
+      "properties": {
+        "eq": {
+          "$ref": "#/components/schemas/MediaResolution"
+        }
+      },
+      "required": [
+        "eq"
+      ],
+      "type": "object"
+    },
+    "MediaResolution": {
+      "enum": [
+        "720p",
+        "1080p",
+        "2k",
+        "4k"
       ],
       "type": "string"
     }

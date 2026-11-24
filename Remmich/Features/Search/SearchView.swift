@@ -63,6 +63,19 @@ struct SearchView: View {
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
                         DisclosureGroup("Advanced filters") {
+                            Picker("Media category", selection: $query.mediaCategory) {
+                                Text("Any").tag(nil as NativeSearchMediaCategory?)
+                                ForEach(NativeSearchMediaCategory.allCases, id: \.self) { category in
+                                    Text(category.title).tag(Optional(category))
+                                }
+                            }
+                            Picker("Resolution", selection: $query.resolution) {
+                                Text("Any").tag(nil as NativeSearchResolution?)
+                                ForEach(NativeSearchResolution.allCases, id: \.self) { resolution in
+                                    Text(resolution.rawValue.uppercased()).tag(Optional(resolution))
+                                }
+                            }
+                            Toggle("Panoramas only", isOn: $query.panoramasOnly)
                             Picker("Orientation", selection: $query.orientation) {
                                 Text("Any").tag(nil as NativeSearchQuery.Orientation?)
                                 Text("Landscape").tag(Optional(NativeSearchQuery.Orientation.landscape))
@@ -172,7 +185,8 @@ struct SearchView: View {
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
-              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
+              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty
+              || query.mediaCategory != nil || query.resolution != nil || query.panoramasOnly else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
             guard let source else { return }

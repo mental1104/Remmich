@@ -5,8 +5,10 @@
 - Upstream describe: `v3.1.0-447-g520a70891`
 - OpenAPI document version: `3.2.0`
 - Upstream SHA-256: `4e15b58113426d59ffb991a82875308b3eeb64e6c916395e5c923a0632fcc67f`
-- Prepared SHA-256: `15ca29352b3cbe04993c6ba7767e960c0cf7f76d89345354f74d850435533833`
+- Prepared SHA-256: `0e9eb423c0ad7781803312d24aff0574b050f3a7028ef8cb2a6f5d6fad703db3`
 - Copied: 2026-09-27
+
+2026-11-24 media follow-up: extend the same pinned Fork input with isPanorama, isPhoneVideo, isScreenshot, isNintendo3dsScreenshot, isSwitchScreenshot, isSteamScreenshot, isDeltaScreenshot and resolution in both search filter nodes, plus MediaResolutionFilter/MediaResolution. Each selected definition exactly matches owning commit941aa1ca and source document SHA3d89c71f…. The extension input SHA is now09490baf08f44369653ec310635270eec4d57aa2e5f254f9e702ffa0e240853d. Whole-document comparison after removing only these additions exactly matches the previous prepared document; raw upstream SHA is unchanged and repeated preparation is byte-identical. Generated Swift remains build-plugin output. New Swift compilation/wire tests await CI; this adds no server API or production change. Earlier hashes below describe their historical preparation steps.
 
 2026-11-24 nullable-date follow-up: the existing DateFilterNullable schema is also mapped to a handwritten Codable type so trashedAt.eq:null survives encoding. All six date operators remain available, with Date values handled by the SDK's ISO8601 strategy. This adds no schema transformation; the prepared hash above remains unchanged. Generated-SDK wire tests are included and await CI.
 

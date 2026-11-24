@@ -457,6 +457,15 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.cameraModel = query.cameraModel
         dto.lensModel = query.lensModel
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
+        dto.mediaCategory = try query.mediaCategory.map { category in
+            guard let mapped = ImmichSearchMediaCategory(rawValue: category.rawValue) else { throw NativeSearchError.invalidQuery }
+            return mapped
+        }
+        dto.resolution = try query.resolution.map { resolution in
+            guard let mapped = ImmichSearchResolution(rawValue: resolution.rawValue) else { throw NativeSearchError.invalidQuery }
+            return mapped
+        }
+        dto.panoramasOnly = query.panoramasOnly
         dto.hasAlbums = query.hasAlbums
         dto.exifConditions = try query.exifConditions.map { condition in
             guard let field = ImmichSearchNumericCondition.Field(rawValue: condition.field.rawValue),

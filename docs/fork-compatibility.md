@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Media search follow-up: six Fork source categories, panorama-only and four resolution tiers are connected to native controls, complete saved-condition restoration and the existing metadata/Fork-smart filters. Unselected conditions are omitted; every page keeps selected conditions. Only the pinned request-schema augmentation and its exact dependencies are added; generated Swift is not edited. Source equality, whole-document comparison, preparation idempotence, Python syntax and scoped SwiftFormat/diff checks passed; new Swift/package/app execution awaits CI. These filters do not add special media rendering, photo edits or a production deployment.
+
 Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
 
 Server: mental1104/immich, local feature baseline `aa9aa667f` (official stable v3.4.2); new smart pagination is not deployed.

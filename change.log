@@ -1,3 +1,11 @@
+## 2026-11-24: Native media category, panorama and resolution search
+
+- Source: codex/feature-search-media from PR6 head9969913; upstream remains672f02e, no upstream sync or server/API/database/production change.
+- Add six existing Fork media categories, true-only panorama and four resolution tiers to native filters, Infrastructure mapping, shared metadata/Fork-smart filter encoding and complete saved-condition capture/restore. Category-only, resolution-only and panorama-only queries are executable/saveable; unselected fields are omitted. Smart text uses the independent Fork cursor route without stripping conditions or falling back.
+- Copy only eight properties in both search filter nodes and two dependencies from the already pinned owning Fork941aa1ca/sourceSHA3d89c71f…. Raw upstream unchanged; extensionSHA09490baf…, preparedSHA0e9eb423…. Whole-document comparison, owning-source equality, preparation idempotence and Python syntax passed. Generated Swift is not edited.
+- Add SDK wire tests for every category/resolution pair on both routes and two pages, independent/omitted conditions, plus full/standalone native preset round trips. Scoped SwiftFormat0.64.5 lint and diff checks passed; Swift compilation/test execution and iPhone/iPad acceptance remain pending CI. No private media access or special viewer implementation.
+- Parent remains on its verified child baseline until pushed child integration passes CI. Rollback: revert this feature/schema-input additions, retaining server presets and media. Overall search stage remains incomplete.
+
 ## 2026-11-24: Native advanced smart search through the Fork cursor contract
 
 - Source: codex/feature-search-advanced-smart from dev293c3e8; upstream remains672f02e, no upstream sync. No server/API/schema/database change in this client commit and no production deployment. Owning server implementation aa9aa667f is local and not deployed.

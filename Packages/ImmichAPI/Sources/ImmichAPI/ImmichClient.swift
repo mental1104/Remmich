@@ -361,8 +361,23 @@ public actor ImmichClient {
             fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
             focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
             exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
-            orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
+            orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) },
+            isPanorama: query.panoramasOnly ? .init(eq: true) : nil,
+            isPhoneVideo: query.mediaCategory == .phoneVideo ? .init(eq: true) : nil,
+            isScreenshot: query.mediaCategory == .screenshot ? .init(eq: true) : nil,
+            isNintendo3dsScreenshot: query.mediaCategory == .nintendo3dsScreenshot ? .init(eq: true) : nil,
+            isSwitchScreenshot: query.mediaCategory == .switchScreenshot ? .init(eq: true) : nil,
+            isSteamScreenshot: query.mediaCategory == .steamScreenshot ? .init(eq: true) : nil,
+            isDeltaScreenshot: query.mediaCategory == .deltaScreenshot ? .init(eq: true) : nil,
+            resolution: resolutionFilter(query.resolution)
         )
+    }
+
+    /// resolution为可选服务端档位；返回生成Schema条件，未知映射明确拒绝而不丢弃筛选。
+    private func resolutionFilter(_ resolution: ImmichSearchResolution?) throws -> Components.Schemas.MediaResolutionFilter? {
+        guard let resolution else { return nil }
+        guard let value = Components.Schemas.MediaResolution(rawValue: resolution.rawValue) else { throw ImmichAPIError.invalidResponse }
+        return .init(eq: value)
     }
 
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。

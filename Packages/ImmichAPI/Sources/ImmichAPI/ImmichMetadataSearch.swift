@@ -33,6 +33,9 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var text = ""
     public var mode: Mode = .fileName
     public var media: Media = .all
+    public var mediaCategory: ImmichSearchMediaCategory?
+    public var resolution: ImmichSearchResolution?
+    public var panoramasOnly = false
     public var country = ""
     public var state = ""
     /// 收藏关闭表示不限制；归档关闭保留既有timeline范围，不包含锁定内容。
@@ -60,7 +63,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
     public var requiresForkSmartSearch: Bool {
         mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0)
+                || mediaCategory != nil || resolution != nil || panoramasOnly)
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。
@@ -76,6 +80,17 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
     }
+}
+
+/// Fork按元数据识别的媒体来源类别；与照片/视频类型条件独立，未选时不增加限制。
+public enum ImmichSearchMediaCategory: String, CaseIterable, Sendable {
+    case phoneVideo = "phone-video", screenshot, deltaScreenshot = "delta-screenshot"
+    case steamScreenshot = "steam-screenshot", switchScreenshot = "switch-screenshot", nintendo3dsScreenshot = "3ds-screenshot"
+}
+
+/// Fork定义的分辨率档位；仅转发服务端档位，不在客户端按像素猜测归类。
+public enum ImmichSearchResolution: String, CaseIterable, Sendable {
+    case hd = "720p", fullHD = "1080p", twoK = "2k", fourK = "4k"
 }
 
 /// 不限制、未评分和具体评分不能共用一个Optional；0保留为合法的结构化查询值。

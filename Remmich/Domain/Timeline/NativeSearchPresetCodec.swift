@@ -43,6 +43,9 @@ nonisolated enum NativeSearchPresetCodec {
         result.mediaType = switch query.media { case .all: nil; case .image: .image; case .video: .video }
         result.albumStatus = query.hasAlbums.map { $0 ? .inAlbum : .notInAlbum }
         result.orientation = query.orientation
+        result.isPanorama = query.panoramasOnly ? true : nil
+        result.mediaCategory = query.mediaCategory
+        result.resolution = query.resolution
         result.exifConditions = query.exifConditions.isEmpty ? nil : query.exifConditions
         result.takenAfter = query.takenAfter.map { formatter(timeZone: query.timeZone).string(from: $0) }
         result.takenBefore = query.takenBefore.map { formatter(timeZone: query.timeZone).string(from: $0) }
@@ -51,6 +54,7 @@ nonisolated enum NativeSearchPresetCodec {
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
             || result.lensModel != nil || result.rating != .missing
+            || result.isPanorama != nil || result.mediaCategory != nil || result.resolution != nil
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
         return result
@@ -61,11 +65,10 @@ nonisolated enum NativeSearchPresetCodec {
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
         guard conditions.queryAssetId == nil,
               conditions.deviceModels == nil,
-              conditions.isPanorama == nil, conditions.mediaCategory == nil,
-              conditions.resolution == nil, conditions.tagIds == .missing
+              conditions.tagIds == .missing
         else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
-        guard conditions.isArchive != false, conditions.isFavorite != false else { throw NativeSearchPresetConversionError.invalid }
+        guard conditions.isArchive != false, conditions.isFavorite != false, conditions.isPanorama != false else { throw NativeSearchPresetConversionError.invalid }
         query.archivedOnly = conditions.isArchive == true
         query.favoritesOnly = conditions.isFavorite == true
         switch conditions.rating {
@@ -103,6 +106,9 @@ nonisolated enum NativeSearchPresetCodec {
         query.media = switch conditions.mediaType { case .image?: .image; case .video?: .video; case nil: .all }
         query.hasAlbums = conditions.albumStatus.map { $0 == .inAlbum }
         query.orientation = conditions.orientation
+        query.panoramasOnly = conditions.isPanorama == true
+        query.mediaCategory = conditions.mediaCategory
+        query.resolution = conditions.resolution
         if let exif = conditions.exifConditions {
             guard (1 ... 20).contains(exif.count), Set(exif.map(\.id)).count == exif.count,
                   exif.allSatisfy({ $0.value.isFinite && $0.value >= 0 }) else { throw NativeSearchPresetConversionError.invalid }
