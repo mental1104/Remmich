@@ -16,11 +16,16 @@ struct SearchTrashTests {
         #expect(page.nextCursor == nil)
     }
 
-    /// 通过真实生成SDK检查所有日期操作仍使用ISO8601，而不是Date默认的数值编码。
+    /// 使用应用实际日期配置，通过生成SDK检查全部日期操作的ISO8601毫秒编码。
     @Test func generatedSDKPreservesNullableDateOperators() async throws {
         let epoch = Date(timeIntervalSince1970: 0)
         let url = try #require(URL(string: "https://example.invalid/api"))
-        let client = Client(serverURL: url, transport: TrashTransport(expectation: .dates))
+        // 与ImmichClient.makeClient保持一致；SDK默认编码器省略零毫秒，无法代表应用发送的字节。
+        let client = Client(
+            serverURL: url,
+            configuration: .init(dateTranscoder: ImmichDateTranscoder()),
+            transport: TrashTransport(expectation: .dates)
+        )
         _ = try await client.searchAssets(.init(body: .json(.init(filter: .init(trashedAt: .init(
             eq: .date(epoch), gt: epoch.addingTimeInterval(-60), gte: epoch,
             lt: epoch.addingTimeInterval(120), lte: epoch.addingTimeInterval(60), ne: .null

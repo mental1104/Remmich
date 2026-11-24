@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- PR #4 head8825298 failed CI45343739181 after successful app/test compilation and offline checks: one of59 API tests used the default SDK date transcoder but expected the application's millisecond encoding (five timestamp assertions). Simulator app tests were skipped. The fixture now explicitly uses the production ImmichDateTranscoder with all assertions retained; new CI is required before merging or updating the parent gitlink. No application or server behavior changed in this repair.
+
 - Saved-search contracts are local and pending CI: full typed conditions preserve null/missing values and unknown-field rejection; explicit CRUD methods use existing authenticated fork routes and exact statuses. SearchView capture/restore/management UI is not connected yet, so saved searches are not advertised as supported. No production writes performed.
 
 - EXIF/orientation/album-state follow-up is local and awaits CI: metadata supports numeric atomic comparisons and exact extra filters; invalid values/slots reject before network. Smart+advanced combinations are explicitly unavailable until reliable pagination is implemented; no silent condition dropping. Minimal schema augmentation is pinned to the owning Fork. Saved conditions and other extended fields remain unfinished.
