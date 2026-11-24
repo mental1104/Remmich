@@ -1,3 +1,8 @@
+## 2026-11-24: Refresh deferred image identity when the active route changes
+
+- Source: local-media-matching80c152c; upstream remains672f02e. Bind the local wrapper image ID to its management generation as well as scope, remote revision and local identity/version. A same-account route change can now start a fresh view/Nuke request instead of coalescing with an invalidated old-context operation; fallback cache keys remain unchanged.
+- One scoped SwiftFormat and diff checks pass on NAS; the added routing scenarios and Swift compilation/runtime remain pending unified CI. No API/schema, production, original-media or workflow change. Rollback removes this request-key component with local routing.
+
 ## 2026-11-24: Preserve isolated HTTP evidence for local-first matching
 
 - Import standalone reports fromb6f20b6,2533f64,face6d7 and update local-media-matching.md to the integrated behavior and remaining validation. These reports cover synthetic metadata streams, ordinary SHA1 lookup and target external-library representatives respectively; original probing mistakes remain recorded.

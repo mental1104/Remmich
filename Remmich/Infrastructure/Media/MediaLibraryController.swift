@@ -377,7 +377,8 @@ final class MediaLibraryController {
         else { return nil }
         let accountGeneration = management.generation
         let fallback = imageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos, useLocalPhotos: false)
-        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(association.localIdentity.localIdentifier)|\(association.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)"
+        // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
+        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(association.localIdentity.localIdentifier)|\(association.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)|context:\(accountGeneration.uuidString)"
         return ImageRequest(id: id, image: { [weak self] in
             guard let self else { throw CancellationError() }
             return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
