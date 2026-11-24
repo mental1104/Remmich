@@ -6,7 +6,7 @@ import Testing
 @Suite("Native search state")
 struct NativeSearchStoreTests {
     /// 安全的SDK错误保留状态区别，不把鉴权失败或非法条件伪装成空结果。
-    @Test(arguments: [NativeSearchError.unauthorized, .forbidden, .invalidQuery])
+    @Test(arguments: [NativeSearchError.unauthorized, .forbidden, .invalidQuery, .unsupportedExtension])
     @MainActor func distinguishesAuthenticationPermissionAndRequestErrors(_ error: NativeSearchError) async {
         let store = NativeSearchStore()
         await store.search(.init(), source: ErrorSource(error: error))

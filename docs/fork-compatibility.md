@@ -2,8 +2,8 @@
 
 Lens follow-up: native lens filtering, make/model-scoped official suggestions and saved lens reuse are implemented on top of validated dev67ec731. New two-page wire/candidate/codec checks await CI after nullable repair PR #4 is integrated. The owning Fork's Chinese/EXIF lens-conversion correction is tested locally but not deployed; do not treat code presence as production or device acceptance. No photo writes or new server routes are introduced.
 
-Server: mental1104/immich, local `dev` e69e65fba (official stable v3.4.2).
-Client: mental1104/Remmich, `dev`; upstream `main` 672f02e. Branch spelling is lowercase, matching the existing server.
+Server: mental1104/immich, local feature baseline `aa9aa667f` (official stable v3.4.2); new smart pagination is not deployed.
+Client: mental1104/Remmich, `dev293c3e8`; upstream `main` 672f02e. Advanced smart follow-up is a draft and awaits its own CI. Branch spelling is lowercase, matching the existing server.
 
 ## API boundary
 
@@ -22,7 +22,7 @@ The native album directory reads existing `GET /api/fork/album-categories` and `
 | Favorites, archive, captions and recycle bin | Native viewer actions through official routes; trash/restore, no permanent delete | Batch selection and broader shared-editor UI |
 | Albums | Create/rename/delete; add/remove a photo | Batch membership, shared album role management and directory writes |
 | Non-destructive editing | Existing edits loaded; crop/rotate/mirror via official APIs; reset edits | Pixel-coordinate crop form has no real-time preview; no video/Live Photo editor. Server rejects unsupported panoramas/GIF/SVG |
-| Search OR expansion, registered conditions, EXIF filters and scene stacks | Contracts audited, not exposed natively | Upstream Search still demo data; real paginated search, saved conditions and opt-in scene grouping remain |
+| Search OR expansion, registered conditions, EXIF filters and scene stacks | Native real metadata/legacy smart pagination, basic/EXIF/rating/lens filters and account presets are in dev | Advanced Fork smart cursor follow-up awaits CI; remaining fields, synthetic UI and scene grouping are unfinished |
 | Photo copilot, AI edit advice/revisions/review | Not yet implemented | Native interaction and permission/error acceptance; use existing fork routes, add separate APIs only where required |
 | Admin iPhone backup pipeline and queue dashboard | Remains server/Web functionality | This is distinct from the new native user photo backup flow |
 
@@ -38,6 +38,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 - Parent integration uses an isolated registered NAS worktree; preserve the dirty original media-AI workspace and all other worktrees. NAS filesystem execute bits may differ; use `git -c core.filemode=false` for this isolated integration's explicit staging rather than committing thousands of permission-only changes.
 
 ## Verification
+
+- Advanced smart follow-up uses the existing local server's POST /api/fork/search/smart for complete structured combinations and a separate opaque continuation type. Missing404/405/501 is an explicit unsupported state only for that route; no silent filter stripping or fallback, and account/endpoint generation checks remain. Standard search and saved conditions remain usable. Full contract and validation scope: [advanced smart search](fork-smart-search.md). New Swift execution is pending; do not infer it from the successful lens CI.
 
 - PR #4 passed full CI45346238915 at eabc102 (59 API tests, simulator app tests, artifact/source checks) and merged to dev5cd3acf with the same tree. Post-merge Build45348642591 is still running. Lens PR #5 now integrates that baseline while preserving both filters/tests, adds Any/Unrated/0/5 plus lens preset round trips, and stays draft pending its own CI after dev verification. Parent gitlink remains67ec731; no device acceptance or production deployment.
 

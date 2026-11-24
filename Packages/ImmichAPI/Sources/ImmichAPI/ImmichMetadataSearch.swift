@@ -57,6 +57,12 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 创建空条件；调用方按用户选择修改值，不自动读取设备照片。
     public init() {}
 
+    /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
+    public var requiresForkSmartSearch: Bool {
+        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+    }
+
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。
     /// 与服务端/Web的asLocalTimeISO一致；无法表示的日期抛invalidResponse。
     func captureBoundary(_ date: Date, endOfDay: Bool) throws -> Date {
@@ -93,10 +99,11 @@ public struct ImmichSearchNumericCondition: Hashable, Sendable {
     }
 }
 
-/// metadata不透明游标与smart数字页码不可互换；调用方不得自行构造offset。
+/// metadata游标、旧smart页码和Fork绑定游标不可互换；调用方不解析或构造offset。
 public enum ImmichSearchContinuation: Hashable, Sendable {
     case cursor(String)
     case page(Int)
+    case forkCursor(String)
 }
 
 /// 任一搜索模式的实际结果页，不承诺全局总命中数。

@@ -51,13 +51,19 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var takenAfter: Date?
     var takenBefore: Date?
     var timeZone = TimeZone.current
+
+    /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
+    var requiresForkSmartSearch: Bool {
+        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+    }
 }
 
 /// 界面评分筛选的三种语义；具体0分不能在保存/复用时变为未指定。
 nonisolated enum NativeSearchRating: Hashable, Sendable {
     case any, unrated, stars(Int)
 
-    /// 0分不在旧式smart的1–5/null契约内，须明确提示组合限制，不静默丢弃。
+    /// 0分不在旧式smart的1–5/null契约内，需要独立Fork结构化分页，不能静默丢弃。
     var requiresStructuredSearch: Bool {
         switch self { case .any, .unrated: false; case let .stars(value): value == 0 }
     }
@@ -109,11 +115,12 @@ nonisolated struct NativeSearchNumericCondition: Codable, Hashable, Identifiable
 nonisolated enum NativeSearchContinuation: Hashable, Sendable {
     case cursor(String)
     case page(Int)
+    case forkCursor(String)
 }
 
 /// 可安全展示的搜索错误，不携带URL、token或服务器原始响应体。
 nonisolated enum NativeSearchError: Error, LocalizedError, Sendable {
-    case unauthorized, forbidden, invalidQuery, invalidResponse, rateLimited, unavailable
+    case unauthorized, forbidden, invalidQuery, invalidResponse, rateLimited, unavailable, unsupportedExtension
 
     /// 按可恢复动作区分鉴权、权限、条件、格式及网络失败。
     var errorDescription: String? {
@@ -124,6 +131,7 @@ nonisolated enum NativeSearchError: Error, LocalizedError, Sendable {
         case .invalidResponse: "The search response could not be understood."
         case .rateLimited: "Too many requests. Try again shortly."
         case .unavailable: "Search could not be loaded. Check connection and server version."
+        case .unsupportedExtension: "This server does not support advanced smart search. Your filters have been kept. Choose a metadata mode or retry after the server is updated."
         }
     }
 }

@@ -106,9 +106,6 @@ struct SearchView: View {
                 if invalidDateRange {
                     Text("End date must not be earlier than start date.").foregroundStyle(.secondary)
                 }
-                if invalidSmartCombination {
-                    Text("Advanced filters require a metadata search mode.").foregroundStyle(.secondary)
-                }
                 if store.assets.isEmpty, !store.isLoading {
                     ContentUnavailableView(store.hasSearched ? "No results" : "Search your library",
                                            systemImage: "magnifyingglass",
@@ -171,7 +168,7 @@ struct SearchView: View {
     /// 防抖后按当前条件搜索；输入变化取消等待，不显示网络失败。
     private func search() async {
         store.invalidate()
-        guard !invalidDateRange, !invalidSmartCombination,
+        guard !invalidDateRange,
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
@@ -189,12 +186,6 @@ struct SearchView: View {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = query.timeZone
         return calendar.startOfDay(for: start) > calendar.startOfDay(for: end)
-    }
-
-    /// 缺少可靠组合分页时禁止执行，不得静默丢弃高级筛选。
-    private var invalidSmartCombination: Bool {
-        query.mode == .smart && !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty || query.rating.requiresStructuredSearch)
     }
 
     /// 按当前账号加载人物；跨账号/端点的迟到候选不可发布，不把权限失败当作空列表。

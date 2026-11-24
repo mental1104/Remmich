@@ -141,6 +141,25 @@ struct NativeSearchPresetTests {
         #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.capture(invalid) }
     }
 
+    /// 高级smart登记完整恢复条件并选择Fork分页，不因评分0/构图/EXIF组合而部分复用。
+    @Test func restoresCompleteAdvancedSmartSearch() throws {
+        var query = NativeSearchQuery()
+        query.mode = .smart
+        query.text = "synthetic"
+        query.rating = .stars(0)
+        query.orientation = .landscape
+        query.hasAlbums = false
+        query.lensModel = "Synthetic Lens"
+        query.exifConditions = [.init(field: .iso, comparison: .atLeast, value: 400)]
+        let captured = try NativeSearchPresetCodec.capture(query)
+        let restored = try NativeSearchPresetCodec.restore(captured, timeZone: query.timeZone)
+        #expect(restored == query)
+        #expect(restored.requiresForkSmartSearch)
+        var metadata = restored
+        metadata.mode = .fileName
+        #expect(!metadata.requiresForkSmartSearch)
+    }
+
     /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
     @Test func rejectsPartialRestoration() throws {
         var conditions = NativeSearchPresetConditions()

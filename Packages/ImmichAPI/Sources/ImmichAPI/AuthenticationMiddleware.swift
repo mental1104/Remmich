@@ -27,11 +27,20 @@ struct AuthenticationMiddleware: ClientMiddleware {
     }
 }
 
+/// SDK读取边界；会话操作沿用原许可，Fork只读POST额外绑定精确路径/方法。
 enum ReadOnlyOperationPolicy {
     /// 元数据/智能搜索因JSON条件使用POST，但只读取服务器资源；真正写入仍拒绝。
     private static let allowedNonReadOperations: Set<String> = ["login", "logout", "searchAssets", "searchSmart"]
 
+    /// request为待发送请求，operationID为固定操作身份；不匹配读取契约时抛策略错误。
     static func validate(request: HTTPRequest, operationID: String) throws {
+        // 手写Fork请求不能仅凭操作ID放行：必须同时固定方法与精确只读路径。
+        if operationID == "forkSearchSmart" {
+            guard request.method == .post, request.path == "/fork/search/smart" else {
+                throw ImmichAPIError.readOnlyPolicyViolation(operationID: operationID)
+            }
+            return
+        }
         let readMethods: Set<HTTPRequest.Method> = [.get, .head, .options]
         guard readMethods.contains(request.method) || allowedNonReadOperations.contains(operationID) else {
             throw ImmichAPIError.readOnlyPolicyViolation(operationID: operationID)

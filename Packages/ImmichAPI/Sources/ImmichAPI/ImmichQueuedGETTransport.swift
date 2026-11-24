@@ -12,7 +12,7 @@ public struct ImmichQueuedReadTransport: ClientTransport {
     /// loader提供GET响应；searchTransport可注入测试，默认禁止重定向、不缓存搜索响应。
     public init(searchTransport: (any ClientTransport)? = nil, loader: @escaping Loader) {
         self.loader = loader
-        self.searchTransport = searchTransport ?? SearchNetwork.transport
+        self.searchTransport = searchTransport ?? ImmichSearchNetwork.transport
     }
 
     /// request/body来自生成SDK，baseURL为验证过的API根，operationID必须匹配只读路由。
@@ -22,7 +22,8 @@ public struct ImmichQueuedReadTransport: ClientTransport {
         // 不放行任意POST：操作ID、方法、相对路径和请求体必须同时满足只读搜索契约。
         let isMetadata = operationID == "searchAssets" && request.path == "/search/metadata"
         let isSmart = operationID == "searchSmart" && request.path == "/search/smart"
-        if request.method == .post, isMetadata || isSmart, body != nil {
+        let isForkSmart = operationID == "forkSearchSmart" && request.path == "/fork/search/smart"
+        if request.method == .post, isMetadata || isSmart || isForkSmart, body != nil {
             return try await searchTransport.send(request, body: body, baseURL: baseURL, operationID: operationID)
         }
         guard request.method == .get, body == nil,
@@ -50,7 +51,7 @@ public struct ImmichQueuedReadTransport: ClientTransport {
 public typealias ImmichQueuedGETTransport = ImmichQueuedReadTransport
 
 /// 交互搜索不进入仅保存URL的持久日志，取消会终止前台数据任务。
-private enum SearchNetwork {
+enum ImmichSearchNetwork {
     static let transport: any ClientTransport = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false

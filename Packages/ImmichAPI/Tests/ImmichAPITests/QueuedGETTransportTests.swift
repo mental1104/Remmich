@@ -53,6 +53,19 @@ struct QueuedGETTransportTests {
         }
     }
 
+    /// 新Fork操作也不能借用ID访问写入路径或进入持久GET队列。
+    @Test func rejectsForkSearchOnAnotherPath() async throws {
+        let transport = ImmichQueuedReadTransport { _, _ in
+            Issue.record("Invalid Fork POST must not enter the durable queue")
+            throw CancellationError()
+        }
+        let url = try #require(URL(string: "https://example.invalid/api"))
+        await #expect(throws: ImmichAPIError.invalidResponse) {
+            try await transport.send(HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/assets"),
+                                     body: HTTPBody("{}"), baseURL: url, operationID: "forkSearchSmart")
+        }
+    }
+
     @Test func preservesCancellationForTheCallingPipeline() async throws {
         let transport = ImmichQueuedGETTransport { _, _ in throw CancellationError() }
         await #expect(throws: CancellationError.self) {
