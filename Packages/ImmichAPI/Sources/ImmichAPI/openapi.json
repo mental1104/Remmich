@@ -25842,6 +25842,27 @@
               }
             ]
           },
+          "nextPage": {
+            "deprecated": true,
+            "description": "Next page token",
+            "nullable": true,
+            "type": "string",
+            "x-immich-history": [
+              {
+                "version": "v1",
+                "state": "Added"
+              },
+              {
+                "version": "v2",
+                "state": "Stable"
+              },
+              {
+                "version": "v3.2.0",
+                "state": "Deprecated"
+              }
+            ],
+            "x-immich-state": "Deprecated"
+          },
           "total": {
             "description": "Total number of matching assets",
             "maximum": 9007199254740991,
@@ -25861,6 +25882,7 @@
           "facets",
           "items",
           "nextCursor",
+          "nextPage",
           "total"
         ],
         "type": "object"

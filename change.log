@@ -1,5 +1,7 @@
 ## 2026-11-24: Search modes and SDK boundary repair
 
+- CI run45326132850 exposed the prepared schema's intentional removal of nextPage, preventing smart wrapper compilation. Updated the preparation source to preserve this used field and regenerated from the original pinned official commit520a70891 (raw hash unchanged). Whole-document comparison confirms nextPage/property requirement is the only schema difference; idempotence, Python3.8 execution/syntax and diff checks passed. New Xcode validation still pending; no generated Swift was manually changed.
+
 - Source: codex/feature-search-modes over people/date f080864; upstream remains 672f02e. No server/API/database/production change.
 - Add filename, description, path, OCR and smart modes. Metadata keeps opaque cursors; smart uses official legacy numeric paging with basic filters, avoiding the unpaginated smart V3 path. Typed continuations reject mismatched/repeated/backward tokens; only explicit searchSmart POST is added to the read-only boundary.
 - PR #2 run45322996283 compiled and passed API tests but failed app architecture checks: two Feature files imported ImmichAPI. Preserve the checks and repair ownership: native query/continuation/error models live in Domain, SDK mapping in Infrastructure. Feature no longer imports SDK or hides it behind typealiases.
