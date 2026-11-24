@@ -753,7 +753,8 @@ actor LibraryThumbnailCache {
         let response: URLResponse
         if let transfer {
             let result = try await transfer.queue.thumbnailData(for: request, scope: transfer.scope,
-                                                                endpoint: transfer.endpoint, accessToken: transfer.accessToken)
+                                                                endpoint: transfer.endpoint, accessToken: transfer.accessToken,
+                                                                updatedAt: asset.updatedAt)
             data = result.data
             response = result.response
         } else {
@@ -839,6 +840,11 @@ actor LibraryThumbnailCache {
     /// sourceRevision本身仍保留既有ISO契约，文件名额外提供精确匹配，旧文件不会被删除。
     nonisolated static func displayThumbnailFilename(assetID: String, updatedAt: Date) -> String {
         "edited-v1-\(assetID)-\(stableRevision(updatedAt)).bin"
+    }
+
+    /// updatedAt为当前服务端版本；传输日志另保留精确标识，不能仅凭省略小数的ISO重放旧响应。
+    nonisolated static func displayThumbnailVersion(updatedAt: Date) -> String {
+        "edited-v1|\(updatedAt.timeIntervalSinceReferenceDate)"
     }
 
     /// record必须是新语义下的已验证缩略图；旧文件/SQL记录不删除，只在后续正常warm/rebuild时替换。

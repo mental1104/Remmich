@@ -27,7 +27,8 @@ struct LibrarySyncRegressionTests {
                     owner.endpoint.appending(path: "assets/\(asset.id)")
                 }
                 var job = try journal.job(url: requestURL,
-                                          kind: kind, owner: owner, sourceRevision: asset.id == "stale" ? "old" : asset.updatedAt.ISO8601Format())
+                                          kind: kind, owner: owner, sourceRevision: asset.id == "stale" ? "old" : asset.updatedAt.ISO8601Format(),
+                                          thumbnailVersion: kind == .thumbnail ? LibraryThumbnailCache.displayThumbnailVersion(updatedAt: asset.updatedAt) : nil)
                 job.state = asset.id == "blocked" || (asset.id == "partial" && kind == .thumbnail) ? .running : .completed
                 if asset.id == "failed" {
                     job.state = .failed

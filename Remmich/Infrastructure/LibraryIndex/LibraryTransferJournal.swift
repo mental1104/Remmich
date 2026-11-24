@@ -119,6 +119,8 @@ nonisolated struct LibraryTransferJournal: Codable, Sendable {
         var attempts = 0
         var retryAfter: Date?
         var sourceRevision: String?
+        /// 仅thumbnail保存精确展示版本；旧日志缺省nil，不可当作同秒新派生响应。
+        var thumbnailVersion: String?
         var completedAt: Date?
         var submittedAt: Date?
         var resumeData: Data?
@@ -183,10 +185,15 @@ nonisolated struct LibraryTransferJournal: Codable, Sendable {
         return removed
     }
 
-    mutating func job(url: URL, kind: LibraryTransferKind, owner expected: LibraryTransferOwner, sourceRevision: String? = nil) throws -> Job {
+    /// url/kind/owner确定原有传输身份；sourceRevision保留ISO/导出语义，thumbnailVersion仅约束缩略图精确版本。
+    /// 返回已有同版请求或新queued任务；旧无版本响应不得命中明确的新缩略图版本。
+    mutating func job(url: URL, kind: LibraryTransferKind, owner expected: LibraryTransferOwner,
+                      sourceRevision: String? = nil, thumbnailVersion: String? = nil) throws -> Job
+    {
         guard owner == expected, !disabledLanes.contains(kind.lane) else { throw CancellationError() }
         if let existing = jobs.first(where: { $0.owner == expected && $0.kind == kind && $0.url == url
                 && ((kind != .export && kind != .place) || $0.sourceRevision == sourceRevision)
+                && (kind != .thumbnail || thumbnailVersion == nil || $0.thumbnailVersion == thumbnailVersion)
         }) {
             return existing
         }
@@ -198,6 +205,7 @@ nonisolated struct LibraryTransferJournal: Codable, Sendable {
         }
         var job = Job(id: UUID(), owner: expected, pass: pass, kind: kind, url: url, assetID: assetID)
         job.sourceRevision = sourceRevision
+        job.thumbnailVersion = thumbnailVersion
         jobs.append(job)
         return job
     }

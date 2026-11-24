@@ -54,10 +54,12 @@ struct MediaOfflineThumbnailTests {
         let loader = OfflineThumbnailLoader(data: jpeg())
         let media = MediaLibraryController(imageDataLoader: loader)
         media.configure(session: session, activeEndpoint: nil)
-        let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appending(path: LibraryThumbnailCache.displayThumbnailFilename(assetID: descriptor.assetID, updatedAt: descriptor.updatedAt))
         let data = jpeg()
         try data.write(to: file)
-        defer { media.clearAll(); try? FileManager.default.removeItem(at: file) }
+        defer { media.clearAll(); try? FileManager.default.removeItem(at: directory) }
         let revision = media.thumbnailInventoryRevision
         media.registerWarmedThumbnails([.init(assetID: descriptor.assetID,
                                               sourceRevision: descriptor.updatedAt.ISO8601Format(), fileURL: file)])

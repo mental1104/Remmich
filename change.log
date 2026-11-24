@@ -1,3 +1,10 @@
+## 2026-11-24: Keep exact thumbnail versions through manifests and durable responses
+
+- Source: runtime-fixesf121fcd over424a22a; upstream remains672f02e. Separate from the8 obsolete fixture failures, review found two real same-second risks: an ISO-keyed manifest could serve an earlier millisecond file under a new Nuke key, and a completed-but-unimported queue body could be relabeled with a newer filename.
+- Managed thumbnail selection now requires the exact display filename. Thumbnail queue jobs gain optional thumbnailVersion, leaving the existing sourceRevision ISO contract and all non-thumbnail/export behavior intact. Prefetch/readiness/actual thumbnailData require the same exact version, retiring old/unknown cache response pairs before a new read. No cache-buster headers/queries, original-file mutations or server API changes.
+- Add actual MediaLibraryController old/new-manifest and real durable-queue old-body/new-wait regressions; keep source files unchanged and cancel the disabled-native new read. Update valid managed-file fixtures and readiness fixtures, retaining the existing legacy/unknown-mode negative cases.
+- Scoped SwiftFormat/diff checks pass; new Swift compilation/runtime remains unverified. No server/schema/workflow/production/private-media changes. Rollback preserves underlying media but restores the known stale-cache risk; old clients ignore the additive thumbnailVersion field and must not be used to claim same-second cache correctness.
+
 ## 2026-11-24: Seed current edited cache fixtures for existing lifecycle regressions
 
 - Source: runtime-fixesbd986e5 over candidate424a22a; upstream remains672f02e. Source review traces the remaining8 App issues to obsolete positive fixtures: four groups seed legacy one.jpg/asset.jpg files, and ready-cache jobs omit the required size/edited query. New production guards correctly refuse these old inputs, causing intended metadata/place/account tests to enter unintended network/failure paths.

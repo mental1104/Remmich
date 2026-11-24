@@ -1024,10 +1024,11 @@ struct RemmichTests {
         let media = MediaLibraryController()
         try media.configure(session: .fixture, activeEndpoint: url("http://immich.local/api"))
         let revision = Date(timeIntervalSince1970: 1000)
-        let localURL = FileManager.default.temporaryDirectory
-            .appending(path: "warmed-\(UUID().uuidString).jpeg")
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let localURL = directory.appending(path: LibraryThumbnailCache.displayThumbnailFilename(assetID: "warmed-local-asset", updatedAt: revision))
         try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: localURL)
-        defer { try? FileManager.default.removeItem(at: localURL) }
+        defer { try? FileManager.default.removeItem(at: directory) }
         media.registerWarmedThumbnails([
             .init(
                 assetID: "warmed-local-asset",
@@ -1868,7 +1869,7 @@ struct RemmichTests {
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appending(path: "thumbnail.jpg")
+        let file = directory.appending(path: LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.thumbnailRevision))
         try data.write(to: file)
         media.registerWarmedThumbnails([
             .init(
