@@ -18,7 +18,7 @@
 
 ## 验证
 
-新测试矩阵包含内宽 240/288/361/744/802/992/1162 点与 13/20/32/46 点真实 UIFont 测量，检查可见控件不重叠、位于标题栏范围内、触摸区域、单行/分行/菜单回退和无效临时几何。另有实际 UIKit 宿主测试，直接显示产品 Header 并改变窗口宽度/SwiftUI Dynamic Type，检查同一个 UISegmentedControl、字体/高度更新及外部选择保留；原生 valueChanged 还校验被上层拒绝的选择不会显示为已切换。不使用假截图或私人相簿。
+新测试矩阵包含内宽 240/288/361/744/802/992/1162 点与 13/20/32/46 点真实 UIFont 测量，检查可见控件不重叠、位于标题栏范围内、触摸区域、单行/分行/菜单回退和无效临时几何。另有实际 UIKit 宿主测试，直接显示产品 Header 并改变传入的可用内容宽度/SwiftUI Dynamic Type，检查同一个 UISegmentedControl、字体/高度更新及外部选择保留；没有调整 UIWindow 尺寸或驱动 AlbumsView 的外层几何，不代替真实窗口重排验收。原生 valueChanged 还校验被上层拒绝的选择不会显示为已切换。不使用假截图或私人相簿。
 
 NAS 实际检查：5 个受影响 Swift 文件 SwiftFormat0.64.5 scoped lint 和 diff 检查通过；直接源文本对照确认过滤、展开/关闭搜索、scope 切换、相簿激活和排序/列表切换业务成员未变，原 State/FocusState 声明保留。NAS 无 Swift/Xcode：新增测试、实际 Cmd-F/Escape、iPad 分屏/Stage Manager/横竖屏、VoiceOver 与指针交互仍未运行。后续统一 CI 和设备验收必须核对这些项目，不从纯几何检查宣称界面已通过。
 

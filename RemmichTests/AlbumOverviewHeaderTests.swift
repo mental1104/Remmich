@@ -61,7 +61,7 @@ struct AlbumOverviewHeaderTests {
         }
     }
 
-    /// 直接挂载产品Header并改变SwiftUI字号/宽度；原生分段实例、外部选择与文字缩放必须保留，不能只比较数学公式。
+    /// 挂载产品Header并改变给定内容宽度/SwiftUI字号，核原生实例、选择和缩放；不调整UIWindow，不能代替真实窗口重排验收。
     @Test func liveUIKitScopeRetainsIdentityAcrossWindowAndDynamicTypeChanges() async throws {
         try await waitUntil { UIApplication.shared.connectedScenes.contains { $0 is UIWindowScene } }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -142,7 +142,7 @@ struct AlbumOverviewHeaderTests {
     }
 }
 
-/// 仅供宿主测试改变窗口/字体/选择；没有服务端、身份或媒体状态。
+/// 仅供宿主测试注入内容宽度/字体/选择；没有服务端、身份或媒体状态，也不驱动真实UIWindow尺寸。
 @MainActor
 private final class AlbumHeaderFixtureState: ObservableObject {
     @Published var width: CGFloat = 802
