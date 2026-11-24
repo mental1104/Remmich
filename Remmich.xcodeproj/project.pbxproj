@@ -253,7 +253,8 @@
 				"",
 				"\"$SWIFTFORMAT\" --config \"$SRCROOT/.swiftformat\" \\",
 				"    \"$SRCROOT/Remmich\" \\",
-				"    \"$SRCROOT/RemmichTests\"",
+				"    \"$SRCROOT/RemmichTests\" \\",
+				"    \"$SRCROOT/RemmichUITests\"",
 				"",
 			);
 		};

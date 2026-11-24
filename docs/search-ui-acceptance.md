@@ -1,6 +1,6 @@
 # Synthetic search UI acceptance
 
-The shared `RemmichSearchUI` scheme builds the app and `RemmichUITests`. It runs five XCUITest scenarios against the real `SearchView`, `NativeSearchStore`, native grid and asset viewer. It does not test the normal app shell, HTTP wire behavior or a real account.
+The shared `RemmichSearchUI` scheme builds the app, `RemmichTests` and `RemmichUITests` together. Its script selects five XCUITest scenarios against the real `SearchView`, `NativeSearchStore`, native grid and asset viewer. It does not test the normal app shell, HTTP wire behavior or a real account.
 
 | Scenario | Assertion and evidence |
 | --- | --- |
@@ -19,9 +19,15 @@ bash Scripts/test-search-ui.sh phone /tmp/remmich-search-phone
 bash Scripts/test-search-ui.sh tablet /tmp/remmich-search-tablet
 ```
 
-The selector prefers iPhone 15 Pro and iPad Pro (11-inch) (4th generation, 2022). If the installed runtime lacks those names, it uses an available iPhone or 11-inch iPad Pro, respectively; `device.json` records the actual name, runtime and UDID. iPhone XS is excluded. A simulator UDID can replace `phone`/`tablet`. An existing output directory is rejected to preserve previous evidence. The runner keeps `SearchUI.xcresult` screenshots and its log, and performs no workflow or remote CI operation. The script defaults to `-jobs 1`; `REMMICH_UI_BUILD_JOBS` can explicitly raise this on a capable host.
+The selector prefers iPhone 15 Pro and iPad Pro (11-inch) (4th generation, 2022). If the installed runtime lacks those names, it uses an available iPhone or 11-inch iPad Pro, respectively; `device.json` records the actual name, full runtime and UDID in both artifacts and stdout. Version parsing accepts runtime identifiers with a device suffix. iPhone XS is excluded. A simulator UDID can replace `phone`/`tablet`. An existing output directory is rejected to preserve previous evidence. The runner keeps `SearchUI.xcresult` screenshots and its log, and performs no workflow or remote CI operation. The script defaults to `-jobs 1`; `REMMICH_UI_BUILD_JOBS` can explicitly raise this on a capable host.
 
-The equivalent test target is `RemmichUITests/SearchAcceptanceUITests`; scheme `RemmichSearchUI`, Debug configuration, `-parallel-testing-enabled NO`. The ordinary `RemmichTests` suite remains separate. A maintainer may reuse a built simulator product via `build-for-testing` and `test-without-building` in their CI integration; this change does not modify CI triggers or notifications.
+The UI test target is `RemmichUITests/SearchAcceptanceUITests`; scheme `RemmichSearchUI`, Debug configuration, `-parallel-testing-enabled NO`. App logic remains selectable as `-only-testing:RemmichTests`. A third script argument strictly reuses an already-built DerivedData directory: it requires exactly one `Build/Products/RemmichSearchUI_*.xctestrun`, uses `test-without-building -xctestrun` with only the UI target, and fails on missing/ambiguous manifests. It never falls back to compilation. For example, after the combined scheme's `build-for-testing`, invoke the phone/tablet commands above with the same DerivedData path appended as their third argument.
+
+## Pull request CI
+
+The existing Build job selects the combined scheme for ready PRs, builds the app/logic/UI bundles once, and runs API tests, app logic and the phone/tablet UI suites. UI devices execute sequentially on that runner with the same products; a device failure remains a job failure while the other device still executes if the build succeeded. The existing always-upload PR artifact now includes both devices' `device.json`, `xcodebuild.log` and `SearchUI.xcresult`, retaining failure screenshots when Xcode produces them. No error is converted to success and no signing/plugin-security bypass is added.
+
+Draft skipping and `ready_for_review` remain unchanged. No trigger, job, runner or runtime download is added. Existing `dev` push Build still uses the original `Remmich` scheme and preserves the product/revision receipt consumed by Tests and release validation. UI execution is added only to the PR path. CI notification settings are unchanged.
 
 ## Isolation and limitations
 
@@ -29,4 +35,4 @@ The host is compiled only with `DEBUG` and activated only when **both** `-ui-tes
 
 No photo library permission, uploads, edits, server writes or real photos are required. The fixtures cover UI state publication, not API success or actual server capabilities. The independently defined API/unit tests must still run. True device UI, iPad multitasking, accessibility/Dynamic Type, screenshot review, preset CRUD, all filter combinations, actual photo/video/Live Photo display and official-client coexistence remain separate acceptance items.
 
-Added on Linux/NAS without Swift, Xcode or Apple devices. Swift compilation and simulator execution are **not yet verified**; SwiftFormat and static project/shell checks are reported in `change.log`. Do not count these scenarios as passed until the macOS execution evidence exists.
+Added on Linux/NAS without Swift, Xcode or Apple devices. Swift compilation, cross-device reuse of the combined Xcode products, simulator execution and the amended workflow are **not yet verified** on macOS; SwiftFormat, static project/shell checks and mock-only script orchestration are reported in `change.log`. Do not count these scenarios as passed until the macOS execution evidence exists. This branch has not pushed or started CI; the main maintainer schedules the validation run.

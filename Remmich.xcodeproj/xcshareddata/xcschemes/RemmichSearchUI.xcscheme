@@ -2,6 +2,9 @@
 <Scheme LastUpgradeVersion="2700" version="1.7">
    <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES">
       <BuildActionEntries>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699503066C25F00C68930" BuildableName="RemmichTests.xctest" BlueprintName="RemmichTests" ReferencedContainer="container:Remmich.xcodeproj"/>
+         </BuildActionEntry>
          <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699433066C25E00C68930" BuildableName="Remmich.app" BlueprintName="Remmich" ReferencedContainer="container:Remmich.xcodeproj"/>
          </BuildActionEntry>
@@ -12,6 +15,9 @@
    </BuildAction>
    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
       <Testables>
+         <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699503066C25F00C68930" BuildableName="RemmichTests.xctest" BlueprintName="RemmichTests" ReferencedContainer="container:Remmich.xcodeproj"/>
+         </TestableReference>
          <TestableReference skipped="NO" parallelizable="NO">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="D20000000000000000000005" BuildableName="RemmichUITests.xctest" BlueprintName="RemmichUITests" ReferencedContainer="container:Remmich.xcodeproj"/>
          </TestableReference>

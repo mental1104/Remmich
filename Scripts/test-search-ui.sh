@@ -1,11 +1,14 @@
 #!/bin/bash
 # 在现有macOS/Xcode模拟器执行离线搜索验收；不创建workflow、不下载runtime、不连接图库。
-# 输入：phone/tablet或明确模拟器UDID；可选输出目录(必须不存在)。依赖：Xcode、jq。
+# 输入：phone/tablet或明确模拟器UDID；可选输出目录(必须不存在)、已构建DerivedData目录。
+# 第三个参数存在时只执行唯一联合scheme xctestrun，缺失/歧义直接失败，绝不偷偷重新构建。
+# 依赖：Xcode、jq；第三参数省略时保留本地构建测试入口。
 # 输出：设备/runtime信息、xcodebuild日志和含截图的xcresult；失败保留产物并返回非零。
 set -euo pipefail
 
 REMMICH_UI_DEVICE="${1:-phone}"
 REMMICH_UI_OUTPUT="${2:-${TMPDIR:-/tmp}/remmich-search-ui-$(date +%Y%m%d-%H%M%S)-$$}"
+REMMICH_UI_PREBUILT="${3:-}"
 REMMICH_UI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 for REMMICH_UI_COMMAND in xcodebuild xcrun jq; do
     if ! command -v "$REMMICH_UI_COMMAND" >/dev/null; then
@@ -25,7 +28,8 @@ case "$REMMICH_UI_DEVICE" in
             [.devices | to_entries[]
               | select(.key | contains("SimRuntime.iOS-"))
               | .key as $runtime
-              | ($runtime | split("iOS-")[1] | split("-") | map(tonumber)) as $version
+              | ($runtime | capture("iOS-(?<version>[0-9]+(?:-[0-9]+)*)").version
+                 | split("-") | map(tonumber)) as $version
               | select($version[0] >= 27)
               | .value[]
               | select(.isAvailable and (.name | contains("XS") | not))
@@ -42,7 +46,7 @@ case "$REMMICH_UI_DEVICE" in
             [.devices | to_entries[]
               | select(.key | contains("SimRuntime.iOS-"))
               | .key as $runtime
-              | select(($runtime | split("iOS-")[1] | split("-")[0] | tonumber) >= 27)
+              | select(($runtime | capture("iOS-(?<version>[0-9]+)").version | tonumber) >= 27)
               | .value[]
               | select(.udid == $id and .isAvailable and (.name | contains("XS") | not))
               | {udid, name, runtime: $runtime}]
@@ -54,11 +58,23 @@ esac
 mkdir -p "$REMMICH_UI_OUTPUT"
 printf '%s\n' "$REMMICH_UI_SELECTION" | tee "$REMMICH_UI_OUTPUT/device.json"
 cd "$REMMICH_UI_ROOT"
-# 串行执行避免两个UI runner同时旋转模拟器；保留代码生成和插件安全检查。
-xcodebuild test \
-    -project Remmich.xcodeproj -scheme RemmichSearchUI -configuration Debug \
+if [ -n "$REMMICH_UI_PREBUILT" ]; then
+    # 单个联合清单同时指向AppLogic/UI产品；不回退到其他scheme或任意find首项。
+    shopt -s nullglob
+    REMMICH_UI_MANIFESTS=("$REMMICH_UI_PREBUILT"/Build/Products/RemmichSearchUI_*.xctestrun)
+    if [ "${#REMMICH_UI_MANIFESTS[@]}" -ne 1 ]; then
+        echo "Expected exactly one prebuilt RemmichSearchUI xctestrun manifest." >&2
+        exit 2
+    fi
+    REMMICH_UI_TEST_ACTION=(test-without-building -xctestrun "${REMMICH_UI_MANIFESTS[0]}")
+else
+    REMMICH_UI_TEST_ACTION=(test -project Remmich.xcodeproj -scheme RemmichSearchUI -configuration Debug
+        -derivedDataPath "$REMMICH_UI_OUTPUT/DerivedData")
+fi
+
+# 串行执行避免两个UI runner同时旋转模拟器；构建模式保留代码生成和插件安全检查。
+xcodebuild "${REMMICH_UI_TEST_ACTION[@]}" \
     -destination "platform=iOS Simulator,id=$REMMICH_UI_UDID" \
-    -derivedDataPath "$REMMICH_UI_OUTPUT/DerivedData" \
     -resultBundlePath "$REMMICH_UI_OUTPUT/SearchUI.xcresult" \
     -only-testing:RemmichUITests/SearchAcceptanceUITests \
     -parallel-testing-enabled NO -jobs "${REMMICH_UI_BUILD_JOBS:-1}" \
