@@ -19,7 +19,17 @@
 
 真实字节使用 `PHAssetResourceManager.requestData` 回调逐块计算CryptoKit Insecure.SHA1，不累计整张照片/视频、不写临时原片。`isNetworkAccessAllowed=false`固定；[Apple公开合同](https://developer.apple.com/documentation/photos/phassetresourcerequestoptions/isnetworkaccessallowed)表明非本机资源会返回需要网络的错误，不应改true重试。Mutex保证摘要、continuation与请求ID安装/取消只完成一次；cancel早于ID返回时，安装后仍取消实际系统请求。cloud-only变为 `.notLocallyAvailable`，没有部分摘要。
 
-## NAS服务适配边界
+## Live Photo静态展示补充（fromf92b1e8）
+
+原始首版的Live整组拒绝仍不等于可以证明motion。本次仅把严格未编辑的Live **still照片**纳入现有SHA1读取：hasAdjustments必须false、adjustmentTime必须nil，修改版本已知且资源完整对齐；恰好一个originalPhoto且公开UTType分类为非RAW image，加一个pairedVideo且为video。任何adjusted/alternate/RAW/未知/额外/重复或缺失成员都拒绝，不从多资源中猜current。仅photo或仅paired的不完整Live继续返回unsupportedMedia；普通image/video原政策不变。
+
+selection只返回photo。LocalPhotoChecksumProof.source保留完整两个资源描述用于前后版本核对，但digest **只覆盖still字节**；它不是pairedVideo摘要、远端配对确认、Live整组或备份证明。动态播放仍须独立的motion证明以及root对远端配对和两成员fresh详情的校验，不得把PHAsset(image/photoLive)交给forVideo或从静态命中直接播放。
+
+PhotoKitCurrentResourceChecksumReader复用原来的expected完整snapshot、授权、账号context和前后source对比；paired描述变化也会使still证明作废。真实字节入口对Live再显式要求adjustmentTimestamp nil且选中photo/image，随后仍调用同一个network=false ResourceManager分块SHA1，不读取pairedVideo、Immich媒体或下载iCloud。没有改Controller/Media/LiveView/服务端/上传/SQLite/CI。
+
+新增LocalLiveStillChecksumTests共6函数28声明场景：两种资源顺序的政策与真实reader→真实SHA1Stream正例、禁止motion冒充still proof、15种不安全shape在字节前拒绝、7种paired/photo/版本/编辑/权限/context变化和partial-data后network-required不足。旧26项reader测试仅澄清不完整Live的注释，原拒绝断言保留。四个相关Swift文件格式/lint、diff、独立Node37字节SHA1/Base64参考及普通媒体政策不变静态核对通过；NAS无Swift/Xcode，新增28场景执行、真实PhotoKit Live still及设备播放仍未验证，不能以此声称整组已匹配。
+
+## NAS服务适配边界（既有）
 
 当前父Fork的bulk precheck复用 `getByChecksums`，内容/backup指纹兼容仅在现有iPhone backup配置有效、目标library在线/未删且指纹就绪时参与；clientChecksum代表排序可优先返回。新客户端不改配置、不写/分配指纹、不使用SDK存在作为已验证证据。普通已有SHA1资产即使没有mobile-app也可由本机摘要查询；外部库配置/代表指纹不齐会未命中，必须在设置进度中可观察，不能当备份确认或悄悄上传。
 

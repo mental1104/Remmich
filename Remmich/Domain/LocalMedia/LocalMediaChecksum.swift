@@ -25,15 +25,23 @@ nonisolated struct LocalPhotoChecksumAsset: Equatable, Sendable {
     let snapshot: LocalPhotoSnapshot
     let resources: [LocalPhotoChecksumResource]
 
-    /// 只选择明确未编辑、单一原始资源；fullSize仅承诺modified版本，首版不猜它就是Photos current。
+    /// 普通媒体只选未编辑单一原始资源；严格Live photo+pairedVideo仅选still照片，绝不证明motion/整组备份。
+    /// fullSize仅承诺modified版本，不猜它就是Photos current；Live任何调整时间也不能用原片冒充current。
     func selection() -> Result<LocalPhotoChecksumResource, LocalPhotoChecksumInsufficiency> {
         guard !snapshot.identity.localIdentifier.isEmpty,
               snapshot.pixelWidth > 0, snapshot.pixelHeight > 0, snapshot.duration.isFinite, snapshot.duration >= 0 else { return .failure(.unsupportedMedia) }
         guard let modified = snapshot.identity.modificationDate, modified.timeIntervalSince1970.isFinite else { return .failure(.versionUnavailable) }
-        guard snapshot.identity.mediaKind != .livePhoto else { return .failure(.unsupportedMedia) }
         guard resources.map(\.descriptor) == snapshot.resources else { return .failure(.ambiguousResources) }
         guard !snapshot.hasAdjustments, !resources.contains(where: { $0.descriptor.role == .adjusted || $0.descriptor.role == .adjustmentData }) else { return .failure(.currentRepresentationUnproven) }
         guard !resources.contains(where: { $0.format == .raw || $0.descriptor.role == .alternatePhoto }) else { return .failure(.rawOrCompound) }
+        if snapshot.identity.mediaKind == .livePhoto {
+            guard snapshot.adjustmentTime == nil else { return .failure(.currentRepresentationUnproven) }
+            let photos = resources.filter { $0.descriptor.role == .originalPhoto && $0.format == .image }
+            let motions = resources.filter { $0.descriptor.role == .pairedVideo && $0.format == .video }
+            guard resources.count == 2, photos.count == 1, motions.count == 1 else { return .failure(.unsupportedMedia) }
+            // 完整paired描述只绑定源版本；此digest必须来自photo，不触及pairedVideo字节或remote配对证明。
+            return .success(photos[0])
+        }
         guard resources.count == 1, let resource = resources.first else { return .failure(.ambiguousResources) }
         switch snapshot.identity.mediaKind {
         case .image:
@@ -67,7 +75,8 @@ nonisolated struct LocalPhotoByteDigest: Equatable, Sendable {
     }
 }
 
-/// 只读展示用的本机current字节证明；不是上传回执、远端唯一性或备份/清理凭据。
+/// 只读展示用的本机current字节证明；Live只证明still，source含paired描述不代表已哈希/验证motion。
+/// 不是上传回执、远端配对/唯一性或备份/清理凭据；motion另需独立证明与fresh配对校验。
 nonisolated struct LocalPhotoChecksumProof: Equatable, Sendable {
     let source: LocalPhotoSnapshot
     let resource: LocalPhotoChecksumResource

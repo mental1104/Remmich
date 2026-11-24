@@ -86,11 +86,14 @@ import UniformTypeIdentifiers
         return .init(snapshot: snapshot, resources: resources)
     }
 
-    /// identity/resource已通过政策；发请求前再取公开对象并核对唯一描述，避免选择到别的版本/资源。
+    /// identity/resource已通过政策；发请求前再取公开对象并核对唯一描述，Live还须无调整时间且只读photo。
+    /// 完整源与paired描述的前后比较由checksum执行；不从still证明跳到forVideo或motion读取。
     private static func readBytes(_ identity: LocalPhotoIdentity, _ resource: LocalPhotoChecksumResource) async throws -> LocalPhotoByteDigest {
         try Task.checkCancellation()
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identity.localIdentifier], options: nil).firstObject,
-              asset.modificationDate == identity.modificationDate, !asset.hasAdjustments else { throw LocalPhotoChecksumError.sourceChanged }
+              asset.modificationDate == identity.modificationDate, !asset.hasAdjustments,
+              identity.mediaKind != .livePhoto || (asset.adjustmentTimestamp == nil && resource.descriptor.role == .originalPhoto && resource.format == .image)
+        else { throw LocalPhotoChecksumError.sourceChanged }
         let selected = PHAssetResource.assetResources(for: asset).filter { describe($0) == resource }
         guard selected.count == 1, let selected = selected.first else { throw LocalPhotoChecksumError.sourceChanged }
         return try await PhotoKitLocalResourceRequests().read(selected)

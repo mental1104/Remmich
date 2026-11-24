@@ -29,7 +29,7 @@ import Testing
         #expect(script.requests.count == 2 && producer.allowedValues == [false] && producer.cancelledIDs.isEmpty)
     }
 
-    /// 不受支持的资源绝不读取原片来猜current；raw/复合、编辑fullsize、LivePhoto和未知版本明确不足。
+    /// 不受支持的资源绝不读取原片来猜current；raw/复合、编辑fullsize、不完整LivePhoto和未知版本明确不足。
     @Test(arguments: ["edited", "fullsize", "adjustment-data", "raw", "raw-jpeg", "duplicate", "unknown-format", "live", "no-version"])
     func unsupportedRepresentationsNeverReadBytes(_ kind: String) async throws {
         var source = checksumAsset()
@@ -42,6 +42,7 @@ import Testing
         case "raw-jpeg": source = checksumAsset(resources: [checksumResource(format: .raw), checksumResource(role: .alternatePhoto, type: 4)]); expected = .rawOrCompound
         case "duplicate": source = checksumAsset(resources: [checksumResource(), checksumResource()]); expected = .ambiguousResources
         case "unknown-format": source = checksumAsset(resources: [checksumResource(format: .unsupported)]); expected = .unsupportedResource
+        // 旧夹具只有photo，没有pairedVideo；严格Live still策略也必须继续拒绝。
         case "live": source = checksumAsset(live: true); expected = .unsupportedMedia
         default: source = checksumAsset(modified: nil); expected = .versionUnavailable
         }
