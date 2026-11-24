@@ -125,6 +125,149 @@ import Testing
         #expect(controller.selected == ["keep"] && controller.excluded.isEmpty && controller.requiresSelectionScan)
     }
 
+    /// 真实Controller扫描必须先应用排除，再将完整逻辑源写入SQLite；旧Live Photo部分回执只保留为取消历史。
+    /// 仅照片库列表/快照被替换；冷Controller、队列选择与持久化均走正式实现，扫描本身不能导出或上传。
+    @Test(.timeLimit(.minutes(1)))
+    func explicitScanPersistsEligibleSourcesAndColdControllerRestoresExclusions() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupAlbumScan-\(UUID())", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let endpoint = try #require(URL(string: "https://backup-scan-\(UUID().uuidString.lowercased()).example.invalid/api"))
+        let account = backupAlbumAccount(owner: "scan-owner", endpoint: endpoint)
+        let database = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: database)
+        try await store.prepare(scope: account.scope)
+        let hidden = PhotoBackupSource(localID: "excluded-live", modifiedAt: nil, kind: .livePhoto)
+        let video = PhotoBackupSource(localID: "keep-video", modifiedAt: Date(timeIntervalSince1970: 1), kind: .video)
+        let live = PhotoBackupSource(localID: "keep-live", modifiedAt: Date(timeIntervalSince1970: 1), kind: .livePhoto)
+        var previous = PhotoBackupJournal(namespace: account.scope.cacheNamespace)
+        try previous.enqueue([hidden])
+        let hiddenID = try #require(previous.jobs.first?.id)
+        let motionID = UUID()
+        try previous.update(hiddenID) { job in try job.begin(); try job.exported(); try job.recordMotion(motionID); job.pause() }
+        try await store.savePhotoBackups(previous, scope: account.scope)
+        let exporter = UnexpectedBackupAlbumExporter()
+        var requestedIDs: Set<String> = []
+        let controller = PhotoBackupController(store: store, exporter: exporter, albumLoader: {
+            .init(albums: [.init(id: "all", title: "All"), .init(id: "private", title: "Excluded")], limited: true)
+        }, albumScanner: { ids in
+            requestedIDs = ids
+            return [
+                .init(id: "all", assets: [.init(source: hidden, capturedAt: .distantPast),
+                                          .init(source: video, capturedAt: Date(timeIntervalSince1970: 2)),
+                                          .init(source: live, capturedAt: Date(timeIntervalSince1970: 3))]),
+                .init(id: "private", assets: [.init(source: hidden, capturedAt: .distantPast)]),
+            ]
+        })
+        await controller.load(using: account.manager)
+        await controller.loadAlbums()
+        controller.selected = ["all"]
+        controller.excluded = ["private"]
+        controller.allowCloud = false
+        let pending = controller.scan(using: account.manager)
+        let scan = try #require(pending)
+        await scan.value
+        #expect(requestedIDs == ["all", "private"] && !controller.running)
+        #expect(exporter.calls == 0 && !controller.requiresSelectionScan)
+
+        // 独立连接重新读盘，并检查worker使用的真实队列入口；被排除的整个Live源不能成为可执行项。
+        let coldStore = SQLiteLibraryIndexStore(databaseURL: database)
+        let saved = try await coldStore.loadPhotoBackups(scope: account.scope)
+        #expect(saved.version == 2 && saved.selectedAlbumIDs == ["all"] && saved.excludedAlbumIDs == ["private"])
+        #expect(!saved.allowCloud && saved.jobs.map(\.source) == [hidden, video, live])
+        #expect(saved.jobs.map(\.stage) == [.cancelled, .queued, .queued])
+        #expect(saved.jobs.first?.motionAssetID == motionID && saved.jobs.first?.id == hiddenID)
+        let next = try await coldStore.nextQueuedPhotoBackup(scope: account.scope)
+        #expect(next?.source == video)
+        let cold = PhotoBackupController(store: coldStore, exporter: exporter)
+        await cold.load(using: account.manager)
+        #expect(cold.selected == ["all"] && cold.excluded == ["private"] && !cold.allowCloud)
+        #expect(cold.jobs.map(\.source) == [hidden, video, live] && !cold.requiresSelectionScan)
+        #expect(exporter.calls == 0)
+    }
+
+    /// 权限拒绝或排除相簿消失发生在扫描边界时必须保留原始SQLite/回执；不能以空排除替换计划。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func failedScanPreservesSavedExclusionPlan(_ permissionDenied: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupAlbumScanFailure-\(UUID())", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let endpoint = try #require(URL(string: "https://backup-scan-failure-\(UUID().uuidString.lowercased()).example.invalid/api"))
+        let account = backupAlbumAccount(owner: "failed-owner", endpoint: endpoint)
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: account.scope)
+        let source = PhotoBackupSource(localID: "keep", modifiedAt: nil, kind: .photo)
+        let selection = try PhotoBackupAlbumSelection(included: ["all"], excluded: ["private"])
+        var journal = PhotoBackupJournal(namespace: account.scope.cacheNamespace)
+        try journal.applyAlbumScan(selection.scan([.init(id: "all", assets: [.init(source: source, capturedAt: nil)]),
+                                                   .init(id: "private", assets: [])]), allowCloud: false)
+        try await store.savePhotoBackups(journal, scope: account.scope)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let before = try encoder.encode(journal)
+        let exporter = UnexpectedBackupAlbumExporter()
+        let controller = PhotoBackupController(store: store, exporter: exporter, albumLoader: {
+            .init(albums: [.init(id: "all", title: "All"), .init(id: "private", title: "Excluded")], limited: false)
+        }, albumScanner: { _ in
+            if permissionDenied {
+                throw PhotoBackupController.AlbumReadError.permission
+            }
+            return [.init(id: "all", assets: [.init(source: source, capturedAt: nil)])]
+        })
+        await controller.load(using: account.manager)
+        await controller.loadAlbums()
+        let scan = controller.scan(using: account.manager)
+        #expect(scan == nil && !controller.running && exporter.calls == 0)
+        #expect(controller.selected == ["all"] && controller.excluded == ["private"])
+        let after = try await store.loadPhotoBackups(scope: account.scope)
+        #expect(try encoder.encode(after) == before)
+    }
+
+    /// 未扫描草稿只属于原账号；同一Controller读取新账号必须恢复新账号自己的规则，不跨账号沿用排除或iCloud同意。
+    @Test(.timeLimit(.minutes(1)))
+    func changingAccountDiscardsOnlyTheOldAccountsUnsavedDraft() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupAlbumAccount-\(UUID())", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let endpoint = try #require(URL(string: "https://backup-account-\(UUID().uuidString.lowercased()).example.invalid/api"))
+        let first = backupAlbumAccount(owner: "first-owner", endpoint: endpoint)
+        let second = backupAlbumAccount(owner: "second-owner", endpoint: endpoint)
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: first.scope)
+        try await store.prepare(scope: second.scope)
+        var firstJournal = PhotoBackupJournal(namespace: first.scope.cacheNamespace)
+        try firstJournal.applyAlbumScan(PhotoBackupAlbumSelection(included: ["first-keep", "missing"], excluded: ["first-private"])
+            .scan([.init(id: "first-keep", assets: []), .init(id: "missing", assets: []), .init(id: "first-private", assets: [])]), allowCloud: true)
+        var secondJournal = PhotoBackupJournal(namespace: second.scope.cacheNamespace)
+        try secondJournal.applyAlbumScan(PhotoBackupAlbumSelection(included: ["second-keep"], excluded: ["second-private"])
+            .scan([.init(id: "second-keep", assets: []), .init(id: "second-private", assets: [])]), allowCloud: false)
+        try await store.savePhotoBackups(firstJournal, scope: first.scope)
+        try await store.savePhotoBackups(secondJournal, scope: second.scope)
+        let controller = PhotoBackupController(store: store, albumLoader: {
+            .init(albums: [.init(id: "first-keep", title: "First")], limited: false)
+        }, albumScanner: { _ in
+            Issue.record("A different account must load its configuration before scanning")
+            return []
+        })
+        await controller.load(using: first.manager)
+        let foreignResume = controller.resume(using: second.manager)
+        await foreignResume?.value
+        #expect(foreignResume == nil)
+        await controller.loadAlbums()
+        controller.removeUnavailableAlbumSelections()
+        #expect(controller.selected == ["first-keep"] && controller.excluded.isEmpty && controller.requiresSelectionScan)
+        // 尚未成功读出新账号日志时，即使旧页面仍在，也不能把旧草稿扫描进新账号。
+        let prematureScan = controller.scan(using: second.manager)
+        let prematureResume = controller.resume(using: second.manager)
+        #expect(prematureScan == nil && prematureResume == nil && !controller.running)
+        await controller.load(using: second.manager)
+        #expect(controller.selected == ["second-keep"] && controller.excluded == ["second-private"])
+        #expect(!controller.allowCloud && !controller.requiresSelectionScan)
+        let savedFirst = try await store.loadPhotoBackups(scope: first.scope)
+        let savedSecond = try await store.loadPhotoBackups(scope: second.scope)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(try encoder.encode(savedFirst) == encoder.encode(firstJournal))
+        #expect(try encoder.encode(savedSecond) == encoder.encode(secondJournal))
+    }
+
     /// condition观察当前Controller任务是否退役；有界等待只保护回归卡死，不靠固定sleep推测业务顺序。
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0 ..< 150 {
@@ -135,6 +278,20 @@ import Testing
         }
         try #require(condition(), "Backup album recovery task did not retire")
     }
+}
+
+/// owner是合成认证ID，endpoint为本测试专有.invalid地址；返回真实session/scope/manager，HTTP全部由失败替身拦截。
+@MainActor private func backupAlbumAccount(owner: String, endpoint: URL) -> (session: AccountSession, scope: MediaAccountScope, manager: LibraryManagementController) {
+    let session = AccountSession(apiURL: endpoint, accessToken: "synthetic", userID: owner,
+                                 userEmail: "synthetic@example.invalid", name: "Synthetic", isAdmin: false,
+                                 serverVersion: .init(major: 3, minor: 4, patch: 2, prerelease: nil))
+    let manager = LibraryManagementController(configurationFactory: {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [BackupAlbumNoNetworkProtocol.self]
+        return configuration
+    })
+    manager.configure(session: session, endpoint: endpoint)
+    return (session, MediaAccountScope(session: session), manager)
 }
 
 /// 读取来源替身只返回有限合成相簿或明确失败，不修改Controller选择、日志或队列。
