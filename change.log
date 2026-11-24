@@ -1,3 +1,9 @@
+## 2026-11-25: Exercise genuine native Live Photo success and final-pair rejection
+
+- Source: codex/test-real-native-live-routing from8d38878; upstream remains672f02e, no sync. Tests/docs only: reuse one actual public PhotoKit reconstruction lease for sequential stable-pair success, final motion-version change and final-checksum change. Factory nil/error is a hard failure, not a skip/fake object. No App/server/API/workflow/production change.
+- Optional existing-fixture parameters retain prior50 defaultnil cases. Snapshot file names/timestamps/pixels and still/motion digests come from the actual generated files/receipt; bytes and SHA1 are rechecked. Real restored association/Media helper must make exactly4 fresh reads, forward the full proof source and return the identical native object/device origin only for stability; both final changes returnnil/no origin with zero Nuke loads. Reader fakes only the system port.
+- Scoped one-file SwiftFormat0.64.5 format/lint, whitespace and static lifecycle/protocol checks pass on NAS; Swift/Xcode, genuine factory reconstruction and this new case UNEXECUTED until next unified macOS CI. This is not real Photos-library authorization, HTTP/device/playback/audio acceptance. See docs/real-native-live-routing-tests.md. No push/CI; rollback test/docs only.
+
 ## 2026-11-24: Exercise no-Cloud-ID Live still matching through real Nuke display
 
 - Source: independent codex/test-live-still-match-display from4e007c1; upstream remains672f02e, no sync. Add only one new Tests file and docs; do not modify production, current CI, workflows, official clients, server/API or deployment.

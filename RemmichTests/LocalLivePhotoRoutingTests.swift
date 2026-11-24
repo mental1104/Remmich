@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import Foundation
 import Nuke
 import Photos
@@ -9,6 +10,37 @@ import Testing
 /// 真实Media入口→fresh pair→本机proof→native请求；恢复资料是真实原子JSON，替身不伪造可播放PHLivePhoto。
 @Suite("Local Live Photo routing")
 @MainActor struct LocalLivePhotoRoutingTests {
+    /// 一份公开PhotoKit真实重建lease顺序覆盖成功及最终版本/摘要改变；不创建伪PHLivePhoto或触碰系统图库。
+    @Test(.timeLimit(.minutes(2)))
+    func genuineNativeObjectRequiresStableFinalPair() async throws {
+        let native = try await SyntheticLivePhotoFixture.make()
+        defer { try? native.close() }
+        let source = try liveRoutingSource(native: native)
+        let stillBytes = try Data(contentsOf: native.stillURL)
+        let motionBytes = try Data(contentsOf: native.motionURL)
+        #expect(native.stillDigest.sha1Base64 != native.motionDigest.sha1Base64)
+        #expect(native.motionDigest.byteCount == Int64(motionBytes.count) && native.stillDigest.byteCount == Int64(stillBytes.count))
+        #expect(native.stillDigest.sha1Base64 == Data(Insecure.SHA1.hash(data: stillBytes)).base64EncodedString())
+        #expect(native.motionDigest.sha1Base64 == Data(Insecure.SHA1.hash(data: motionBytes)).base64EncodedString())
+        let changes: [String?] = [nil, "version", "checksum"]
+        for change in changes {
+            let fixture = try await liveRoutingFixture(nativeFixture: native, finalPairChange: change)
+            defer { fixture.close() }
+            let result = try await fixture.read()
+            let requests = await fixture.remote.requests
+            #expect(requests == [liveRoutingStillID, liveRoutingMotionID, liveRoutingStillID, liveRoutingMotionID])
+            #expect(fixture.reader.calls == ["proof", "native"] && fixture.loader.requests.isEmpty)
+            #expect(fixture.reader.expectedSource == source.snapshot.withCloudIdentity(.unavailable))
+            let origin = fixture.media.mediaReadOrigin(assetID: liveRoutingStillID.uuidString, revision: liveRoutingRevision)
+            if change == nil {
+                #expect(result === native.native && origin == .devicePhotos)
+            } else {
+                #expect(result == nil && origin == nil)
+            }
+        }
+        try native.close()
+    }
+
     /// 完整同源motion摘要才允许native请求；这里native明确nil，只证明路由/像素与零媒体请求，不冒称播放成功。
     @Test func verifiedMotionReachesNativeReaderWithoutRemoteMedia() async throws {
         let fixture = try await liveRoutingFixture(); defer { fixture.close() }
@@ -190,28 +222,30 @@ private nonisolated let liveRoutingRevision = Date(timeIntervalSince1970: 100.12
 }
 
 /// 从真实JSON cold恢复确认still映射；管理endpoint初始离线使自动刷新不抢占本例手动fresh序列。
+/// nativeFixture非nil时采用其真实资源/摘要/native，finalPairChange只改变第4个fresh motion响应，其余默认场景保持原值。
 @MainActor private func liveRoutingFixture(pairMode: String = "valid", proofMode: String = "valid", ordinaryPhoto: Bool = false,
-                                           failureAt: Int? = nil, readerFailure: String? = nil, holdStage: String? = nil) async throws -> LiveRoutingFixture
+                                           failureAt: Int? = nil, readerFailure: String? = nil, holdStage: String? = nil,
+                                           nativeFixture: SyntheticLivePhotoFixture? = nil, finalPairChange: String? = nil) async throws -> LiveRoutingFixture
 {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("LiveRouting-\(UUID())", isDirectory: true)
     let session = liveRoutingSession(); let scope = MediaAccountScope(session: session)
-    let source = liveRoutingSource()
+    let source = try nativeFixture.map { try liveRoutingSource(native: $0) } ?? liveRoutingSource()
     let identity = ordinaryPhoto ? LocalPhotoIdentity(localIdentifier: source.snapshot.identity.localIdentifier, modificationDate: source.snapshot.identity.modificationDate, mediaKind: .image) : source.snapshot.identity
-    let stillChecksum = Data(repeating: 0xAA, count: 20).base64EncodedString()
+    let stillChecksum = nativeFixture?.stillDigest.sha1Base64 ?? Data(repeating: 0xAA, count: 20).base64EncodedString()
     let association = LocalMediaAssociation(remoteID: liveRoutingStillID, remoteRevision: liveRoutingRevision, localIdentity: identity, checksum: stillChecksum, source: .mobileMetadata)
     let store = LocalMediaAssociationStore(directory: root.appendingPathComponent("matches"))
     _ = try await store.save(.init(scope: scope, enabled: true, access: .full, associations: [association]), scope: scope, permit: LocalMediaSavePermit())
     let inventory = LiveRoutingInventory()
     let matches = LocalMediaMatchController(inventory: inventory, metadata: LiveRoutingNoMetadata(), checksum: LiveRoutingNoChecksum(), persistence: store, observeChanges: false)
     let gate = LiveRoutingGate()
-    let digest = try LocalPhotoByteDigest(sha1Hex: "58be777b9bf5f3971870cc8725c828fcfc089cf2", byteCount: 34)
+    let digest = try nativeFixture?.motionDigest ?? LocalPhotoByteDigest(sha1Hex: "58be777b9bf5f3971870cc8725c828fcfc089cf2", byteCount: 34)
     let remote = LiveRoutingRemote(owner: UUID(uuidString: session.userID)!, stillChecksum: stillChecksum, motionChecksum: digest.sha1Base64,
-                                   mode: pairMode, failureAt: failureAt, holdStage: holdStage, gate: gate)
-    let proofSource = liveRoutingSource(proofMode)
+                                   mode: pairMode, failureAt: failureAt, holdStage: holdStage, gate: gate, finalPairChange: finalPairChange)
+    let proofSource = nativeFixture == nil ? liveRoutingSource(proofMode) : source
     let resource = try #require(proofSource.motionResource())
     let proof = try LocalLivePhotoMotionProof(source: proofSource, resource: resource,
                                               digest: proofMode == "hash" ? .init(sha1Hex: String(repeating: "bb", count: 20), byteCount: 34) : digest)
-    let reader = LiveRoutingReader(proof: proofMode == "nil" ? nil : proof, failure: readerFailure, holdStage: holdStage, gate: gate)
+    let reader = LiveRoutingReader(proof: proofMode == "nil" ? nil : proof, failure: readerFailure, holdStage: holdStage, gate: gate, native: nativeFixture?.native)
     let loader = LiveRoutingNoMedia()
     let transfers = LibraryTransferQueue(rootURL: root.appendingPathComponent("transfers"), nativeTasksProvider: { [] }, sessionIdentifier: "io.github.espeonblue.live-unused-\(UUID())")
     let exports = MediaExportController(store: .init(databaseURL: root.appendingPathComponent("unused.sqlite")), photos: LiveRoutingNoExports(), transfers: transfers)
@@ -239,6 +273,26 @@ private nonisolated func liveRoutingSource(_ mode: String = "valid") -> LocalLiv
                                       creationDate: Date(timeIntervalSince1970: 10), adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil,
                                       pixelWidth: 64, pixelHeight: 48, duration: 0, mediaSubtypes: PHAssetMediaSubtype.photoLive.rawValue,
                                       resources: [photo.descriptor, motion.descriptor], cloudIdentity: .unavailable)
+    return .init(snapshot: snapshot, resources: [photo, motion], access: .full, isLivePlayback: true)
+}
+
+/// native是公开文件重建的真实对象lease；描述取实际文件名、文件时间和已独立回读的像素/类型，身份仅是此合成文件UUID。
+/// 这里没有PHAsset或系统授权，full只是系统端口的测试观察；产品仍决定真实关联、fresh pair和摘要是否可用。
+@MainActor private func liveRoutingSource(native: SyntheticLivePhotoFixture) throws -> LocalLivePhotoSource {
+    let photo = LocalPhotoChecksumResource(descriptor: .init(type: PHAssetResourceType.photo.rawValue, role: .originalPhoto,
+                                                             originalFilename: native.stillURL.lastPathComponent, uniformTypeIdentifier: "public.jpeg",
+                                                             pixelWidth: native.pixels.width, pixelHeight: native.pixels.height), format: .image)
+    let motion = LocalPhotoChecksumResource(descriptor: .init(type: PHAssetResourceType.pairedVideo.rawValue, role: .pairedVideo,
+                                                              originalFilename: native.motionURL.lastPathComponent, uniformTypeIdentifier: "com.apple.quicktime-movie",
+                                                              pixelWidth: native.pixels.width, pixelHeight: native.pixels.height), format: .video)
+    let photoValues = try native.stillURL.resourceValues(forKeys: [.creationDateKey])
+    let motionValues = try native.motionURL.resourceValues(forKeys: [.contentModificationDateKey])
+    let created = try #require(photoValues.creationDate)
+    let modified = try #require(motionValues.contentModificationDate)
+    let snapshot = LocalPhotoSnapshot(identity: .init(localIdentifier: "file-native-\(native.identifier)", modificationDate: modified, mediaKind: .livePhoto),
+                                      creationDate: created, adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil,
+                                      pixelWidth: native.pixels.width, pixelHeight: native.pixels.height, duration: 0,
+                                      mediaSubtypes: PHAssetMediaSubtype.photoLive.rawValue, resources: [photo.descriptor, motion.descriptor], cloudIdentity: .unavailable)
     return .init(snapshot: snapshot, resources: [photo, motion], access: .full, isLivePlayback: true)
 }
 
@@ -299,11 +353,16 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
     private let failureAt: Int?
     private let holdStage: String?
     private let gate: LiveRoutingGate
+    private let finalPairChange: String?
     private(set) var requests: [UUID] = []
-    /// owner/两个checksum为本例账号与固定摘要；mode选择fresh字段，failureAt为失败调用序号，holdStage/gate限定真实挂起点。
-    init(owner: UUID, stillChecksum: String, motionChecksum: String, mode: String, failureAt: Int?, holdStage: String?, gate: LiveRoutingGate) {
+    /// owner/两个checksum为本例账号与摘要；mode选择fresh字段，failureAt为失败序号，holdStage/gate控制挂起。
+    /// finalPairChange仅在第4次fresh回读改变motion版本或用真实still摘要替换motion摘要，不修改前阶段响应。
+    init(owner: UUID, stillChecksum: String, motionChecksum: String, mode: String, failureAt: Int?, holdStage: String?, gate: LiveRoutingGate,
+         finalPairChange: String? = nil)
+    {
         self.owner = owner; self.stillChecksum = stillChecksum; self.motionChecksum = motionChecksum; self.mode = mode
         self.failureAt = failureAt; self.holdStage = holdStage; self.gate = gate
+        self.finalPairChange = finalPairChange
     }
 
     /// 只返回所请求UUID详情；即使取消/换号也故意交出迟到结果，由真实Media helper拒绝。
@@ -325,8 +384,9 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
         }
         return .init(id: id, ownerId: mode == "motion-owner" ? UUID() : owner, type: mode == "motion-type" ? "IMAGE" : "VIDEO",
                      isTrashed: mode == "unknown-trash" ? nil : mode == "trash", isOffline: mode == "unknown-offline" ? nil : mode == "offline",
-                     isEdited: mode == "unknown-edited" ? nil : mode == "edited", checksum: mode == "bad-checksum" ? "invalid" : motionChecksum,
-                     updatedAt: mode == "missing-revision" ? nil : Date(timeIntervalSince1970: 200))
+                     isEdited: mode == "unknown-edited" ? nil : mode == "edited",
+                     checksum: mode == "bad-checksum" ? "invalid" : index == 4 && finalPairChange == "checksum" ? stillChecksum : motionChecksum,
+                     updatedAt: mode == "missing-revision" ? nil : Date(timeIntervalSince1970: index == 4 && finalPairChange == "version" ? 201 : 200))
     }
 
     /// 本例metadata由真实恢复资料供给，不允许意外发全库同步。
@@ -340,18 +400,20 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
     }
 }
 
-/// 专用reader仅替换系统PH读取；proof为真实policy构造，native永远nil且无PHLivePhoto()假成功对象。
+/// 专用reader仅替换系统PH读取；proof使用真实policy构造，native默认nil，可接收公开文件重建的真实对象。
 @MainActor private final class LiveRoutingReader: LocalLivePhotoMediaReading {
     private let proof: LocalLivePhotoMotionProof?
     private let failure: String?
     private let holdStage: String?
     private let gate: LiveRoutingGate
+    private let native: PHLivePhoto?
     private(set) var calls: [String] = []
     private(set) var pixels: MediaPixelSize?
     private(set) var expectedSource: LocalPhotoSnapshot?
-    /// proof可能是故意不匹配的已知本机版本，reader不替helper提前过滤。
-    init(proof: LocalLivePhotoMotionProof?, failure: String?, holdStage: String?, gate: LiveRoutingGate) {
+    /// proof可能故意不匹配，reader不替helper提前过滤；native仅来自真实fixture，不构造PHLivePhoto()假对象。
+    init(proof: LocalLivePhotoMotionProof?, failure: String?, holdStage: String?, gate: LiveRoutingGate, native: PHLivePhoto? = nil) {
         self.proof = proof; self.failure = failure; self.holdStage = holdStage; self.gate = gate
+        self.native = native
     }
 
     /// 先检查调用方发布权，再允许旧proof迟到；产品必须在await后重验关联。
@@ -366,7 +428,7 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
         return proof
     }
 
-    /// 记录实际native入口目标像素和前阶段proof来源，不创建或声称播放真实媒体。
+    /// 记录实际native入口目标像素及proof来源；返回给定真实对象或nil，不自行验证pair或宣称系统已播放。
     func livePhoto(for _: LocalPhotoIdentity, targetPixels: MediaPixelSize, matching expectedSource: LocalPhotoSnapshot?,
                    validateContext: @MainActor () throws -> Void) async throws -> PHLivePhoto?
     {
@@ -377,7 +439,7 @@ private actor LiveRoutingRemote: LocalMediaMatchingReading {
         if failure == "native" {
             throw URLError(.cannotDecodeContentData)
         }
-        return nil
+        return native
     }
 }
 
