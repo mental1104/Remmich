@@ -42,6 +42,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.rating = switch query.rating { case .any: .missing; case .unrated: .null; case let .stars(value): .value(value) }
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
+        result.deviceModels = query.deviceModels.isEmpty ? nil : query.deviceModels
         result.lensModel = query.lensModel.isEmpty ? nil : query.lensModel
         result.tagIds = switch query.tags { case .any: .missing; case .untagged: .null; case let .anyOf(ids): .value(ids) }
         result.personIds = query.personIDs.isEmpty ? nil : query.personIDs
@@ -58,7 +59,7 @@ nonisolated enum NativeSearchPresetCodec {
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
-            || result.lensModel != nil || result.rating != .missing || result.tagIds != .missing
+            || result.lensModel != nil || result.rating != .missing || result.tagIds != .missing || result.deviceModels != nil
             || result.isPanorama != nil || result.mediaCategory != nil || result.resolution != nil
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
@@ -68,8 +69,6 @@ nonisolated enum NativeSearchPresetCodec {
     /// conditions为完整登记，timeZone为使用者的日历时区；返回独立查询，调用方一次性替换。
     /// 当前未支持的已知字段一律拒绝应用，不能在改名/预览时自动删掉它们。
     static func restore(_ conditions: NativeSearchPresetConditions, timeZone: TimeZone) throws -> NativeSearchQuery {
-        guard conditions.deviceModels == nil
-        else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
         guard conditions.isArchive != false, conditions.isFavorite != false, conditions.isPanorama != false else { throw NativeSearchPresetConversionError.invalid }
         query.archivedOnly = conditions.isArchive == true
@@ -115,6 +114,12 @@ nonisolated enum NativeSearchPresetCodec {
         query.state = conditions.state ?? ""
         query.cameraMake = conditions.make ?? ""
         query.cameraModel = conditions.model ?? ""
+        if let models = conditions.deviceModels {
+            guard (1 ... 50).contains(models.count),
+                  models.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf16.count <= 256 })
+            else { throw NativeSearchPresetConversionError.invalid }
+            query.deviceModels = models
+        }
         query.lensModel = conditions.lensModel ?? ""
         if let people = conditions.personIds {
             guard (1 ... 100).contains(people.count), people.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw NativeSearchPresetConversionError.invalid }

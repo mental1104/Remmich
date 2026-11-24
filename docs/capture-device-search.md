@@ -1,0 +1,17 @@
+# Capture device search
+
+This follow-up adds account-scoped capture-device groups on top of advanced smart search head `9969913`. The server contract and Web presentation were checked in the owning Immich Fork's local `dev` worktree. This is client source work, not a production deployment or physical-device acceptance result.
+
+The existing Web `web/src/lib/utils/capture-devices.ts` labels product aliases and `SearchDeviceSection.svelte` reads authenticated `GET /api/search/suggestions?type=camera-model`. `search-manager.svelte.ts` maps a chosen alias group to the official structured `filter.model.in` condition. Remmich follows those same contracts; there is no new server route, OpenAPI snapshot change, generated Swift edit, or official-client behavior change.
+
+The native Capture devices panel loads the current account's complete camera-model suggestions independently of the single-camera make/model fields. It groups iPhone, DJI / Insta360, and other devices, excluding the same camera brands/model prefixes and software encoder prefixes as Web. The alias table changes labels only: an Action 5 Pro candidate `AC004` does not invent a second `DJI OsmoAction5 Pro` candidate, and absent products do not appear. Raw server strings are preserved in requests and saved searches. Failures retain the selected group and show a retryable message. Account/endpoint generation changes clear candidate state and reject late results.
+
+Choosing a product replaces only the device-model OR group. It keeps media type, text, camera/lens, dates, people, and other filters. A separate single-model selection remains `filter.model.eq` alongside `in`, matching the Web structured AND semantics. Any capture device clears only the OR group. Saved selections remain visible and clearable before candidates load.
+
+Metadata uses `POST /api/search/metadata` and ordinary cursors. Nonempty smart text plus device aliases uses `POST /api/fork/search/smart` and its separate bound cursor, preserving the complete structured filter. Missing Fork support remains an explicit error with filters retained; the app does not discard aliases or fall back to a partial query. The separately implemented Fork route must be deployed explicitly before that smart combination works against production.
+
+Saved conditions preserve the existing `deviceModels` field without changing the registration schema. Missing means unrestricted; a specified group must contain1–50 nonblank aliases of at most256 UTF-16 units. Invalid saved groups reject the whole reuse, while device-only searches and combinations round-trip independently of candidate caches. A group over the contract limit is disabled instead of being truncated.
+
+Verification in this NAS worktree: scoped SwiftFormat0.64.5 and `git diff --check` passed. Added SDK two-page wire tests for metadata/Fork, combined `eq`/`in`, authentication and other filters, invalid-before-network cases, and unconstrained account suggestions. Added native tests for product grouping without invented aliases, camera/software exclusion, raw alias preservation, natural ordering, complete saved-condition reuse and invalid boundaries. No Swift toolchain is installed here, so these tests and application compilation remain pending the root agent's single macOS CI chain. No real media or device was accessed.
+
+Rollback: revert this client follow-up. Existing server saved conditions and media remain intact; older clients may explicitly reject applying device-model presets until upgraded.

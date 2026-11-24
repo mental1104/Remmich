@@ -47,6 +47,8 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
+    /// 设备组保存真实型号别名的OR集合；不绑定当前候选缓存或产品显示名。
+    var deviceModels: [String] = []
     var lensModel = ""
     var tags: NativeSearchTagFilter = .any
     enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
@@ -66,7 +68,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         return orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch
-            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any
+            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any || !deviceModels.isEmpty
     }
 
     /// assetID为已加载结果中的服务端身份；切换为参考图时只替换查询来源，完整保留筛选。

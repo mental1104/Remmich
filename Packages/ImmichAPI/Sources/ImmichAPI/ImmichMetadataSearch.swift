@@ -47,6 +47,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    /// 当前账号真实设备型号的OR集合；与单型号和其他条件组合时仍是AND，不自动改媒体类型。
+    public var deviceModels: [String] = []
     public var lensModel = ""
     public var tags: ImmichSearchTagFilter = .any
     /// 横竖构图来自Fork扩展；未选择则不限制。
@@ -71,7 +73,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         return !exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0)
-            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any
+            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any || !deviceModels.isEmpty
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。

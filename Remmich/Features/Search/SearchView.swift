@@ -18,6 +18,9 @@ struct SearchView: View {
     @State private var suggestions: [NativeSearchSuggestionKind: [String]] = [:]
     @State private var suggestionError: String?
     @State private var loadingSuggestions = false
+    @State private var devices: [NativeCaptureDeviceOption] = []
+    @State private var deviceError: String?
+    @State private var loadingDevices = false
     @Namespace private var viewerNamespace
 
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
@@ -59,6 +62,15 @@ struct SearchView: View {
                         SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
                         SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
                         SearchChoiceField(title: "Lens model", text: $query.lensModel, values: suggestions[.cameraLensModel])
+                        DisclosureGroup("Capture devices") {
+                            SearchDevicePicker(models: $query.deviceModels, devices: devices)
+                            if let deviceError {
+                                Text(deviceError).font(.caption)
+                            }
+                            Button(loadingDevices ? "Loading devices" : "Load capture devices") { Task { await loadDevices() } }
+                                .disabled(loadingDevices)
+                                .accessibilityIdentifier("search-load-devices")
+                        }
                         Toggle("Favorites only", isOn: $query.favoritesOnly)
                         Toggle("Archived only", isOn: $query.archivedOnly)
                         Picker("Rating", selection: $query.rating) {
@@ -220,6 +232,9 @@ struct SearchView: View {
             suggestions = [:]
             suggestionError = nil
             loadingSuggestions = false
+            devices = []
+            deviceError = nil
+            loadingDevices = false
         }
         .onChange(of: query.cameraMake) { _, _ in
             suggestions[.cameraModel] = nil
@@ -242,7 +257,7 @@ struct SearchView: View {
         guard !invalidDateRange,
               query.queryAssetID != nil || !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
-              || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
+              || !query.personIDs.isEmpty || !query.deviceModels.isEmpty || query.takenAfter != nil || query.takenBefore != nil
               || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.tags != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty
               || query.mediaCategory != nil || query.resolution != nil || query.panoramasOnly else { return }
         do {
@@ -319,6 +334,28 @@ struct SearchView: View {
         }
     }
 
+    /// 读取账号内全部型号再按产品别名分组；不沿用单相机厂商约束，迟到响应和取消均不得发布。
+    private func loadDevices() async {
+        guard let source, !loadingDevices else { return }
+        let owner = media.management.generation
+        loadingDevices = true
+        deviceError = nil
+        defer {
+            if owner == media.management.generation {
+                loadingDevices = false
+            }
+        }
+        do {
+            let values = try await source.searchSuggestions(.cameraModel, query: .init())
+            try Task.checkCancellation()
+            guard owner == media.management.generation else { return }
+            devices = NativeCaptureDeviceCatalog.options(values)
+        } catch {
+            guard owner == media.management.generation, !Task.isCancelled else { return }
+            deviceError = "Capture devices could not be loaded. Check permissions and connection. Your selection has been kept."
+        }
+    }
+
     /// 读取当前账号候选；仅在账号/厂商/型号未变化时发布，不清空已选条件或访问公共地名服务。
     private func loadChoices() async {
         guard let source, !loadingSuggestions else { return }
@@ -357,6 +394,42 @@ struct SearchView: View {
                                  groupedCatalogs: .init(), isComplete: true))
         selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
                                            origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Search")), timeline: timeline)
+    }
+}
+
+/// 拍摄设备只替换型号OR组，不清空相机、媒体、文本或其他条件；保存的选择无需候选也可清除。
+private struct SearchDevicePicker: View {
+    @Binding var models: [String]
+    let devices: [NativeCaptureDeviceOption]
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if !models.isEmpty {
+                Text(NativeCaptureDeviceCatalog.selectedTitle(models)).font(.caption)
+                Button("Any capture device") { models = [] }
+                    .accessibilityIdentifier("search-clear-devices")
+            }
+            ForEach(NativeCaptureDeviceOption.Group.allCases, id: \.self) { group in
+                let options = devices.filter { $0.group == group }
+                if !options.isEmpty {
+                    Text(group.title).font(.caption).foregroundStyle(.secondary)
+                    ForEach(options) { option in
+                        Button {
+                            models = option.models
+                        } label: {
+                            HStack {
+                                Text(option.label)
+                                if Set(models) == Set(option.models) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                        // 保存契约最多50个原始别名；不能通过截断候选悄悄改变设备语义。
+                        .disabled(option.models.count > 50 || option.models.contains { $0.utf16.count > 256 })
+                    }
+                }
+            }
+        }
     }
 }
 
