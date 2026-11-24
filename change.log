@@ -1,3 +1,9 @@
+## 2026-11-24: Disambiguate the crop test's nonfinite CGSize input
+
+- Source: candidate85f96c8; upstream remains672f02e. CI45388361344 ended compilation failure with one source diagnostic at AssetEditCropInteractionTests.swift:57: ambiguous nan. The prior nested macro error is gone, and the app links; combined test products and API/app/UI execution remain incomplete.
+- Give the synthetic CGSize width/height explicit CGFloat types. Keep the original nonfinite-input assertion and all interaction behavior; no production code, test coverage or compiler settings change.
+- Scoped SwiftFormat/diff checks passed; repaired test compilation requires the next actual CI. No server/API/data/production/signing change. Rollback restores the known test overload ambiguity.
+
 ## 2026-11-24: Separate nested Swift Testing requirements in people HTTP assertions
 
 - Source: candidate795fd39; upstream remains672f02e. CI45386575394 ended19:51 with a single test-source diagnostic: recursive expansion of require in PeopleManagementContractTests.swift:264. Viewer type-check errors no longer appear and the app executable links; combined test products/API/app/UI execution did not complete, so no compiled artifact or runtime success is claimed.

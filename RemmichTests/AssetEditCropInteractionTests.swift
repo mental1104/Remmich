@@ -54,7 +54,7 @@ struct AssetEditCropInteractionTests {
         gesture.reset()
         #expect(gesture.updated(crop: crop, translation: .init(width: 500, height: 500), imageRect: rect, source: source) == crop)
         #expect(gesture.updated(crop: crop, translation: .zero, imageRect: .zero, source: source) == crop)
-        #expect(gesture.updated(crop: crop, translation: .init(width: .nan, height: 0), imageRect: rect, source: source) == crop)
+        #expect(gesture.updated(crop: crop, translation: CGSize(width: CGFloat.nan, height: CGFloat.zero), imageRect: rect, source: source) == crop)
     }
 
     /// 焦点键盘操作按原图像素走一步或十步，Option只改右下边；越界输入仍停在合法范围。
