@@ -261,7 +261,10 @@ private nonisolated struct PeopleCapturedRequest: Sendable {
 
     /// 返回整个JSON字典供精确字段/顺序比较，缺正文或解码失败直接使测试失败。
     func jsonBody() throws -> NSDictionary {
-        try #require(JSONSerialization.jsonObject(with: #require(body)) as? NSDictionary)
+        // 分开展开两个宏，避免Swift Testing把嵌套#require判定为递归；两个必要断言均保留。
+        let bytes = try #require(body)
+        let object = try JSONSerialization.jsonObject(with: bytes)
+        return try #require(object as? NSDictionary)
     }
 }
 

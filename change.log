@@ -1,3 +1,9 @@
+## 2026-11-24: Separate nested Swift Testing requirements in people HTTP assertions
+
+- Source: candidate795fd39; upstream remains672f02e. CI45386575394 ended19:51 with a single test-source diagnostic: recursive expansion of require in PeopleManagementContractTests.swift:264. Viewer type-check errors no longer appear and the app executable links; combined test products/API/app/UI execution did not complete, so no compiled artifact or runtime success is claimed.
+- Decode the captured HTTP body in explicit steps, retaining both required-body and dictionary-shape assertions and the same full JSON comparisons. No business code, test selection, compiler limit or CI gate changes. Repository search found no other same-expression nested require calls.
+- Scoped SwiftFormat/diff checks passed; actual repaired test compilation awaits the next candidate CI. No server/API/database/production or signing change. Rollback restores the known macro-expansion failure.
+
 ## 2026-11-24: Bound the viewer modifier chain's type-checking expressions
 
 - Source: codex/fix-viewer-modifier-boundaries from exact2ff5b8c. CI45383819035 ended failure19:36 with the sole source diagnostic moved to onAppear/beginOpeningAnimation; extracting cleanup alone did not solve the enclosing generic expression. Upstream remains672f02e; no feature/API/data/production/workflow change, push or CI trigger.
