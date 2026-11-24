@@ -48,6 +48,13 @@ struct SearchView: View {
                         SearchChoiceField(title: "Lens model", text: $query.lensModel, values: suggestions[.cameraLensModel])
                         Toggle("Favorites only", isOn: $query.favoritesOnly)
                         Toggle("Archived only", isOn: $query.archivedOnly)
+                        Picker("Rating", selection: $query.rating) {
+                            Text("Any rating").tag(NativeSearchRating.any)
+                            Text("Unrated").tag(NativeSearchRating.unrated)
+                            ForEach(0 ... 5, id: \.self) { value in
+                                Text("\(value) stars").tag(NativeSearchRating.stars(value))
+                            }
+                        }
                         if let suggestionError {
                             Text(suggestionError).font(.caption)
                         }
@@ -168,7 +175,7 @@ struct SearchView: View {
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
               || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
-              || query.favoritesOnly || query.archivedOnly || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
+              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
             guard let source else { return }
@@ -187,7 +194,7 @@ struct SearchView: View {
     /// 缺少可靠组合分页时禁止执行，不得静默丢弃高级筛选。
     private var invalidSmartCombination: Bool {
         query.mode == .smart && !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty)
+            && (query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty || query.rating.requiresStructuredSearch)
     }
 
     /// 按当前账号加载人物；跨账号/端点的迟到候选不可发布，不把权限失败当作空列表。

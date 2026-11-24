@@ -38,6 +38,7 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 收藏关闭表示不限制；归档关闭保留既有timeline范围，不包含锁定内容。
     public var favoritesOnly = false
     public var archivedOnly = false
+    public var rating: ImmichSearchRating = .any
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
@@ -69,6 +70,11 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
     }
+}
+
+/// 不限制、未评分和具体评分不能共用一个Optional；0保留为合法的结构化查询值。
+public enum ImmichSearchRating: Hashable, Sendable {
+    case any, unrated, stars(Int)
 }
 
 /// SDK边界的EXIF原子条件；相同字段/运算符不得重复，值必须有限且非负。

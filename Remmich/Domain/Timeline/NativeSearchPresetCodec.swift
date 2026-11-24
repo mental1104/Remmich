@@ -35,6 +35,7 @@ nonisolated enum NativeSearchPresetCodec {
         result.state = query.state.isEmpty ? nil : query.state
         result.isFavorite = query.favoritesOnly ? true : nil
         result.isArchive = query.archivedOnly ? true : nil
+        result.rating = switch query.rating { case .any: .missing; case .unrated: .null; case let .stars(value): .value(value) }
         result.make = query.cameraMake.isEmpty ? nil : query.cameraMake
         result.model = query.cameraModel.isEmpty ? nil : query.cameraModel
         result.lensModel = query.lensModel.isEmpty ? nil : query.lensModel
@@ -49,7 +50,7 @@ nonisolated enum NativeSearchPresetCodec {
             || result.personIds != nil || result.mediaType != nil || result.albumStatus != nil
             || result.orientation != nil || result.exifConditions != nil || result.takenAfter != nil || result.takenBefore != nil
             || result.isFavorite != nil || result.isArchive != nil
-            || result.lensModel != nil
+            || result.lensModel != nil || result.rating != .missing
         else { throw NativeSearchPresetConversionError.empty }
         _ = try restore(result, timeZone: query.timeZone)
         return result
@@ -61,12 +62,19 @@ nonisolated enum NativeSearchPresetCodec {
         guard conditions.queryAssetId == nil,
               conditions.deviceModels == nil,
               conditions.isPanorama == nil, conditions.mediaCategory == nil,
-              conditions.resolution == nil, conditions.rating == .missing, conditions.tagIds == .missing
+              conditions.resolution == nil, conditions.tagIds == .missing
         else { throw NativeSearchPresetConversionError.unsupported }
         var query = NativeSearchQuery()
         guard conditions.isArchive != false, conditions.isFavorite != false else { throw NativeSearchPresetConversionError.invalid }
         query.archivedOnly = conditions.isArchive == true
         query.favoritesOnly = conditions.isFavorite == true
+        switch conditions.rating {
+        case .missing: query.rating = .any
+        case .null: query.rating = .unrated
+        case let .value(value):
+            guard (0 ... 5).contains(value) else { throw NativeSearchPresetConversionError.invalid }
+            query.rating = .stars(value)
+        }
         query.timeZone = timeZone
         if let text = conditions.query {
             guard !text.value.isEmpty, text.value.utf16.count <= 2000 else { throw NativeSearchPresetConversionError.invalid }

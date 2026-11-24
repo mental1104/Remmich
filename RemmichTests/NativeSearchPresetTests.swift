@@ -110,20 +110,42 @@ struct NativeSearchPresetTests {
         #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt) }
     }
 
-    /// 仅镜头条件也能独立保存，不能因没有文本/相机型号而误判为空查询。
-    @Test func roundTripsLensOnlySearch() throws {
+    /// rating覆盖镜头独立及组合查询；无文本/型号也可保存，评分缺省/null/0/5不丢失。
+    @Test(arguments: [NativeSearchRating.any, .unrated, .stars(0), .stars(5)])
+    func roundTripsLensSearchWithRatings(_ rating: NativeSearchRating) throws {
         var query = NativeSearchQuery()
         query.lensModel = "Synthetic Lens"
+        query.rating = rating
         let conditions = try NativeSearchPresetCodec.capture(query)
         #expect(conditions.lensModel == "Synthetic Lens")
         #expect(try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone) == query)
+    }
+
+    /// 评分缺省/null/0/具体值在保存和复用后不互相混淆，越界评分明确拒绝。
+    @Test func roundTripsAllRatingStates() throws {
+        for rating in [NativeSearchRating.any, .unrated, .stars(0), .stars(1), .stars(5)] {
+            var query = NativeSearchQuery()
+            query.city = "Synthetic City"
+            query.rating = rating
+            let conditions = try NativeSearchPresetCodec.capture(query)
+            let restored = try NativeSearchPresetCodec.restore(conditions, timeZone: query.timeZone)
+            #expect(restored == query)
+            switch rating {
+            case .any: #expect(conditions.rating == .missing)
+            case .unrated: #expect(conditions.rating == .null)
+            case let .stars(value): #expect(conditions.rating == .value(value))
+            }
+        }
+        var invalid = NativeSearchQuery()
+        invalid.rating = .stars(6)
+        #expect(throws: NativeSearchPresetConversionError.self) { try NativeSearchPresetCodec.capture(invalid) }
     }
 
     /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
     @Test func rejectsPartialRestoration() throws {
         var conditions = NativeSearchPresetConditions()
         conditions.city = "Synthetic City"
-        conditions.rating = .null
+        conditions.tagIds = .null
         #expect(throws: NativeSearchPresetConversionError.self) {
             try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
         }

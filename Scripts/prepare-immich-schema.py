@@ -9,6 +9,7 @@ from typing import Dict, List, Union, cast
 
 JsonValue = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
 JsonObject = Dict[str, JsonValue]
+_NULLABLE_SMART_RATING = "NullableLegacySearchRating"
 
 
 def prepare(document: JsonObject, extensions: JsonObject) -> JsonObject:
@@ -16,7 +17,7 @@ def prepare(document: JsonObject, extensions: JsonObject) -> JsonObject:
 
     Args:
         document: 完整官方OpenAPI对象；调用方必须提供components.schemas。
-            本函数修改其中metadata请求和用户配置字段，保留其他Schema。
+            本函数准备metadata/配置/评分引用；评分引用提取不改变HTTP数据约束。
         extensions: 仓库固定的搜索扩展Schema输入，不修改；只补入明确使用的字段及依赖。
     Returns:
         同一可变文档，供Swift生成器读取；智能搜索nextPage保留。
@@ -52,6 +53,13 @@ def prepare(document: JsonObject, extensions: JsonObject) -> JsonObject:
         target.update(deepcopy(additions))
     for name in ("MediaOrientationFilter", "SearchOrientation"):
         schemas[name] = deepcopy(extension_schemas[name])
+    # 从可空的内联评分提取等价引用，才能用生成器typeOverrides保留显式null。
+    # 只调整生成类型归属；min/max/nullable及文档等原始约束完整保留。
+    smart_properties = cast(JsonObject, schemas["SmartSearchDto"]["properties"])
+    rating = cast(JsonObject, smart_properties["rating"])
+    if "$ref" not in rating:
+        schemas[_NULLABLE_SMART_RATING] = deepcopy(rating)
+        smart_properties["rating"] = {"$ref": "#/components/schemas/" + _NULLABLE_SMART_RATING}
     return document
 
 

@@ -75,6 +75,8 @@ private struct SearchTransport: ClientTransport {
         let filter = try #require(json["filter"] as? [String: Any])
         #expect((filter["originalFileName"] as? [String: String])?["like"] == "synthetic")
         #expect((filter["type"] as? [String: String])?["eq"] == "IMAGE")
+        let trashed = try #require(filter["trashedAt"] as? [String: Any])
+        #expect(trashed["eq"] is NSNull)
         #expect((filter["city"] as? [String: String])?["eq"] == "Test City")
         #expect((filter["country"] as? [String: String])?["eq"] == "Test Country")
         #expect((filter["state"] as? [String: String])?["eq"] == "Test State")
