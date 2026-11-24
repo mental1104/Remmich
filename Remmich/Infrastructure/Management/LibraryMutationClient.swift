@@ -1,6 +1,11 @@
 import CryptoKit
 import Foundation
 
+/// 仅候选详情GET的精确服务端拒绝可产生此错误；不代表所有400或其他读取/写入失败都是未匹配。
+nonisolated enum LocalMediaCandidateError: Error, Sendable {
+    case inaccessible
+}
+
 /// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
     case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
@@ -127,11 +132,22 @@ final nonisolated class LibraryMutationClient: Sendable {
     }
 
     /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
-    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    /// 只读取资产信息；仅HTTP400且精确JSON拒绝正文抛LocalMediaCandidateError，其余错误保留原语义。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
         let expected = try validID(id)
-        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
-        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        let (data, response) = try await session.data(for: request("GET", ["assets", expected]))
+        try Task.checkCancellation()
+        // 当前服务的权限前不存在/不可读和权限后消失均为400；只在此候选GET识别拥有者合同，不放宽通用send。
+        if let response = response as? HTTPURLResponse, response.statusCode == 400,
+           response.mimeType?.lowercased() == "application/json",
+           let body = try? JSONDecoder().decode([String: String].self, from: data), body.count == 1,
+           let message = body["message"], ["Not found or no asset.read access", "Asset not found"].contains(message)
+        {
+            throw LocalMediaCandidateError.inaccessible
+        }
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: bytes)
         guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
         return asset
     }
