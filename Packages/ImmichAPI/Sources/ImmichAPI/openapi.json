@@ -26065,6 +26065,21 @@
           },
           "visibility": {
             "$ref": "#/components/schemas/EnumFilterAssetVisibility"
+          },
+          "iso": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "fNumber": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "focalLength": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "exposureTime": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "orientation": {
+            "$ref": "#/components/schemas/MediaOrientationFilter"
           }
         },
         "type": "object"
@@ -26167,6 +26182,21 @@
           },
           "visibility": {
             "$ref": "#/components/schemas/EnumFilterAssetVisibility"
+          },
+          "iso": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "fNumber": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "focalLength": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "exposureTime": {
+            "$ref": "#/components/schemas/NumberFilter"
+          },
+          "orientation": {
+            "$ref": "#/components/schemas/MediaOrientationFilter"
           }
         },
         "type": "object"
@@ -32495,6 +32525,24 @@
           }
         },
         "type": "object"
+      },
+      "MediaOrientationFilter": {
+        "properties": {
+          "eq": {
+            "$ref": "#/components/schemas/SearchOrientation"
+          }
+        },
+        "required": [
+          "eq"
+        ],
+        "type": "object"
+      },
+      "SearchOrientation": {
+        "enum": [
+          "landscape",
+          "portrait"
+        ],
+        "type": "string"
       }
     }
   }

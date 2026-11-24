@@ -450,6 +450,14 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.city = query.city
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
+        dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
+        dto.hasAlbums = query.hasAlbums
+        dto.exifConditions = try query.exifConditions.map { condition in
+            guard let field = ImmichSearchNumericCondition.Field(rawValue: condition.field.rawValue),
+                  let comparison = ImmichSearchNumericCondition.Comparison(rawValue: condition.comparison.rawValue)
+            else { throw NativeSearchError.invalidQuery }
+            return .init(field: field, comparison: comparison, value: condition.value)
+        }
         dto.personIDs = query.personIDs
         dto.takenAfter = query.takenAfter
         dto.takenBefore = query.takenBefore

@@ -1,3 +1,11 @@
+## 2026-11-24: EXIF, orientation and album-state filters
+
+- Source: codex/feature-search-exif from5a4f9f0; upstream base remains672f02e. No server/API/database changes or production operations.
+- Add native ISO/aperture/focal-length/exposure comparisons with independent slots, orientation and album membership filters. Metadata requests preserve other conditions and proper seconds/mm units. Reject duplicate slots, nonfinite/negative values; display unsupported smart/advanced combinations instead of dropping conditions. Reliable smart+advanced pagination remains outstanding, so this is not full search-stage completion.
+- Add a minimal, provenance-recorded schema augmentation from the actual parent Fork: five properties in both filter nodes plus two orientation definitions. Preparation consumes this committed input; no generated Swift edited. Whole-document/source comparison and idempotence passed on Python3.8; existing unrelated schemas remain unchanged.
+- Added synthetic body/units/ranges/invalid-condition tests. Local SwiftFormat/diff checks passed; these new changes await CI. Current5a4f9f0 CI cannot validate this follow-up. Saved presets and remaining extended fields are still pending; no real-device acceptance.
+- Rollback: revert this follow-up and regenerate with prior preparation inputs; no media/data recovery needed.
+
 ## 2026-11-24: Account-scoped search filter choices
 
 - Prior run45330859471 reached test compilation and found two test sources still accepting String? rather than the new typed continuation. Corrected ErrorSource/DelayedSource signatures without weakening assertions; next CI must compile and execute these tests.

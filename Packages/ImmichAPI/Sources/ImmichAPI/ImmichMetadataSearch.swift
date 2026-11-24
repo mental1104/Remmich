@@ -34,6 +34,11 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    /// 横竖构图来自Fork扩展；未选择则不限制。
+    public enum Orientation: String, Sendable { case landscape, portrait }
+    public var orientation: Orientation?
+    public var hasAlbums: Bool?
+    public var exifConditions: [ImmichSearchNumericCondition] = []
     public var personIDs: [String] = []
     /// 日期代表用户所选日历日；序列化时保留该日墙上时间，不能直接使用绝对UTC日界线。
     public var takenAfter: Date?
@@ -55,6 +60,22 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
             throw ImmichAPIError.invalidResponse
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
+    }
+}
+
+/// SDK边界的EXIF原子条件；相同字段/运算符不得重复，值必须有限且非负。
+public struct ImmichSearchNumericCondition: Hashable, Sendable {
+    public enum Field: String, Sendable { case iso, fNumber, focalLength, exposureTime }
+    public enum Comparison: String, Sendable { case equal = "eq", greaterThan = "gt", atLeast = "gte", lessThan = "lt", atMost = "lte" }
+    public let field: Field
+    public let comparison: Comparison
+    public let value: Double
+
+    /// field/comparison指定一个原子槽位；value中快门使用秒，焦距使用毫米。
+    public init(field: Field, comparison: Comparison, value: Double) {
+        self.field = field
+        self.comparison = comparison
+        self.value = value
     }
 }
 

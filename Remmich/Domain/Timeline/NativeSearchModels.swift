@@ -34,10 +34,55 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
+    enum Orientation: String, CaseIterable, Sendable { case landscape, portrait }
+    var orientation: Orientation?
+    var hasAlbums: Bool?
+    var exifConditions: [NativeSearchNumericCondition] = []
     var personIDs: [String] = []
     var takenAfter: Date?
     var takenBefore: Date?
     var timeZone = TimeZone.current
+}
+
+/// 可独立编辑的EXIF条件；相同字段/运算符只有一个稳定槽位。
+nonisolated struct NativeSearchNumericCondition: Hashable, Identifiable, Sendable {
+    enum Field: String, CaseIterable, Sendable {
+        case iso, fNumber, focalLength, exposureTime
+
+        /// 可见名称包含单位，快门按秒、焦距按毫米输入。
+        var title: String {
+            switch self {
+            case .iso: "ISO"
+            case .fNumber: "Aperture"
+            case .focalLength: "Focal length (mm)"
+            case .exposureTime: "Exposure (seconds)"
+            }
+        }
+    }
+
+    enum Comparison: String, CaseIterable, Sendable {
+        case equal = "eq", greaterThan = "gt", atLeast = "gte", lessThan = "lt", atMost = "lte"
+
+        /// 返回可见比较符号。
+        var title: String {
+            switch self {
+            case .equal: "="
+            case .greaterThan: ">"
+            case .atLeast: ">="
+            case .lessThan: "<"
+            case .atMost: "<="
+            }
+        }
+    }
+
+    let field: Field
+    let comparison: Comparison
+    let value: Double
+
+    /// 槽位标识不包含查询值，便于原子更新与移除。
+    var id: String {
+        "\(field.rawValue):\(comparison.rawValue)"
+    }
 }
 
 /// 领域层区分不透明令牌与页码，避免Feature依赖SDK分页类型。

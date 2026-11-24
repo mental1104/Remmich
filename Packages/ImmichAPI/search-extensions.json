@@ -1,0 +1,66 @@
+{
+  "source": {
+    "repository": "mental1104/immich",
+    "commit": "941aa1ca822c9a1e0711fdec39635e7c429b8c6a",
+    "path": "open-api/immich-openapi-specs.json",
+    "sha256": "3d89c71f291f0b14db19d0ff0d98e00859e029a3bf197c1c333a729067a38b7c"
+  },
+  "schemas": {
+    "SearchFilter": {
+      "properties": {
+        "iso": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "fNumber": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "focalLength": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "exposureTime": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "orientation": {
+          "$ref": "#/components/schemas/MediaOrientationFilter"
+        }
+      }
+    },
+    "SearchFilterBranch": {
+      "properties": {
+        "iso": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "fNumber": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "focalLength": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "exposureTime": {
+          "$ref": "#/components/schemas/NumberFilter"
+        },
+        "orientation": {
+          "$ref": "#/components/schemas/MediaOrientationFilter"
+        }
+      }
+    },
+    "MediaOrientationFilter": {
+      "properties": {
+        "eq": {
+          "$ref": "#/components/schemas/SearchOrientation"
+        }
+      },
+      "required": [
+        "eq"
+      ],
+      "type": "object"
+    },
+    "SearchOrientation": {
+      "enum": [
+        "landscape",
+        "portrait"
+      ],
+      "type": "string"
+    }
+  }
+}

@@ -49,6 +49,19 @@ struct SearchView: View {
                             .disabled(loadingSuggestions)
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
+                        DisclosureGroup("Advanced filters") {
+                            Picker("Orientation", selection: $query.orientation) {
+                                Text("Any").tag(nil as NativeSearchQuery.Orientation?)
+                                Text("Landscape").tag(Optional(NativeSearchQuery.Orientation.landscape))
+                                Text("Portrait").tag(Optional(NativeSearchQuery.Orientation.portrait))
+                            }
+                            Picker("Albums", selection: $query.hasAlbums) {
+                                Text("Any").tag(nil as Bool?)
+                                Text("In an album").tag(Optional(true))
+                                Text("Not in an album").tag(Optional(false))
+                            }
+                            SearchExifEditor(conditions: $query.exifConditions)
+                        }
                         DisclosureGroup("People") {
                             if let peopleError {
                                 Text(peopleError).font(.caption)
@@ -79,6 +92,9 @@ struct SearchView: View {
                 }
                 if invalidDateRange {
                     Text("End date must not be earlier than start date.").foregroundStyle(.secondary)
+                }
+                if invalidSmartCombination {
+                    Text("Advanced filters require a metadata search mode.").foregroundStyle(.secondary)
                 }
                 if store.assets.isEmpty, !store.isLoading {
                     ContentUnavailableView(store.hasSearched ? "No results" : "Search your library",
@@ -138,10 +154,11 @@ struct SearchView: View {
     /// 防抖后按当前条件搜索；输入变化取消等待，不显示网络失败。
     private func search() async {
         store.invalidate()
-        guard !invalidDateRange,
+        guard !invalidDateRange, !invalidSmartCombination,
               !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty
-              || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil else { return }
+              || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
+              || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
             guard let source else { return }
@@ -155,6 +172,12 @@ struct SearchView: View {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = query.timeZone
         return calendar.startOfDay(for: start) > calendar.startOfDay(for: end)
+    }
+
+    /// 缺少可靠组合分页时禁止执行，不得静默丢弃高级筛选。
+    private var invalidSmartCombination: Bool {
+        query.mode == .smart && !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty)
     }
 
     /// 按当前账号加载人物；跨账号/端点的迟到候选不可发布，不把权限失败当作空列表。
@@ -208,6 +231,39 @@ struct SearchView: View {
                                  groupedCatalogs: .init(), isComplete: true))
         selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
                                            origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Search")), timeline: timeline)
+    }
+}
+
+/// 编辑EXIF原子槽位；更新同字段/运算符不会重复添加，其他条件保持。
+private struct SearchExifEditor: View {
+    @Binding var conditions: [NativeSearchNumericCondition]
+    @State private var field = NativeSearchNumericCondition.Field.iso
+    @State private var comparison = NativeSearchNumericCondition.Comparison.atLeast
+    @State private var value = 400.0
+
+    var body: some View {
+        VStack {
+            Picker("EXIF field", selection: $field) {
+                ForEach(NativeSearchNumericCondition.Field.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("Comparison", selection: $comparison) {
+                ForEach(NativeSearchNumericCondition.Comparison.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            TextField("Value", value: $value, format: .number)
+            Button("Add or update condition") {
+                let condition = NativeSearchNumericCondition(field: field, comparison: comparison, value: value)
+                conditions.removeAll { $0.id == condition.id }
+                conditions.append(condition)
+            }
+            .disabled(!value.isFinite || value < 0)
+            ForEach(conditions) { condition in
+                HStack {
+                    Text("\(condition.field.title) \(condition.comparison.title) \(condition.value.formatted())")
+                    Spacer()
+                    Button("Remove") { conditions.removeAll { $0.id == condition.id } }
+                }
+            }
+        }
     }
 }
 

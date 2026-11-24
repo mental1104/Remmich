@@ -314,9 +314,15 @@ public actor ImmichClient {
             filter: .init(
                 city: query.city.isEmpty ? nil : .init(eq: query.city),
                 description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
+                exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
+                fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
+                focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
+                hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+                iso: numericFilter(.iso, conditions: query.exifConditions),
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
                 model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
                 ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
+                orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) },
                 originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
                 originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
                 personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
@@ -351,7 +357,8 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.assets, continuation: page.nextCursor.map(ImmichSearchContinuation.cursor))
         }
         guard credential != nil else { throw ImmichAPIError.unauthorized }
-        guard (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        // 旧式smart没有这些组合的可靠分页契约，不得丢弃高级条件冒充成功。
+        guard query.exifConditions.isEmpty, query.orientation == nil, query.hasAlbums == nil, (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
         var pageNumber = 1
         if let continuation {
             guard case let .page(value) = continuation, value > 0 else { throw ImmichAPIError.invalidResponse }
@@ -390,6 +397,25 @@ public actor ImmichClient {
         case let .undocumented(statusCode, _):
             throw Self.map(status: statusCode)
         }
+    }
+
+    /// field为EXIF字段，conditions为本次原子条件；返回非空数值过滤或nil，非法/重复槽位拒绝。
+    private func numericFilter(_ field: ImmichSearchNumericCondition.Field, conditions: [ImmichSearchNumericCondition]) throws -> Components.Schemas.NumberFilter? {
+        let matching = conditions.filter { $0.field == field }
+        guard !matching.isEmpty else { return nil }
+        var result = Components.Schemas.NumberFilter()
+        var seen: Set<ImmichSearchNumericCondition.Comparison> = []
+        for condition in matching {
+            guard condition.value.isFinite, condition.value >= 0, seen.insert(condition.comparison).inserted else { throw ImmichAPIError.invalidResponse }
+            switch condition.comparison {
+            case .equal: result.eq = condition.value
+            case .greaterThan: result.gt = condition.value
+            case .atLeast: result.gte = condition.value
+            case .lessThan: result.lt = condition.value
+            case .atMost: result.lte = condition.value
+            }
+        }
+        return result
     }
 
     /// kind为账号内候选字段，make仅约束型号；返回可读字符串，不请求null候选。

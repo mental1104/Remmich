@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- EXIF/orientation/album-state follow-up is local and awaits CI: metadata supports numeric atomic comparisons and exact extra filters; invalid values/slots reject before network. Smart+advanced combinations are explicitly unavailable until reliable pagination is implemented; no silent condition dropping. Minimal schema augmentation is pinned to the owning Fork. Saved conditions and other extended fields remain unfinished.
+
 - Search suggestions follow-up adds current-account city/camera choices through official GET suggestions, with manual input fallback and stale-owner rejection. New synthetic request tests and Xcode validation are pending; no public Photon lookup is involved. Fork EXIF and saved conditions remain unfinished.
 
 - Consolidated PR #3 now includes native domain search models plus filename/description/path/OCR/smart modes. PR #2 app checks found two forbidden Feature SDK imports; those checks remain intact, and mapping moved to Infrastructure. This revision awaits new CI. Metadata uses opaque cursors, smart uses official legacy page numbers; no claim that smart V3 has pagination. Fork EXIF, suggestions and saved conditions remain unfinished.

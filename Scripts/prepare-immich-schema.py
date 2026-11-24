@@ -3,18 +3,21 @@
 
 import json
 import sys
+from copy import deepcopy
+from pathlib import Path
 from typing import Dict, List, Union, cast
 
 JsonValue = Union[None, bool, int, float, str, List["JsonValue"], Dict[str, "JsonValue"]]
 JsonObject = Dict[str, JsonValue]
 
 
-def prepare(document: JsonObject) -> JsonObject:
+def prepare(document: JsonObject, extensions: JsonObject) -> JsonObject:
     """原位准备已固定来源的OpenAPI JSON并返回同一文档。
 
     Args:
         document: 完整官方OpenAPI对象；调用方必须提供components.schemas。
             本函数修改其中metadata请求和用户配置字段，保留其他Schema。
+        extensions: 仓库固定的搜索扩展Schema输入，不修改；只补入明确使用的字段及依赖。
     Returns:
         同一可变文档，供Swift生成器读取；智能搜索nextPage保留。
     Raises:
@@ -41,13 +44,24 @@ def prepare(document: JsonObject) -> JsonObject:
     server_properties = cast(JsonObject, server["properties"])
     server["properties"] = {"externalDomain": server_properties["externalDomain"]}
     server.pop("required", None)
+    # 仅扩展请求过滤节点，不刷新原有媒体/登录等响应Schema，保持既有解码范围。
+    extension_schemas = cast(Dict[str, JsonObject], extensions["schemas"])
+    for name in ("SearchFilter", "SearchFilterBranch"):
+        target = cast(JsonObject, schemas[name]["properties"])
+        additions = cast(JsonObject, extension_schemas[name]["properties"])
+        target.update(deepcopy(additions))
+    for name in ("MediaOrientationFilter", "SearchOrientation"):
+        schemas[name] = deepcopy(extension_schemas[name])
     return document
 
 
 if __name__ == "__main__":
     with open(sys.argv[1], encoding="utf-8") as source:
         document: JsonObject = json.load(source)
-    prepare(document)
+    extension_path = Path(__file__).resolve().parent.parent / "Packages/ImmichAPI/search-extensions.json"
+    with extension_path.open(encoding="utf-8") as source:
+        extensions: JsonObject = json.load(source)
+    prepare(document, extensions)
     with open(sys.argv[2], "w", encoding="utf-8") as destination:
         json.dump(document, destination, indent=2, ensure_ascii=False)
         destination.write("\n")
