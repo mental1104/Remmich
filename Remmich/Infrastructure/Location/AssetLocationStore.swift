@@ -102,7 +102,10 @@ import SwiftUI
             completedTransferIntervals = []
             persistCacheRun(force: true)
         }
-        if normalized.allowPublicLookup != true {
+        if preferences.allowPublicLookup == true, normalized.allowPublicLookup != true,
+           let previousEndpoint = try? MapsPlacesPreferences.endpointURL(preferences.endpoint),
+           PlaceCacheKey.isPublicService(previousEndpoint)
+        {
             requests.values.forEach { $0.task.cancel() }
         }
         preferences = normalized

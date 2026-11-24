@@ -40,7 +40,7 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 - Initial downstream app build for physical iOS succeeded (unsigned compile).
 - Offline write/category contract checks passed, including the multipart upload path, against fixtures only.
 - Full formatting lint and git diff --check passed before final integration.
-- Signed app/test build, on-device focused tests and final installation are recorded after execution in change.log.
+- Signed app and test build succeeded. iPhone 15 Pro installation and launch succeeded (0.7.1 build 5). Focused device tests: 35 passed, one parameterized location-route regression failed; privacy and account-generation tests passed. Regression patch is present; final rerun is pending. See change.log.
 - No private production media mutation was used to test these changes. Compilation and mocked contracts do not establish complete official-client coexistence or iOS backup acceptance. See [security boundaries](fork-security.md).
 
 ## Known Mac build pitfalls
