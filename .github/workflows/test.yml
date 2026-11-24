@@ -19,8 +19,6 @@ jobs:
     name: Tests
     runs-on: xcode-27
     timeout-minutes: 120
-    env:
-      IPHONE_DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro
 
     steps:
       - name: Require a successful build
@@ -71,13 +69,20 @@ jobs:
         with:
           ref: ${{ steps.test-products.outputs.tested-revision }}
 
+      - name: Select available iPhone simulator
+        run: bash Scripts/select-ci-simulator.sh
+
       - name: Test Immich API package
         run: swift test --jobs 2 --package-path Packages/ImmichAPI
 
       - name: Boot iPhone simulator
         run: |
-          xcrun simctl boot "iPhone 17 Pro" || true
-          xcrun simctl bootstatus "iPhone 17 Pro" -b
+          # 已启动设备不重复 boot；其他启动失败必须正常暴露。
+          if ! xcrun simctl list devices booted --json | jq -e --arg id "$IPHONE_SIMULATOR_ID" \
+            '[.devices[][] | select(.udid == $id)] | length > 0' > /dev/null; then
+            xcrun simctl boot "$IPHONE_SIMULATOR_ID"
+          fi
+          xcrun simctl bootstatus "$IPHONE_SIMULATOR_ID" -b
 
       - name: Test app logic
         run: |

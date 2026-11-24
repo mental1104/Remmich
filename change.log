@@ -1,3 +1,11 @@
+## 2026-11-24: Repair CI simulator selection
+
+- Source: codex/fix-ci-simulator-selection from dev 79d3e17; upstream remains 672f02e. No server API or production change.
+- Build and Tests select an available iPhone simulator with iOS 27+ on each runner instead of requiring the absent iPhone 17 Pro. Boot uses the selected local UUID and exposes startup failures.
+- Retain standard xcode-27 runners (free compute for public repositories), pinned Actions, formatter checksum, revision checks and manual release gates. Existing push/dev and manual triggers retained; draft PR builds skipped, ready_for_review supported.
+- Validation: bash syntax and diff checks; synthetic device selection and missing-device rejection passed on NAS. Real Xcode Build/Tests pending GitHub run; device acceptance remains unverified. No phone interrupted.
+- Rollback: revert this CI commit; keep the parent gitlink unchanged until validation succeeds.
+
 ## 2026-11-24: Establish coupled client/server maintenance
 
 - Upstream main: 672f02e; downstream branch: dev. Parent server dev baseline: e69e65fba (Immich v3.4.2). Active NAS media-AI worktree is deliberately untouched.
