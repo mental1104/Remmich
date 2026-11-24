@@ -22,6 +22,25 @@
 - New domain/actual-reader fixtures cover tuple/null/version/current edits, ambiguity, strict wire values, finite batches, changed sources and held-await cancellation/revocation. Actual NAS checks:four scoped SwiftFormat0.64.5 files and diff/fixed-JSON syntax checks pass. Swift compilation/test execution, real Photos/iCloud and local display/playback/device acceptance remain unverified.
 - Details/rollback:docs/local-media-association.md; revert isolated metadata files without data migration. Saved/paused UIKit resize work is not included.
 
+## 2026-11-24: Keep exact thumbnail versions through manifests and durable responses
+
+- Source: runtime-fixesf121fcd over424a22a; upstream remains672f02e. Separate from the8 obsolete fixture failures, review found two real same-second risks: an ISO-keyed manifest could serve an earlier millisecond file under a new Nuke key, and a completed-but-unimported queue body could be relabeled with a newer filename.
+- Managed thumbnail selection now requires the exact display filename. Thumbnail queue jobs gain optional thumbnailVersion, leaving the existing sourceRevision ISO contract and all non-thumbnail/export behavior intact. Prefetch/readiness/actual thumbnailData require the same exact version, retiring old/unknown cache response pairs before a new read. No cache-buster headers/queries, original-file mutations or server API changes.
+- Add actual MediaLibraryController old/new-manifest and real durable-queue old-body/new-wait regressions; keep source files unchanged and cancel the disabled-native new read. Update valid managed-file fixtures and readiness fixtures, retaining the existing legacy/unknown-mode negative cases.
+- Scoped SwiftFormat/diff checks pass; new Swift compilation/runtime remains unverified. No server/schema/workflow/production/private-media changes. Rollback preserves underlying media but restores the known stale-cache risk; old clients ignore the additive thumbnailVersion field and must not be used to claim same-second cache correctness.
+
+## 2026-11-24: Seed current edited cache fixtures for existing lifecycle regressions
+
+- Source: runtime-fixesbd986e5 over candidate424a22a; upstream remains672f02e. Source review traces the remaining8 App issues to obsolete positive fixtures: four groups seed legacy one.jpg/asset.jpg files, and ready-cache jobs omit the required size/edited query. New production guards correctly refuse these old inputs, causing intended metadata/place/account tests to enter unintended network/failure paths.
+- Seed actual displayThumbnailFilename paths and matching relativeFileKey in account/place/statistics positive fixtures, keeping sourceRevision's original ISO contract. Ready-cache jobs now use the exact displayThumbnailURL; blocked/stale/partial/failed states and all assertions remain intact. No product guard is relaxed; existing legacy, old queued request and subsecond negative tests remain.
+- Scoped formatting/diff checks pass; repaired Swift runtime remains unexecuted. A separately discovered same-second manifest/undelivered-body risk is not fixed or explained away by these fixture changes and requires a production patch. No server/API/schema/workflow/production data changes; rollback only these fixture updates.
+
+## 2026-11-24: Align runtime assertions with shipped reference search and edited media contracts
+
+- Source: codex/fix-candidate-runtime-contracts from424a22a; upstream remains672f02e. Actual App log artifact14922273023 from CI45394307543 reports830 tests/106 suites and11 issues. Three issues are stale contracts: supported reference-image restoration expected rejection, and two media URLs expected the pre-edited query string. Cache-related issues remain under separate source review; the run is still executing UI checks and no replacement is triggered.
+- Preserve and strengthen assertions: reference plus city must round-trip; malformed/non-v4 references and text/reference conflict must fail as a whole. Thumbnail/preview must contain exactly size and edited=true, retaining path/auth/size identity checks. No production code, assertion removal, compiler setting or CI gate changes.
+- Scoped SwiftFormat/diff checks pass on NAS; repaired Swift test execution remains unverified. No server/API/schema/production/signing changes. Revert this test-only contract update independently if superseded.
+
 ## 2026-11-24: Make new management HTTP fixture captures explicitly Sendable
 
 - Source: candidatea207b3b; upstream remains672f02e. CI45392189009/job138438516772 ended compilation failure with one source diagnostic at AlbumDirectoryManagementTests.swift:481: sending a Task closure risks a race. The previous batch macro errors are absent. App linking is not combined build/test success; API/app/UI execution remains incomplete.

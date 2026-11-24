@@ -50,12 +50,14 @@ struct AccountLibraryIsolationTests {
         _ = try await LibraryIndexSynchronizer(source: source, store: store).fullSyncAndVerify(scope: firstScope)
         let snapshot = try #require(try await store.snapshot(scope: firstScope))
         let asset = try #require(snapshot.assets.first)
-        let file = root.appending(path: "cache/\(firstScope.cacheNamespace)/thumbnail/one.jpg")
+        // 本场景需要真实有效的当前展示缓存；旧无模式文件已有独立拒收负例。
+        let relativeKey = "thumbnail/" + LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt)
+        let file = root.appending(path: "cache/\(firstScope.cacheNamespace)/\(relativeKey)")
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data([1, 2, 3]).write(to: file)
         try await store.upsert(derivatives: [.init(
             assetID: asset.id, derivative: .thumbnail, pixelSize: nil, sourceRevision: asset.updatedAt.ISO8601Format(),
-            relativeFileKey: "thumbnail/one.jpg", byteCount: 3, digest: "fixture", isVerified: true,
+            relativeFileKey: relativeKey, byteCount: 3, digest: "fixture", isVerified: true,
             lastAccessedAt: .now, completedAt: .now
         )], scope: firstScope)
         AccountCachePreferences(enabled: true).save(to: preferences, scope: firstScope)

@@ -20,8 +20,15 @@ struct LibrarySyncRegressionTests {
         _ = journal.activate(owner)
         for asset in assets {
             for kind in [LibraryTransferKind.thumbnail, .metadata] {
-                var job = try journal.job(url: owner.endpoint.appending(path: "assets/\(asset.id)\(kind == .thumbnail ? "/thumbnail" : "")"),
-                                          kind: kind, owner: owner, sourceRevision: asset.id == "stale" ? "old" : asset.updatedAt.ISO8601Format())
+                // ready配对要使用真正edited展示URL；metadata路径与旧/在途/失败状态保持原测试含义。
+                let requestURL = if kind == .thumbnail {
+                    try #require(LibraryThumbnailCache.displayThumbnailURL(assetID: asset.id, endpoint: owner.endpoint))
+                } else {
+                    owner.endpoint.appending(path: "assets/\(asset.id)")
+                }
+                var job = try journal.job(url: requestURL,
+                                          kind: kind, owner: owner, sourceRevision: asset.id == "stale" ? "old" : asset.updatedAt.ISO8601Format(),
+                                          thumbnailVersion: kind == .thumbnail ? LibraryThumbnailCache.displayThumbnailVersion(updatedAt: asset.updatedAt) : nil)
                 job.state = asset.id == "blocked" || (asset.id == "partial" && kind == .thumbnail) ? .running : .completed
                 if asset.id == "failed" {
                     job.state = .failed

@@ -58,6 +58,7 @@ struct LibraryEditedThumbnailTests {
         #expect(thumbnail.url.path == session.apiURL.appending(path: "assets/\(asset.id)/thumbnail").path)
         #expect(thumbnail.url.query == "size=thumbnail&edited=true")
         #expect(thumbnail.sourceRevision == asset.updatedAt.ISO8601Format())
+        #expect(thumbnail.thumbnailVersion == LibraryThumbnailCache.displayThumbnailVersion(updatedAt: asset.updatedAt))
         #expect(refreshed.jobs.count == 2)
     }
 
@@ -70,6 +71,57 @@ struct LibraryEditedThumbnailTests {
         #expect(oldAsset.updatedAt.ISO8601Format() == completedAsset.updatedAt.ISO8601Format())
         #expect(LibraryThumbnailCache.cachedProgress(assets: [oldAsset], derivatives: [intermediate]).cachedCount == 1)
         #expect(LibraryThumbnailCache.cachedProgress(assets: [completedAsset], derivatives: [intermediate]).cachedCount == 0)
+    }
+
+    /// 冷恢复的同秒旧完成体仍可被原版本读取，但新版本必须等待新任务，不能重放旧字节。
+    @Test(.timeLimit(.minutes(1))) func sameSecondResponseCannotBecomeANewThumbnail() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "thumbnail-body-version-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let session = AccountSession.fixture, scope = MediaAccountScope(session: session)
+        let owner = LibraryTransferOwner(session: session, endpoint: session.apiURL)
+        let oldAsset = makeAsset(revision: Date(timeIntervalSince1970: 100.1))
+        let newAsset = makeAsset(revision: Date(timeIntervalSince1970: 100.2))
+        let url = try #require(LibraryThumbnailCache.displayThumbnailURL(assetID: oldAsset.id, endpoint: session.apiURL))
+        var journal = LibraryTransferJournal()
+        _ = journal.activate(owner)
+        var old = try journal.job(url: url, kind: .thumbnail, owner: owner,
+                                  sourceRevision: oldAsset.updatedAt.ISO8601Format(),
+                                  thumbnailVersion: LibraryThumbnailCache.displayThumbnailVersion(updatedAt: oldAsset.updatedAt))
+        old.state = .completed; old.statusCode = 200
+        journal.update(old)
+        try Data([42]).write(to: root.appending(path: old.responseFilename))
+        let journalURL = root.appending(path: "journal.json")
+        try journal.save(to: journalURL)
+        let queue = LibraryTransferQueue(rootURL: root, nativeTasksProvider: { [] }, sessionIdentifier: "io.github.espeonblue.Remmich.version-unused-\(UUID().uuidString)")
+        try await queue.configure(session: session, endpoint: session.apiURL, cacheAllowed: false)
+        #expect(try await queue.readyCacheAssets([oldAsset], owner: owner, thumbnailIDs: [], metadataIDs: [oldAsset.id]).ids == [oldAsset.id])
+        #expect(try await queue.readyCacheAssets([newAsset], owner: owner, thumbnailIDs: [], metadataIDs: [oldAsset.id]).ids.isEmpty)
+        let previous = try await queue.thumbnailData(for: URLRequest(url: url), scope: scope, endpoint: session.apiURL,
+                                                     accessToken: session.accessToken, updatedAt: oldAsset.updatedAt)
+        #expect(previous.data == Data([42]))
+        let newRevision = newAsset.updatedAt
+        let read = Task { @Sendable [queue, url, scope, session, newRevision] in
+            try await queue.thumbnailData(for: URLRequest(url: url), scope: scope, endpoint: session.apiURL,
+                                          accessToken: session.accessToken, updatedAt: newRevision)
+        }
+        defer { read.cancel() }
+        var replacement: LibraryTransferJournal.Job?
+        for _ in 0 ..< 200 {
+            replacement = try LibraryTransferJournal.load(from: journalURL).jobs.first { $0.kind == .thumbnail && $0.id != old.id }
+            if replacement != nil {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(replacement?.state == .queued)
+        #expect(replacement?.thumbnailVersion == LibraryThumbnailCache.displayThumbnailVersion(updatedAt: newRevision))
+        #expect(replacement?.sourceRevision == old.sourceRevision)
+        read.cancel()
+        do {
+            _ = try await read.value
+            Issue.record("A new thumbnail version must not receive the old completed body")
+        } catch { #expect(error is CancellationError) }
     }
 
     /// 固定合成资产身份/版本/尺寸；与实际索引模型同构，未读取服务端或照片。

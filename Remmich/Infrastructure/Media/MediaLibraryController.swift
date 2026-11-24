@@ -668,9 +668,14 @@ final class MediaLibraryController {
         return request
     }
 
+    /// descriptor是当前展示版本；普通ISO索引可能同秒碰撞，必须继续核对精确版本文件名。
+    /// 返回当前版本manifest文件或nil；不匹配沿既有缓存/远端回退，禁止把旧字节注册成新身份。
     private func registeredThumbnailURL(for descriptor: MediaRequestDescriptor) -> URL? {
-        guard descriptor.derivative == .thumbnail else { return nil }
-        return warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: descriptor.assetID, revision: descriptor.updatedAt)]
+        guard descriptor.derivative == .thumbnail,
+              let url = warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: descriptor.assetID, revision: descriptor.updatedAt)],
+              url.lastPathComponent == LibraryThumbnailCache.displayThumbnailFilename(assetID: descriptor.assetID, updatedAt: descriptor.updatedAt)
+        else { return nil }
+        return url
     }
 
     private func managedThumbnailURL(for descriptor: MediaRequestDescriptor) -> URL? {
