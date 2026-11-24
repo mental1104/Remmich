@@ -1,3 +1,9 @@
+## 2026-11-24: Preserve isolated HTTP evidence for local-first matching
+
+- Import standalone reports fromb6f20b6,2533f64,face6d7 and update local-media-matching.md to the integrated behavior and remaining validation. These reports cover synthetic metadata streams, ordinary SHA1 lookup and target external-library representatives respectively; original probing mistakes remain recorded.
+- The external fixture used the existing cached server imagec15f4ca, public library/fingerprint controls and three synthetic files. After fingerprint readiness, bulk precheck selected a JPEG representative and MP4 whose fresh public checksums equalled local SHA1; the other JPEG copy retained a path checksum and was not selected. This is conditional isolated evidence, not current-production readiness or a newly built server validation.
+- No production, media, API/schema or workflow changes. Docs/diff checks pass; Swift compilation, routing/runtime execution and device acceptance remain unverified. Rollback removes only documentation.
+
 ## 2026-11-24: Finish local-media lifecycle and isolate routing-test transport
 
 - Source: local-media-matching4b8d560; upstream remains672f02e. The candidate now integrates the matcher, current PhotoKit reader, local checksum lookup, account-isolated association persistence, settings entry and actual image/video routing. On returning to the foreground, restore or refresh the current scope with existing authorization; repeated events reuse the active operation.
