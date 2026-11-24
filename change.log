@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 ## 2026-11-24: Guard deferred local requests and video fallback
 
 - Source: local-media-matching966e3c6; upstream remains672f02e. Recheck the confirmed association when a deferred image request executes and bypass wrapper memory reads so an old request cannot skip current permission/account validation. Preserve the existing remote pipeline cache after a valid local miss.
@@ -11,7 +10,6 @@
 - Display thumbnail/preview/fullsize requests try confirmed same-version Photos current first; actual local success avoids the existing remote pipeline. Local miss or revoked local access falls back only while the original account/context remains valid. Cancellation/account changes throw and do not start old-account remote fallback. Explicit original/export paths remain separate. Ordinary video uses a matched local AVPlayerItem before saved/export/remote paths.
 - Add scoped auto-restore/refresh hooks, account settings entry, strict fresh asset-info getter and a viewer source label distinguishing device Photos from Immich resources/cache. Source labels do not claim network byte counts. No upload, original overwrite, backup-completion or cleanup proof is inferred from display association.
 - Six scoped SwiftFormat/diff checks pass on NAS; app compilation, end-to-end routing tests, matching dependencies and device acceptance are unverified. Root continues integration before pushing one candidate CI. Rollback removes display routing without deleting media or server state.
-=======
 ## 2026-11-24: Automatically scan and restore safe local display associations
 
 - Source: independent codex/feature-local-media-scan fromb79bfa2, with reader9251200 and checksum288ed84 dependencies; upstream remains672f02e, no synchronization. Add only new domain/Controller/settings/inventory/observer/atomic-store/test files and docs; root owns actual media/settings/foreground bridges. No shared MediaLibraryController, official mobile, server/API/SQLite/backup/workflow/production/push/CI change.
@@ -19,7 +17,6 @@
 - Persist enabled config/confirmed maps in namespace-isolated atomic versioned JSON. Future/corrupt data rejects overwrite; context changes revoke final write permits. Offline cold restore retains same-version mappings; online enabled refresh is deduplicated per management generation and never asks new permission. Photos notifications invalidate old sources and coalesce foreground refresh. Observable revision enables actual media request invalidation.
 - Add13 functions/31 cases for actual Controller/JSON with synthetic boundaries: unsafe candidates, hash proof,64-item batches, held-response cancellation/switch, offline/cold/automatic recovery, permissions, strict version wire, revoked writes and format/namespace isolation. Seven-file scoped SwiftFormat0.64.5 and diff checks pass; no Swift on NAS, so compilation/runtime/Photos/iPhone/UI acceptance remain unverified. Root integration/CI/device checks still determine end-to-end readiness.
 - Revert this isolated module with its host bridge, retaining recovery files without downgrade. No original mutation/upload/delete/backup proof/space-cleanup claim. See docs/local-media-scanning.md; iPad work stays paused.
->>>>>>> 6375053 (feat: automatically match and restore local media associations)
 
 ## 2026-11-24: Add local-current SHA1 fallback and read-only checksum lookup
 
@@ -27,6 +24,12 @@
 - Provide full before/after expected-version/permission/context gates, conservative single unadjusted photo/video selection, network=false cancellable streaming SHA1 and explicit insufficient reasons. No private isCurrent/KVC, RAW+JPEG/edited/LivePhoto guessing, iCloud media download, Immich media download, upload or backup confirmation. SHA1/Base64 proof only supports local-display association after caller fresh checks.
 - Use official POST assets/bulk-upload-check with client64 limit, exact200 and complete unique nonce/action/duplicate/assetId/isTrashed checks. accept is noMatch; trashed stays separate, no retries or writes. Existing external-library content/clientChecksum compatibility remains conditional on current server configuration/fingerprint readiness. UI/controller integration is independently owned and not complete from this component alone.
 - Add51 declared source/stream/HTTP scenarios; scoped7-file SwiftFormat0.64.5 lint, bash syntax, independent SHA1/Base64 and3 fixed-JSON checks plus diff pass on NAS. Swift compilation/tests, actual PhotoKit/iCloud-only/device playback/current NAS target remain unexecuted. See docs/local-media-checksum-matching.md for public API evidence/contracts, limits and rollback; no persistent queue or media migration.
+## 2026-11-24: Exercise local media metadata through actual URLSession bytes
+
+- Source: codex/test-local-metadata-http fromb79bfa2; upstream remains672f02e, no sync. Only one new test file and docs/log; no production client/decoder/media/PhotoKit/server/raw-schema/workflow, push, CI or deployment change.
+- Add11 functions/28 parameterized cases around real LibraryMutationClient→private URLSession→URLProtocol. Verify exact authenticated prefixed GET sync/ack then fixed POST sync/stream AssetMetadataV1, no reset/ACK write/media paths, fresh repeated reads and empty/invalid no-request behavior. Independent server-shaped golden keeps full opaque Unicode IDs, duplicate candidates and UTF8 transport chunk boundaries.
+- Cover metadata checkpoint early refusal, exact statuses and stream MIME, EOF/partial-final-line/connection-loss refusal, SyncReset and pre-entry/ACK/stream Task/session cancellation. Finite actor scripts, observable real HTTP gates, completion fallback and Mutex/@Sendable capturedRequest transport preserve errors and cancel; no external socket or simulated business success.
+- Actual NAS validation: SwiftFormat0.64.5 scoped format/lint, diff whitespace and static golden/protocol/UTF8 checks. Swift/Xcode unavailable: compilation/tests UNEXECUTED. Running-server HTTP, real Photos and integrated local-first/cache/video/account behavior remain separate unverified acceptance; see docs/local-media-metadata-http-tests.md. Revert test/docs only; no durable data changes.
 
 ## 2026-11-24: Read official metadata for device-local media matching
 
