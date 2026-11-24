@@ -323,6 +323,7 @@ public actor ImmichClient {
                 originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
                 originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
                 personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+                rating: ratingFilter(query.rating),
                 state: query.state.isEmpty ? nil : .init(eq: query.state),
                 takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
@@ -381,6 +382,7 @@ public actor ImmichClient {
             page: pageNumber,
             personIds: query.personIDs.isEmpty ? nil : query.personIDs,
             query: text,
+            rating: legacyRating(query.rating),
             size: size,
             state: query.state.isEmpty ? nil : query.state,
             takenAfter: after,
@@ -402,6 +404,28 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
         case let .undocumented(statusCode, _):
             throw Self.map(status: statusCode)
+        }
+    }
+
+    /// rating来自界面；nil表示不限制，显式null筛选未评分，0–5按具体数值比较。
+    private func ratingFilter(_ rating: ImmichSearchRating) throws -> ImmichNullableNumberFilter? {
+        switch rating {
+        case .any: return nil
+        case .unrated: return .init(eq: .null)
+        case let .stars(value):
+            guard (0 ... 5).contains(value) else { throw ImmichAPIError.invalidResponse }
+            return .init(eq: .number(Double(value)))
+        }
+    }
+
+    /// rating为旧式smart评分；仅1–5可由该契约表达，拒绝未评分/0及越界，不能悄悄省略。
+    private func legacyRating(_ rating: ImmichSearchRating) throws -> Int? {
+        switch rating {
+        case .any: return nil
+        case .unrated: throw ImmichAPIError.invalidResponse
+        case let .stars(value):
+            guard (1 ... 5).contains(value) else { throw ImmichAPIError.invalidResponse }
+            return value
         }
     }
 

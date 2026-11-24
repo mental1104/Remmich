@@ -1,3 +1,12 @@
+## 2026-11-24: Rating filters with explicit null semantics
+
+- Source: codex/feature-search-rating overbcaf66f; upstream remains672f02e. No upstream sync, server/API/schema/database/production change.
+- Add Any/Unrated/0–5 rating controls and native-to-SDK mapping. Saved presets preserve missing/null/value and reject out-of-range ratings; a saved unrated condition is no longer rejected as unsupported. Update the unsupported-condition regression to use still-unsupported tags.
+- Use Swift OpenAPI Generator1.13.1's documented typeOverrides for NumberFilterNullable: a handwritten Codable type preserves absent/null/number for eq/ne plus all existing comparison/list operators. Do not modify generated sources or the OpenAPI snapshot. This addresses generator nullable omission documented in apple/swift-openapi-generator#419; reference: https://github.com/apple/swift-openapi-generator/blob/1.13.1/Sources/swift-openapi-generator/Documentation.docc/Articles/Configuring-the-generator.md#type-overrides.
+- Metadata can express exact0–5 and unrated null; legacy smart preserves1–5 with its existing numeric page contract. Unrated/0 smart combinations remain explicitly unavailable pending structured/ranked pagination, alongside other advanced combinations; this follow-up does not finish the search stage.
+- Add SDK wire assertions for absent/null/0/boundaries, legacy stars, invalid-before-send, all nullable operators, and native preset round trips. Local SwiftFormat and diff checks passed; these new tests have not run in Swift yet. Existing bcaf66f CI45338292119 is still compiling and cannot validate this follow-up. No real-device validation.
+- Rollback: revert this follow-up including generator config; no saved conditions or media need deletion/recovery. Parent gitlink remains0af1897.
+
 ## 2026-11-24: Favorite and archive search conditions
 
 - Validation follow-up: ca271bb passed the complete CI45336010250, including offline contracts, app/test build, API tests, simulator app tests and artifact/source checks. This covers the saved-search panel and codec. Region7e4714e and visibilitycefddca follow-ups still require their own CI; no merge or parent gitlink update yet.

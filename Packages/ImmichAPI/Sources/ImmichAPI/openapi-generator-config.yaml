@@ -2,6 +2,10 @@ generate:
   - types
   - client
 accessModifier: internal
+# 官方可空数值过滤须区分缺省与null，避免未评分查询被编码为空对象。
+typeOverrides:
+  schemas:
+    NumberFilterNullable: ImmichNullableNumberFilter
 filter:
   operations:
     - pingServer
