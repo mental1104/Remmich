@@ -15,6 +15,10 @@ struct MetadataSearchTests {
         query.city = "Test City"
         query.cameraMake = "Test Make"
         query.cameraModel = "Test Model"
+        query.personIDs = ["11111111-1111-4111-8111-111111111111"]
+        query.timeZone = try #require(TimeZone(secondsFromGMT: 8 * 3600))
+        query.takenAfter = Date(timeIntervalSince1970: 0)
+        query.takenBefore = Date(timeIntervalSince1970: 0)
         let transport = ImmichQueuedReadTransport(searchTransport: SearchTransport()) { _, _ in
             Issue.record("Search POST must not enter the URL-only durable queue")
             throw CancellationError()
@@ -33,6 +37,24 @@ struct MetadataSearchTests {
         await #expect(throws: ImmichAPIError.unauthorized) { try await anonymous.metadataSearch(.init()) }
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: SearchTransport())
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.metadataSearch(.init(), size: 0) }
+        var invalid = ImmichMetadataSearch()
+        invalid.personIDs = ["not-a-uuid"]
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.metadataSearch(invalid) }
+        invalid = .init()
+        invalid.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+        invalid.takenAfter = Date(timeIntervalSince1970: 86400)
+        invalid.takenBefore = Date(timeIntervalSince1970: 0)
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.metadataSearch(invalid) }
+    }
+
+    /// 夏令时当日仍编码为本地墙上日期，不把23小时的绝对日长带到服务器比较中。
+    @Test func dateBoundariesPreserveLocalCalendarDayAcrossDST() throws {
+        var query = ImmichMetadataSearch()
+        query.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+        let selected = try #require(ISO8601DateFormatter().date(from: "2026-03-08T15:00:00Z"))
+        let expected = try #require(ISO8601DateFormatter().date(from: "2026-03-08T00:00:00Z"))
+        #expect(try query.captureBoundary(selected, endOfDay: false) == expected)
+        #expect(try query.captureBoundary(selected, endOfDay: true) == expected.addingTimeInterval(86400 - 0.001))
     }
 }
 
@@ -54,6 +76,10 @@ private struct SearchTransport: ClientTransport {
         #expect((filter["city"] as? [String: String])?["eq"] == "Test City")
         #expect((filter["make"] as? [String: String])?["eq"] == "Test Make")
         #expect((filter["model"] as? [String: String])?["eq"] == "Test Model")
+        #expect((filter["personIds"] as? [String: [String]])?["any"] == ["11111111-1111-4111-8111-111111111111"])
+        let taken = try #require(filter["takenAt"] as? [String: String])
+        #expect(taken["gte"] == "1970-01-01T00:00:00.000Z")
+        #expect(taken["lte"] == "1970-01-01T23:59:59.999Z")
         let response = #"{"albums":{"total":0,"count":0,"items":[],"facets":[]},"assets":{"total":0,"count":0,"items":[],"facets":[],"nextPage":null,"nextCursor":"next-opaque"}}"#
         return (HTTPResponse(status: .ok, headerFields: [.contentType: "application/json"]), HTTPBody(response))
     }

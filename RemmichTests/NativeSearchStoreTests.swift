@@ -6,6 +6,16 @@ import Testing
 /// 只用合成媒体验证分页发布权、去重、失败恢复和跨账户清除。
 @Suite("Native search state")
 struct NativeSearchStoreTests {
+    /// 安全的SDK错误保留状态区别，不把鉴权失败或非法条件伪装成空结果。
+    @Test(arguments: [ImmichAPIError.unauthorized, .forbidden, .httpStatus(400)])
+    @MainActor func distinguishesAuthenticationPermissionAndRequestErrors(_ error: ImmichAPIError) async {
+        let store = NativeSearchStore()
+        await store.search(.init(), source: ErrorSource(error: error))
+        #expect(store.error == error.errorDescription)
+        #expect(!store.hasSearched)
+        #expect(store.assets.isEmpty)
+    }
+
     /// 重复资源只保留首次顺序，失败页重试沿用原游标。
     @Test @MainActor func paginationRetainsCursorOnFailureAndDeduplicates() async {
         let source = PagedSource()
@@ -48,6 +58,16 @@ struct NativeSearchStoreTests {
         #expect(store.assets.isEmpty)
         #expect(store.error == nil)
         #expect(!store.isLoading)
+    }
+}
+
+/// error为合成SDK错误，只用于验证界面可见错误语义，不包含服务端原始响应。
+private struct ErrorSource: NativeSearchReading {
+    let error: ImmichAPIError
+
+    /// query与cursor不触发网络；原样抛出指定的可安全展示错误。
+    func metadataSearch(_: ImmichMetadataSearch, cursor _: String?) async throws -> NativeSearchPage {
+        throw error
     }
 }
 

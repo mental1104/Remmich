@@ -10,9 +10,28 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    public var personIDs: [String] = []
+    /// 日期代表用户所选日历日；序列化时保留该日墙上时间，不能直接使用绝对UTC日界线。
+    public var takenAfter: Date?
+    public var takenBefore: Date?
+    public var timeZone = TimeZone.current
 
     /// 创建空条件；调用方按用户选择修改值，不自动读取设备照片。
     public init() {}
+
+    /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。
+    /// 与服务端/Web的asLocalTimeISO一致；无法表示的日期抛invalidResponse。
+    func captureBoundary(_ date: Date, endOfDay: Bool) throws -> Date {
+        var local = Calendar(identifier: .gregorian)
+        local.timeZone = timeZone
+        let components = local.dateComponents([.year, .month, .day], from: date)
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        guard let start = utc.date(from: components), let next = utc.date(byAdding: .day, value: 1, to: start) else {
+            throw ImmichAPIError.invalidResponse
+        }
+        return endOfDay ? next.addingTimeInterval(-0.001) : start
+    }
 }
 
 /// 一页实际搜索资源；nextCursor 必须原样传回，不是页码或总数量。

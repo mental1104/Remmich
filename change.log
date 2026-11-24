@@ -1,3 +1,11 @@
+## 2026-11-24: People and capture-date metadata filters
+
+- Source: codex/feature-search-people-dates, based on native-search 98e6dec (PR #2 still pending app tests when implementation began); upstream remains 672f02e. No server change or deployment.
+- Reuse account-scoped library people as filter candidates, preserve UUID identity and reject late candidates after account changes. Add optional start/end calendar days; encode local wall-clock boundaries like Web asLocalTimeISO, including DST. Reject invalid UUIDs and reversed dates before network access.
+- Preserve safe SDK distinctions for authentication/permission/request errors; retry after an invalid repeated cursor restarts the query instead of doing nothing. No raw server responses or search contents are logged.
+- Validation: local SwiftFormat and diff checks pass. Added request-body/person/date, DST, invalid range and error-state tests; new Xcode/Swift validation pending. This does not claim PR #2 or new filters have passed app tests yet.
+- Remaining search work: smart modes, candidate suggestions, Fork EXIF/atomic filters and saved conditions. Roll back this commit to remove filters; no data recovery needed.
+
 ## 2026-11-24: Native metadata search and read-only POST transport
 
 - Source: codex/feature-native-search from dev 0af1897; upstream remains 672f02e. No server API, migration or production change.

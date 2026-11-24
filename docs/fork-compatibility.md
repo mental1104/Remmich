@@ -37,6 +37,8 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 
 ## Verification
 
+- People/date filter follow-up is implemented on codex/feature-search-people-dates but awaits CI: account-scoped people, optional local calendar boundaries, invalid-range rejection and explicit SDK error messages. Smart search, suggestions, Fork EXIF and saved conditions remain unfinished. Do not use older successful CI for this follow-up.
+
 - Native search work in progress: metadata results replace fixtures with filename/city/camera/type filters and cursor paging. Read-only POST uses an explicit ephemeral no-redirect path in ImmichQueuedReadTransport; durable GET indexing stays unchanged. Smart/people/date/Fork EXIF/presets remain unimplemented. New tests and Xcode validation await CI; earlier demo-data statements describe the previous pinned release.
 
 - CI simulator repair: Build and Tests independently select an installed iPhone with iOS 27+ using Scripts/select-ci-simulator.sh. The previous fixed iPhone 17 Pro was absent on the runner; this is unrelated to the user's physical iPhone 15 Pro. NAS syntax/synthetic checks passed; GitHub Xcode validation is pending.

@@ -79,9 +79,11 @@ final class NativeSearchStore {
             nextCursor = page.nextCursor
             hasSearched = true
         } catch {
-            guard owner == generation, !Task.isCancelled, !(error is CancellationError) else { return }
+            guard owner == generation, !Task.isCancelled, !(error is CancellationError),
+                  (error as? TimelineReadError) != .staleGeneration else { return }
             // 不泄露原始响应与查询内容，失败页允许用户重试。
-            self.error = "Search could not be loaded. Check connection, permissions, and server version."
+            self.error = (error as? ImmichAPIError)?.errorDescription
+                ?? "Search could not be loaded. Check connection and server version."
         }
     }
 }

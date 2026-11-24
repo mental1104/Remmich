@@ -301,7 +301,12 @@ public actor ImmichClient {
     /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
-        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        guard (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
+        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
+        if let after, let before, after > before {
+            throw ImmichAPIError.invalidResponse
+        }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let output = try await makeClient().searchAssets(.init(body: .json(.init(
             cursor: cursor,
@@ -310,6 +315,8 @@ public actor ImmichClient {
                 make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
                 model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
                 originalFileName: text.isEmpty ? nil : .init(like: text),
+                personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
+                takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
                 _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
                 visibility: .init(eq: .timeline)
             ),
