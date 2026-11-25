@@ -20,12 +20,13 @@ nonisolated struct ManagedPerson: Identifiable, Hashable, Sendable {
 
 /// 人物变更失败保持可读且安全；任何写入异常后都先Reload，尤其不能重放可能部分完成的合并。
 nonisolated enum PeopleManagementError: LocalizedError, Equatable, Sendable {
-    case changedPerson, incompleteMerge
+    case changedPerson, unconfirmedPerson, incompleteMerge
 
     /// 不包含服务器原文、凭据或私人识别结果；说明用户需要重新读取而不是重复提交。
     var errorDescription: String? {
         switch self {
         case .changedPerson: "This person changed. Reload people before confirming again."
+        case .unconfirmedPerson: "The saved person fields were not confirmed by fresh server data. Reload people before another change."
         case .incompleteMerge: "The server did not confirm every merge result. Some records may have changed. Reload before another change."
         }
     }

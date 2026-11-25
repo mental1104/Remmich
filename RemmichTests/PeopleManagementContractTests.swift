@@ -36,6 +36,185 @@ struct PeopleManagementContractTests {
         await repo.clear()
     }
 
+    /// 空姓名与隐藏/取消隐藏都必须经真实Store→HTTP四步闭环；withHidden确保隐藏后仍能读后核对。
+    @Test(arguments: ["rename-empty", "hide", "show"])
+    @MainActor func confirmsEditableFieldsFromTheFreshFullList(_ action: String) async throws {
+        let endpoint = peopleEndpoint()
+        let wasHidden = action == "show"
+        let name = action == "rename-empty" ? "" : "Before"
+        let hidden = action == "hide"
+        let before = personJSON(peopleA, name: "Before", hidden: wasHidden)
+        let after = personJSON(peopleA, name: name, hidden: hidden)
+        let fixture = PeopleHTTPFixture(routes: [
+            "GET /prefix/api/people?page=1": [.init(json: peoplePage([before], hasNext: false)), .init(json: peoplePage([after], hasNext: false))],
+            "GET /prefix/api/people/\(peopleA)": [.init(json: before)],
+            "PUT /prefix/api/people/\(peopleA)": [.init(json: after)],
+        ])
+        PeopleHTTPProtocol.install(fixture, endpoint: endpoint)
+        defer { PeopleHTTPProtocol.remove(endpoint: endpoint) }
+        let repo = peopleStoreRepository(fixture)
+        await repo.configure(session: peopleSession(endpoint), activeEndpoint: endpoint)
+        let store = PeopleManagementStore(); await store.reload(source: repo)
+        let expected = try #require(store.people.first)
+        if action == "rename-empty" {
+            await store.rename(expected, name: name, source: repo)
+        } else {
+            await store.setHidden(expected, hidden: hidden, source: repo)
+        }
+        let confirmed = try #require(store.people.first)
+        #expect(confirmed.id == peopleA && confirmed.name == name && confirmed.isHidden == hidden)
+        #expect(!store.needsReload && !store.busy && store.error == nil && store.notice != nil)
+        #expect(store.revision == 2 && store.mutationRevision == 1)
+        if action == "rename-empty" {
+            #expect(confirmed.displayName == "Unnamed")
+        }
+        let requests = await fixture.requests
+        #expect(requests.map(\.method) == ["GET", "GET", "PUT", "GET"])
+        let write = try #require(requests.first { $0.method == "PUT" })
+        let body: [String: Any] = action == "rename-empty" ? ["name": "", "userId": peopleUser] : ["isHidden": hidden]
+        #expect(try write.jsonBody().isEqual(to: body))
+        await repo.clear()
+    }
+
+    /// PUT200回执正确而fresh字段错误/目标缺失时，旧列表不得被替换或显示成功；明确Reload只读不重放。
+    @Test(arguments: ["rename-name", "rename-hidden", "hide-hidden", "hide-name", "show-hidden", "missing"])
+    @MainActor func rejectsUnconfirmedFieldsDespiteAnAcceptedReceipt(_ scenario: String) async throws {
+        let endpoint = peopleEndpoint()
+        let rename = scenario.hasPrefix("rename") || scenario == "missing"
+        let wasHidden = scenario == "show-hidden"
+        let desiredName = rename ? "After" : "Before"
+        let desiredHidden = !rename && !wasHidden
+        let before = personJSON(peopleA, name: "Before", hidden: wasHidden)
+        let after = personJSON(peopleA, name: desiredName, hidden: desiredHidden)
+        let inconsistent: String = switch scenario {
+        case "rename-name", "hide-hidden", "show-hidden": before
+        case "rename-hidden": personJSON(peopleA, name: desiredName, hidden: true)
+        case "hide-name": personJSON(peopleA, name: "Other", hidden: true)
+        default: personJSON(peopleB, name: "Other")
+        }
+        let fixture = PeopleHTTPFixture(routes: [
+            "GET /prefix/api/people?page=1": [.init(json: peoplePage([before], hasNext: false)),
+                                              .init(json: peoplePage([inconsistent], hasNext: false)),
+                                              .init(json: peoplePage([after], hasNext: false))],
+            "GET /prefix/api/people/\(peopleA)": [.init(json: before)],
+            "PUT /prefix/api/people/\(peopleA)": [.init(json: after)],
+        ])
+        PeopleHTTPProtocol.install(fixture, endpoint: endpoint)
+        defer { PeopleHTTPProtocol.remove(endpoint: endpoint) }
+        let repo = peopleStoreRepository(fixture)
+        await repo.configure(session: peopleSession(endpoint), activeEndpoint: endpoint)
+        let store = PeopleManagementStore(); await store.reload(source: repo)
+        let expected = try #require(store.people.first)
+        if rename {
+            await store.rename(expected, name: desiredName, source: repo)
+        } else {
+            await store.setHidden(expected, hidden: desiredHidden, source: repo)
+        }
+        #expect(store.people == [expected] && store.needsReload && !store.busy && store.notice == nil)
+        #expect(store.error == PeopleManagementError.unconfirmedPerson.errorDescription)
+        #expect(store.revision == 1 && store.mutationRevision == 1)
+        // 不明结果后的再次点击不能产生任何HTTP；只有显式Reload才能恢复写入资格。
+        await store.rename(expected, name: "No replay", source: repo)
+        #expect(await fixture.requests.count == 4)
+        await store.reload(source: repo)
+        let reloaded = try #require(store.people.first)
+        #expect(reloaded.name == desiredName && reloaded.isHidden == desiredHidden && !store.needsReload && store.error == nil)
+        #expect(await fixture.requests.map(\.method) == ["GET", "GET", "PUT", "GET", "GET"])
+        await repo.clear()
+    }
+
+    /// stage指定权限拒绝发生在预检/写入/写后完整读取；HTTP401/403均保持锁定，不当作空人物或成功。
+    @Test(arguments: ["preflight", "write", "list"], [401, 403])
+    @MainActor func permissionFailuresStayLockedThroughoutTheStoreFlow(_ stage: String, _ status: Int) async throws {
+        let endpoint = peopleEndpoint()
+        let before = personJSON(peopleA, name: "Before")
+        let after = personJSON(peopleA, name: "After")
+        let fixture = PeopleHTTPFixture(routes: [
+            "GET /prefix/api/people?page=1": [.init(json: peoplePage([before], hasNext: false)),
+                                              .init(status: status, json: "{}")],
+            "GET /prefix/api/people/\(peopleA)": [.init(status: stage == "preflight" ? status : 200, json: before)],
+            "PUT /prefix/api/people/\(peopleA)": [.init(status: stage == "write" ? status : 200, json: after)],
+        ])
+        PeopleHTTPProtocol.install(fixture, endpoint: endpoint)
+        defer { PeopleHTTPProtocol.remove(endpoint: endpoint) }
+        let repo = peopleStoreRepository(fixture)
+        await repo.configure(session: peopleSession(endpoint), activeEndpoint: endpoint)
+        let store = PeopleManagementStore(); await store.reload(source: repo)
+        let expected = try #require(store.people.first)
+        await store.rename(expected, name: "After", source: repo)
+        #expect(store.people == [expected] && store.needsReload && !store.busy && store.error != nil && store.notice == nil)
+        let requests = await fixture.requests
+        let count = stage == "preflight" ? 2 : stage == "write" ? 3 : 4
+        #expect(requests.count == count)
+        await store.rename(expected, name: "No replay", source: repo)
+        #expect(await fixture.requests.count == count)
+        if stage == "preflight" {
+            #expect(requests.allSatisfy { $0.method == "GET" })
+        }
+        await repo.clear()
+    }
+
+    /// final GET真实在途时退休账号/端点或取消；旧正确列表也不得发布确认或覆盖新账号人物。
+    @Test(.timeLimit(.minutes(1)), arguments: ["account", "endpoint", "cancel"])
+    @MainActor func retiresTheFreshConfirmationBeforeItCanPublish(_ change: String) async throws {
+        let endpoint = peopleEndpoint()
+        let nextEndpoint = change == "endpoint" ? peopleEndpoint() : endpoint
+        let before = personJSON(peopleA, name: "Before")
+        let after = personJSON(peopleA, name: "After")
+        let fixture = PeopleHTTPFixture(routes: [
+            "GET /prefix/api/people?page=1": [.init(json: peoplePage([before], hasNext: false)),
+                                              .init(json: peoplePage([after], hasNext: false), held: true),
+                                              .init(json: peoplePage([personJSON(peopleB, name: "New context")], hasNext: false))],
+            "GET /prefix/api/people/\(peopleA)": [.init(json: before)],
+            "PUT /prefix/api/people/\(peopleA)": [.init(json: after)],
+        ])
+        PeopleHTTPProtocol.install(fixture, endpoint: endpoint)
+        defer { PeopleHTTPProtocol.remove(endpoint: endpoint) }
+        let repo = peopleStoreRepository(fixture)
+        await repo.configure(session: peopleSession(endpoint), activeEndpoint: endpoint)
+        let store = PeopleManagementStore(); await store.reload(source: repo)
+        let expected = try #require(store.people.first)
+        let pending = Task { await store.rename(expected, name: "After", source: repo) }
+        let observer = Task { await pending.value; await fixture.failedBeforeGate() }
+        await withTaskCancellationHandler {
+            guard await fixture.waitForRequest() else {
+                await pending.value; Issue.record("Fresh confirmation must reach its real GET gate"); return
+            }
+            if change == "cancel" {
+                pending.cancel()
+            } else {
+                if change == "account" {
+                    await repo.configure(session: peopleSession(endpoint, user: peopleB, token: "new"), activeEndpoint: endpoint)
+                } else {
+                    await repo.updateRoute(nextEndpoint)
+                }
+                store.invalidate()
+                await store.reload(source: repo)
+                #expect(store.people.map(\.id) == [peopleB] && !store.needsReload)
+            }
+            await fixture.release(); await pending.value
+            #expect(store.notice == nil && store.error == nil && !store.busy)
+            if change == "cancel" {
+                #expect(store.people == [expected] && store.needsReload)
+            } else {
+                #expect(store.people.map(\.id) == [peopleB] && !store.needsReload)
+            }
+            let requests = await fixture.requests
+            #expect(requests.filter { $0.method == "PUT" }.count == 1)
+            #expect(requests.count == (change == "cancel" ? 4 : 5))
+            if change == "account" {
+                #expect(requests.last?.authorization == "Bearer new")
+                #expect(requests.dropLast().allSatisfy { $0.authorization == "Bearer synthetic" })
+            } else if change == "endpoint" {
+                #expect(requests.last?.url.host == nextEndpoint.host)
+                #expect(requests.dropLast().allSatisfy { $0.url.host == endpoint.host })
+            }
+        } onCancel: {
+            pending.cancel(); Task { await fixture.stop() }
+        }
+        await observer.value; await fixture.stop(); await repo.clear()
+    }
+
     /// 人物写仅发送明确字段：姓名限本人、隐藏不带资产visibility、合并保留有向ids并核全部回执。
     @Test func sendsExactScopedBodiesAndOrderedMerge() async throws {
         let endpoint = peopleEndpoint()
@@ -206,6 +385,17 @@ private nonisolated func peopleConfiguration() -> URLSessionConfiguration {
     return config
 }
 
+/// 复用真实SDK的含隐藏分页与人物专用URLSession；fixture仅提供HTTP字节，不替换Store或仓库动作。
+private nonisolated func peopleStoreRepository(_ fixture: PeopleHTTPFixture) -> ImmichTimelineRepository {
+    ImmichTimelineRepository(readLoader: { request, operation in
+        #expect(operation == "getAllPeople")
+        let captured = try PeopleCapturedRequest(request)
+        let query = URLComponents(url: captured.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(query.contains { $0.name == "withHidden" && $0.value == "true" })
+        return try await fixture.response(captured).response(url: captured.url)
+    }, peopleConfigurationFactory: { peopleConfiguration() })
+}
+
 /// id/name/hidden为合成字段；提供SDK实际PersonResponseDto必需字段和带毫秒日期。
 private nonisolated func personJSON(_ id: String, name: String = "Synthetic", hidden: Bool = false) -> String {
     #"{"id":"\#(id)","name":"\#(name)","isHidden":\#(hidden),"birthDate":null,"thumbnailPath":"/synthetic","updatedAt":"2026-11-24T00:00:00.123Z"}"#
@@ -326,6 +516,11 @@ private actor PeopleHTTPFixture {
     /// 测试在撤销上下文后释放原响应，确认客户端/仓库不能继续写入。
     func release() {
         pending?.resume(); pending = nil
+    }
+
+    /// 超时/测试取消时释放所有真实门闩并唤醒等待者，避免失败路径泄漏挂起continuation。
+    func stop() {
+        failedBeforeGate(); release()
     }
 }
 
