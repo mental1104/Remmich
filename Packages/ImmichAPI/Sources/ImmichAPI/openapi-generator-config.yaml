@@ -30,6 +30,8 @@ filter:
     - getAllAlbums
     - getAlbumInfo
     - getAllPeople
+    - searchStacks
+    - getStack
     - getAllTags
     - getAllSharedLinks
     - getPartners

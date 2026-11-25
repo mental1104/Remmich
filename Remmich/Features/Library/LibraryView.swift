@@ -97,6 +97,13 @@ struct LibraryView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("library-pending-albums")
+                                LibraryHubLink {
+                                    NativeStackManagementView(source: collectionSource, media: media)
+                                } label: {
+                                    LibraryCollectionCard(title: "Photo stacks", symbol: "square.stack", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-native-stacks")
                                 if preferences?.memoriesEnabled == true, !opening.memories.isConfirmedEmpty {
                                     LibraryMemoriesCard(source: collectionSource, media: media, assetDetails: assetDetails,
                                                         context: collectionNavigation, catalog: opening.memories,

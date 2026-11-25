@@ -777,6 +777,40 @@ public actor ImmichClient {
         } catch { throw Self.map(error) }
     }
 
+    /// 官方stack列表是无分页数组；调用方使用前台读取client，不复用持久索引GET。
+    public func managementStacks() async throws -> [ImmichNativeStack] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().searchStacks(.init())
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response): return try response.body.json.map(Self.nativeStack)
+            case let .undocumented(code, _): throw Self.map(status: code)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// id为官方stack UUID；返回真实当前成员，未知ID的权限失败保持原样，不能等同于已删除证明。
+    public func managementStack(_ id: String) async throws -> ImmichNativeStack {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard UUID(uuidString: id) != nil else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().getStack(.init(path: .init(id: id)))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response): return try Self.nativeStack(response.body.json)
+            case let .undocumented(code, _): throw Self.map(status: code)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// response由官方生成DTO解码；成员映射复用原始图片/视频显示元数据，不伪造完整隐藏成员数。
+    private static func nativeStack(_ response: Components.Schemas.StackResponseDto) -> ImmichNativeStack {
+        .init(id: response.id, primaryAssetID: response.primaryAssetId, assets: response.assets.map(timelineAsset))
+    }
+
     public func sharedLinks(serverURL: URL) async throws -> [ImmichSharedLink] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         do {
