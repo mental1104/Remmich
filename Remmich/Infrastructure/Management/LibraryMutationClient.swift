@@ -387,6 +387,27 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try (title, JSONEncoder().encode(Body(name: title)))
     }
 
+    /// id为当前管理资源；每次真实GET200并核对响应身份，元数据DTO不复用编辑/备份解码字段。
+    func assetMetadata(_ id: String) async throws -> AssetMetadataSnapshot {
+        let id = try validID(id)
+        let data = try await send("GET", ["assets", id], expectedStatus: 200)
+        let result = try JSONDecoder().decode(AssetMetadataSnapshot.self, from: data)
+        guard result.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id为已预检资源，patch只编码明确set/clear字段；精确200、同ID/owner和实际字段回执共同确认。
+    /// 不发送Live Photo关联/描述/可见性等其他属性，不重试；服务端继续执行权限与EXIF锁定/sidecar规则。
+    func updateAssetMetadata(_ id: String, patch: AssetMetadataPatch) async throws -> AssetMetadataSnapshot {
+        let id = try validID(id)
+        let body = try JSONEncoder().encode(patch)
+        let data = try await send("PUT", ["assets", id], body: body, expectedStatus: 200)
+        let result = try JSONDecoder().decode(AssetMetadataSnapshot.self, from: data)
+        guard result.id.lowercased() == id.lowercased(), result.ownerId.lowercased() == userID.lowercased(),
+              !result.isTrashed, patch.isConfirmed(by: result) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
     func asset(_ id: String) async throws -> ManagedAsset {
         try await JSONDecoder().decode(ManagedAsset.self, from: send("GET", ["assets", validID(id)]))
     }
