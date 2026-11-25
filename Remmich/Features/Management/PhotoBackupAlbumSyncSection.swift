@@ -1,12 +1,20 @@
 import SwiftUI
 
-/// 已有相簿映射和明确补入入口；沿用备份Form，不创建相簿、不镜像删除，不把组织成功写成上传成功。
+/// 明确已有/新建目标和增量补入入口；创建单独预览确认，未知结果不重POST，不镜像删除或冒充上传完成。
 struct PhotoBackupAlbumSyncSection: View {
     let sync: PhotoBackupAlbumSyncController
     let manager: LibraryManagementController
     let backup: PhotoBackupController
-    @State private var confirmsSync = false
+    /// 两种写入共用一个确认宿主，避免并列confirmationDialog互相遮蔽；目标ID来自已保存预览。
+    private enum Confirmation { case members, create(UUID) }
+    @State private var confirmation: Confirmation?
     @State private var confirmationOwner: UUID?
+    @State private var creationNames: [String: String] = [:]
+
+    /// 草稿/忙门使创建与现有组织同样不可执行；保留停止入口，不禁用整个Section。
+    private var creationBlocked: Bool {
+        sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan
+    }
 
     /// 只检查当前包含映射；失效目标仍保留UUID标签供明确改选，不让Picker隐式退到同名第一项。
     private var unavailableTargets: Int {
@@ -18,7 +26,7 @@ struct PhotoBackupAlbumSyncSection: View {
     var body: some View {
         Section("相簿同步 · 手动增量补入") {
             Text(sync.status)
-            Text("将当前包含且未排除的本地相簿，明确映射到已有自有相簿。只补入已确认照片的缺失成员关系；不上传或下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
+            Text("将当前包含且未排除的本地相簿，明确选择自有或具有编辑权限的共享相簿，或单独确认新建空相簿。只补入已确认照片的缺失成员关系；不上传或下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
                 .font(.footnote).foregroundStyle(.secondary)
             Text("普通照片、视频及Live Photo主体需先开启本机照片匹配。RAW+JPEG需先具备两份完整原图回执；待匹配项目本次跳过，不会转为上传。")
                 .font(.footnote).foregroundStyle(.secondary)
@@ -49,13 +57,14 @@ struct PhotoBackupAlbumSyncSection: View {
                         }
                     }
                     .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan)
+                    creationControls(localID: localID)
                 }
                 Button("预览相簿补入计划") { sync.prepare(using: manager, backup: backup) }
                     .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || sync.state.mappings.isEmpty || unavailableTargets > 0)
                 if sync.prepared {
                     Text("本次最多 \(sync.previewCount) 个逻辑组，\(sync.unmatched) 项待匹配或待完整回执。Live Photo只加入主体；RAW+JPEG需两份原图均确认才算整组完成。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Button("确认并立即补入") { confirmationOwner = manager.generation; confirmsSync = true }
+                    Button("确认并立即补入") { confirmationOwner = manager.generation; confirmation = .members }
                         .disabled(sync.previewCount == 0 || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || unavailableTargets > 0)
                 }
                 if !sync.state.operations.isEmpty {
@@ -64,13 +73,55 @@ struct PhotoBackupAlbumSyncSection: View {
                 }
             }
         }
-        .confirmationDialog("向已明确选择的相簿补入当前缺失关系？", isPresented: $confirmsSync, titleVisibility: .visible) {
-            Button("补入并逐项核查") {
-                guard confirmationOwner == manager.generation else { return }
-                sync.synchronize(using: manager, backup: backup)
+        .confirmationDialog("确认相簿操作？", isPresented: Binding(get: { confirmation != nil }, set: {
+            if !$0 {
+                confirmation = nil
             }
-        } message: {
-            Text("最多核对 \(sync.previewCount) 个逻辑组。名称相同也只使用已保存UUID目标；服务端已存在的匹配照片无需重新上传。不会创建、改名或删除任何相簿/照片。中断会保留待核查状态，不自动重发。")
+        }), titleVisibility: .visible, presenting: confirmation) { action in
+            switch action {
+            case .members:
+                Button("补入并逐项核查") {
+                    guard confirmationOwner == manager.generation else { return }
+                    sync.synchronize(using: manager, backup: backup)
+                }
+            case let .create(id):
+                Button("确认新建并映射") {
+                    guard confirmationOwner == manager.generation else { return }
+                    sync.createAndMap(id, using: manager, backup: backup)
+                }
+            }
+        } message: { action in
+            switch action {
+            case .members:
+                Text("最多核对 \(sync.previewCount) 个逻辑组。只使用已保存UUID目标；本次不会创建、改名或删除相簿/照片，中断保留待核查状态。")
+            case let .create(id):
+                Text("创建 ‘\(sync.state.creations.first { $0.id == id }?.name ?? "")’。即使已有同名相簿也会另建一本。原目标及照片保留；照片要另行预览补入。结果未知时不会重发创建。")
+            }
+        }
+    }
+
+    /// localID为已保存包含相簿；名称草稿只在本面板内，不改变备份/iCloud草稿，预览成功才保存创建意图。
+    @ViewBuilder private func creationControls(localID: String) -> some View {
+        if let intent = sync.state.creations.first(where: { $0.localAlbumID == localID && $0.unresolved }) {
+            Text("待处理创建：\(intent.name)").font(.footnote)
+            if intent.phase == .prepared {
+                Button("确认创建新相簿…") { confirmationOwner = manager.generation; confirmation = .create(intent.id) }
+                    .disabled(creationBlocked)
+                Button("取消未发送的创建预览") { sync.abandonPreparedCreation(intent.id, using: manager, backup: backup) }
+                    .disabled(creationBlocked)
+            } else {
+                Text(intent.receiptID == nil ? "创建结果未知。请只读核查后明确选择现有目标；同名不能证明是本次创建，不会再次发送POST。" : "已有本次201身份回执，需重新核实目标后完成映射，不会再次创建。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("只读核查创建结果") { sync.recoverCreation(intent.id, using: manager, backup: backup) }
+                    .disabled(creationBlocked)
+            }
+        } else {
+            TextField("新相簿名（单独确认后创建）", text: Binding(get: { creationNames[localID] ?? sync.titles[localID] ?? "" }, set: { creationNames[localID] = $0 }))
+                .disabled(creationBlocked)
+            Button("预览创建新相簿并映射") {
+                sync.prepareCreation(localID: localID, name: creationNames[localID] ?? sync.titles[localID] ?? "", using: manager, backup: backup)
+            }
+            .disabled(creationBlocked || (creationNames[localID] ?? sync.titles[localID] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 }

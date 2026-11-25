@@ -81,6 +81,14 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         return journal
     }
 
+    /// scope为当前认证账号；只读取已验证日志头的独立后台同意，不恢复/改写任务或读取任务数组。
+    /// 无日志/已删除账号返回false，坏版本或跨账号资料抛错，不以损坏状态猜测同意。
+    func photoBackupBackgroundEnabled(scope: MediaAccountScope) throws -> Bool {
+        guard try canRead(scope) else { return false }
+        let database = try photoBackupDatabase(scope: scope)
+        return try photoBackupHeader(scope: scope, database: database)?.backgroundAutomaticEnabled == true
+    }
+
     /// journal为冷快照/明确扫描结果，scope为同一账号；批量事务创建任务并保存扫描顺序，热转换使用savePhotoBackupJob。
     /// 已有未知版本或损坏旧日志不能覆盖；账号删除后不能重建其日志。
     func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {
@@ -149,7 +157,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
         let operations = try db.query("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? ORDER BY position",
                                       [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupAlbumSyncOperation)
-        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version)
+        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version, creations: header.creations ?? [])
+        guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
         try state.validate(namespace: scope.cacheNamespace)
         return state
     }
@@ -160,6 +169,12 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         let db = try photoBackupAlbumSyncDatabase(scope: scope)
         try db.transaction {
             let previous = try loadPhotoBackupAlbumSync(scope: scope)
+            guard state.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
+            let intents = Dictionary(uniqueKeysWithValues: state.creations.map { ($0.id, $0) })
+            for old in previous.creations {
+                guard let current = intents[old.id] else { throw PhotoBackupStateError.invalidJournal }
+                try current.validate(replacing: old)
+            }
             let byID = Dictionary(uniqueKeysWithValues: state.operations.map { ($0.id, $0) })
             for old in previous.operations {
                 guard let current = byID[old.id], current.localAlbumID == old.localAlbumID, current.targetID == old.targetID,
@@ -184,7 +199,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         try db.transaction {
             guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { throw PhotoBackupStateError.invalidJournal }
             let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
-            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version).validate(namespace: scope.cacheNamespace)
+            guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
+            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version, creations: header.creations ?? []).validate(namespace: scope.cacheNamespace)
             guard let previous = try db.queryOne("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? AND operation_id=?",
                                                  [.text(scope.cacheNamespace), .text(operation.id.uuidString)], map: Self.decodePhotoBackupAlbumSyncOperation),
                 previous.localAlbumID == operation.localAlbumID, previous.targetID == operation.targetID, previous.source == operation.source, previous.assets == operation.assets

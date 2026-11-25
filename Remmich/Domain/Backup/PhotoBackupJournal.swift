@@ -61,6 +61,8 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     private(set) var attempts: Int
     private(set) var motionAssetID: UUID?
     private(set) var primaryAssetID: UUID?
+    /// 本次已实际导出并发送/查重的主体SHA1；旧任务缺字段保持nil，不能以旧UUID猜测原图证明。
+    private(set) var primaryChecksum: String?
     private(set) var primaryWasDuplicate: Bool
     private(set) var failure: PhotoBackupFailure?
     private(set) var rawReceipt: PhotoBackupImageReceipt?
@@ -79,12 +81,15 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     func validate() throws {
         if source.kind == .rawJPEG {
             guard let pair = source.rawJPEG, let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
-                  primaryAssetID == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
+                  primaryAssetID == nil, primaryChecksum == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
             try pair.validate(); try rawReceipt?.validate(); try jpegReceipt?.validate()
             guard stage != .completed || (rawReceipt != nil && jpegReceipt != nil && rawReceipt?.assetID != jpegReceipt?.assetID && rawReceipt?.checksum != jpegReceipt?.checksum)
             else { throw PhotoBackupStateError.invalidJournal }
         } else {
             guard source.rawJPEG == nil, rawReceipt == nil, jpegReceipt == nil else { throw PhotoBackupStateError.invalidJournal }
+        }
+        if let primaryChecksum {
+            guard primaryAssetID != nil, let bytes = Data(base64Encoded: primaryChecksum), bytes.count == 20, bytes.base64EncodedString() == primaryChecksum else { throw PhotoBackupStateError.invalidJournal }
         }
         guard !source.localID.isEmpty, attempts >= 0,
               motionAssetID == nil || source.kind == .livePhoto,
@@ -113,10 +118,11 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         stage = .uploadingPrimary
     }
 
-    /// assetID/duplicate为已确认主体回执；尚不代表Live Photo配对已核对。
-    mutating func recordPrimary(_ assetID: UUID, duplicate: Bool) throws {
+    /// assetID/duplicate为主体回执，checksum可附本次实际字节SHA1；nil保留旧调用兼容，尚不代表Live配对已核对。
+    mutating func recordPrimary(_ assetID: UUID, duplicate: Bool, checksum: String? = nil) throws {
         guard source.kind != .rawJPEG, stage == .uploadingPrimary, source.kind != .livePhoto || motionAssetID != nil else { throw PhotoBackupStateError.invalidTransition }
         primaryAssetID = assetID
+        primaryChecksum = checksum
         primaryWasDuplicate = duplicate
         stage = .verifying
     }
@@ -233,12 +239,14 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let excludedAlbumIDs: [String]?
         let rawJPEGVersion: Int?
         let foregroundAutomaticEnabled: Bool?
+        let backgroundAutomaticEnabled: Bool?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
         /// rawJPEGVersion仅格式3允许且必须为1；其他格式不得偷偷携带双图资料。
         /// foregroundAutomaticEnabled缺省nil表示默认关闭；旧读取器忽略后只会失去自动启用，不会扩大上传范围。
+        /// backgroundAutomaticEnabled为独立系统后台同意，缺省nil同样关闭，不复用前台选择。
         init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil,
-             foregroundAutomaticEnabled: Bool? = nil)
+             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil)
         {
             self.version = version
             self.namespace = namespace
@@ -247,6 +255,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             self.excludedAlbumIDs = excludedAlbumIDs
             self.rawJPEGVersion = rawJPEGVersion
             self.foregroundAutomaticEnabled = foregroundAutomaticEnabled
+            self.backgroundAutomaticEnabled = backgroundAutomaticEnabled
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -256,6 +265,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
                 && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
             guard [1, 2, 3].contains(version), namespace == expected,
                   foregroundAutomaticEnabled != true || validIncludes,
+                  backgroundAutomaticEnabled != true || validIncludes,
                   version == 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
                   exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
                   version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
@@ -270,6 +280,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     private(set) var jobs: [PhotoBackupJob]
     private(set) var rawJPEGVersion: Int?
     private(set) var foregroundAutomaticEnabled: Bool?
+    /// 独立系统后台同意；旧日志缺省nil为关闭，不借前台自动开关推导同意。
+    private(set) var backgroundAutomaticEnabled: Bool?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -281,6 +293,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         jobs = []
         rawJPEGVersion = nil
         foregroundAutomaticEnabled = nil
+        backgroundAutomaticEnabled = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -293,12 +306,14 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         self.jobs = jobs
         rawJPEGVersion = header.rawJPEGVersion
         foregroundAutomaticEnabled = header.foregroundAutomaticEnabled
+        backgroundAutomaticEnabled = header.backgroundAutomaticEnabled
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
         .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs,
-              rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled)
+              rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled,
+              backgroundAutomaticEnabled: backgroundAutomaticEnabled)
     }
 
     /// enabled是用户对当前已保存选择的明确自动化同意；不修改相簿/iCloud草稿，也不恢复任何任务。
@@ -308,11 +323,30 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         foregroundAutomaticEnabled = enabled
     }
 
+    /// enabled是当前账号对系统后台的独立同意；不改前台开关、相簿范围、iCloud选项或任务状态。
+    mutating func setBackgroundAutomaticEnabled(_ enabled: Bool) throws {
+        try validate(namespace: namespace)
+        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        backgroundAutomaticEnabled = enabled
+    }
+
     /// scan须精确使用已保存的包含/排除规则；自动计划仅新增安全源，不重排完成项或恢复失败/取消/未知尝试。
     /// 返回新增逻辑源数；生命周期暂停且从未尝试的项目可排队，已有任何失败或用户取消的localID需手动处理。
     @discardableResult mutating func applyAutomaticAlbumScan(_ scan: PhotoBackupAlbumScan) throws -> Int {
+        guard foregroundAutomaticEnabled == true else { throw PhotoBackupStateError.invalidTransition }
+        return try mergeScheduledAlbumScan(scan)
+    }
+
+    /// scan来自已保存规则的本轮授权扫描；只有独立后台开关开启才允许新增安全任务，返回新增源数量。
+    @discardableResult mutating func applyBackgroundAlbumScan(_ scan: PhotoBackupAlbumScan) throws -> Int {
+        guard backgroundAutomaticEnabled == true else { throw PhotoBackupStateError.invalidTransition }
+        return try mergeScheduledAlbumScan(scan)
+    }
+
+    /// 两种已同意的自动入口共用相同安全计划；不恢复失败、取消或已有未知上传回执的源。
+    private mutating func mergeScheduledAlbumScan(_ scan: PhotoBackupAlbumScan) throws -> Int {
         try validate(namespace: namespace)
-        guard foregroundAutomaticEnabled == true, !jobs.contains(where: \.stage.isInFlight),
+        guard !jobs.contains(where: \.stage.isInFlight),
               Set(selectedAlbumIDs) == scan.selection.included, Set(excludedAlbumIDs ?? []) == scan.selection.excluded
         else { throw PhotoBackupStateError.invalidTransition }
         let eligible = Set(scan.sources)

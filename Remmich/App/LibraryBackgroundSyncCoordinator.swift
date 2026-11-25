@@ -122,8 +122,11 @@ final class LibraryBackgroundSyncCoordinator {
         kind == .refresh ? refreshTaskIdentifier : taskIdentifier
     }
 
+    /// kind为原系统授权类型；返回该类型当前是否有明确启用工作，后台备份仅加入processing。
     private func isEnabled(_ kind: LibraryBackgroundSyncKind) -> Bool {
-        kind == .refresh ? controller.libraryIndex.hasAutomaticIndexWork : controller.libraryIndex.hasAutomaticSyncWork
+        // processing授权继续由同一会话owner持有；独立备份同意也可申请，refresh仍只做原索引工作。
+        kind == .refresh ? controller.libraryIndex.hasAutomaticIndexWork
+            : controller.libraryIndex.hasAutomaticSyncWork || controller.media.photoBackups.backgroundAutomaticEnabled
     }
 
     private func cancelRequests() {
@@ -396,6 +399,10 @@ final class LibraryBackgroundSyncCoordinator {
             Self.logger.info("Transfer reconciliation finished outcome=\(outcome, privacy: .public) reason=\(reason, privacy: .public)")
         } else {
             Self.logger.info("Background library sync finished kind=\(kind.rawValue, privacy: .public) success=\(success) reason=\(reason, privacy: .public)")
+        }
+        if !wasTransfer, kind == .processing, controller.media.photoBackups.backgroundAutomaticEnabled {
+            // 冷启动时同意可能在初次排程后才从SQLite确认；保留或补排下一系统请求，不依赖前台页面出现。
+            scheduleNextSync()
         }
         scheduleTransferCheck()
     }

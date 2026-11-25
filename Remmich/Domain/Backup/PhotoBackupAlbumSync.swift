@@ -1,5 +1,53 @@
 import Foundation
 
+/// 空远端相簿的明确创建意图；201回执UUID才是本次POST的身份依据，同名列表不能替代。
+nonisolated struct PhotoBackupAlbumCreation: Codable, Identifiable, Sendable {
+    /// prepared尚未发送；sending/unknown禁止重发；received有持久201身份可只读恢复；mapped/rejected/abandoned为已处理。
+    enum Phase: String, Codable, Sendable { case prepared, sending, received, unknown, mapped, rejected, abandoned }
+    let id: UUID
+    let localAlbumID: String
+    let name: String
+    var phase: Phase = .prepared
+    var receiptID: UUID?
+    var mappedTargetID: UUID?
+
+    /// localAlbumID来自已保存包含规则，name为明确输入并trim后的名称；本地id不发送为虚构幂等键。
+    init(id: UUID = UUID(), localAlbumID: String, name: String) {
+        self.id = id; self.localAlbumID = localAlbumID; self.name = name
+    }
+
+    /// 未决创建必须保留，禁止同一本地相簿再发送另一次POST；明确选择已有目标可结束未知意图。
+    var unresolved: Bool {
+        phase != .mapped && phase != .rejected && phase != .abandoned
+    }
+
+    /// 持久化前核对有限状态；received必须有201身份，mapped必须有实际明确目标，其他阶段不得伪造映射成功。
+    func validate() throws {
+        guard !localAlbumID.isEmpty, !name.isEmpty, name == name.trimmingCharacters(in: .whitespacesAndNewlines),
+              phase != .received || receiptID != nil,
+              (phase == .mapped) == (mappedTargetID != nil),
+              phase != .prepared || receiptID == nil,
+              phase != .sending || receiptID == nil else { throw PhotoBackupStateError.invalidJournal }
+    }
+
+    /// old是磁盘事实；身份和已收到UUID不可替换，未知/已发送绝不能回退prepared让POST被重放。
+    func validate(replacing old: Self) throws {
+        guard id == old.id, localAlbumID == old.localAlbumID, name == old.name,
+              old.receiptID == nil || receiptID == old.receiptID,
+              old.mappedTargetID == nil || mappedTargetID == old.mappedTargetID else { throw PhotoBackupStateError.invalidJournal }
+        let allowed: Set<Phase> = switch old.phase {
+        case .prepared: [.prepared, .sending, .abandoned, .mapped]
+        case .sending: [.sending, .received, .unknown, .rejected, .mapped]
+        case .received: [.received, .unknown, .mapped]
+        case .unknown: [.unknown, .mapped]
+        case .mapped: [.mapped]
+        case .rejected: [.rejected]
+        case .abandoned: [.abandoned]
+        }
+        guard allowed.contains(phase) else { throw PhotoBackupStateError.invalidJournal }
+    }
+}
+
 /// 用户明确选择的稳定目标UUID；名称只供显示，不参与同名猜测、自动创建或改名。
 nonisolated struct PhotoBackupAlbumMapping: Codable, Equatable, Sendable {
     let localAlbumID: String
@@ -75,29 +123,36 @@ nonisolated struct PhotoBackupAlbumSyncState: Sendable {
         let version: Int
         let namespace: String
         let mappings: [PhotoBackupAlbumMapping]
+        let creations: [PhotoBackupAlbumCreation]?
     }
 
-    let version: Int
+    var version: Int
     let namespace: String
     var mappings: [PhotoBackupAlbumMapping]
     var operations: [PhotoBackupAlbumSyncOperation]
+    var creations: [PhotoBackupAlbumCreation]
 
-    /// namespace固定账号；仅新账本使用版本1，读取旧头时保留实际版本以便拒绝未来格式。
-    init(namespace: String, mappings: [PhotoBackupAlbumMapping] = [], operations: [PhotoBackupAlbumSyncOperation] = [], version: Int = 1) {
-        self.namespace = namespace; self.mappings = mappings; self.operations = operations; self.version = version
+    /// namespace固定账号；无创建意图沿用v1，新增意图时升v2，保留实际读取版本以便拒绝未来格式。
+    init(namespace: String, mappings: [PhotoBackupAlbumMapping] = [], operations: [PhotoBackupAlbumSyncOperation] = [], version: Int = 1, creations: [PhotoBackupAlbumCreation] = []) {
+        self.namespace = namespace; self.mappings = mappings; self.operations = operations; self.version = version; self.creations = creations
     }
 
     /// 小型映射头不含操作历史，用于热更新前检查未来版本/账号。
     var header: Header {
-        .init(version: version, namespace: namespace, mappings: mappings)
+        .init(version: version, namespace: namespace, mappings: mappings, creations: version == 1 ? nil : creations)
     }
 
     /// expected来自当前认证scope；操作历史允许保留旧映射，但ID、版本、角色和回执必须始终完整。
     func validate(namespace expected: String) throws {
-        guard version == 1, namespace == expected, mappings.allSatisfy({ !$0.localAlbumID.isEmpty }),
-              Set(mappings.map(\.localAlbumID)).count == mappings.count, Set(operations.map(\.id)).count == operations.count else { throw PhotoBackupStateError.invalidJournal }
+        guard version == 1 || version == 2, version != 1 || creations.isEmpty, namespace == expected, mappings.allSatisfy({ !$0.localAlbumID.isEmpty }),
+              Set(mappings.map(\.localAlbumID)).count == mappings.count, Set(operations.map(\.id)).count == operations.count,
+              Set(creations.map(\.id)).count == creations.count,
+              Set(creations.filter(\.unresolved).map(\.localAlbumID)).count == creations.filter(\.unresolved).count else { throw PhotoBackupStateError.invalidJournal }
         for operation in operations {
             try operation.validate()
+        }
+        for intent in creations {
+            try intent.validate()
         }
     }
 }
