@@ -182,7 +182,7 @@ nonisolated struct TimelineSemanticProjection: Sendable {
     }
 
     func window(catalog: TimelineSemanticCatalog, focusAssetIndex: Int, size: CGSize,
-                isPhone: Bool, requestedRange: Range<Int>? = nil) -> Self
+                isPhone: Bool, requestedRange: Range<Int>? = nil, scenes: ResolvedTimelineScenes? = nil) -> Self
     {
         let count = catalog.count(at: scale)
         guard count > 0, !items.isEmpty else { return self }
@@ -202,6 +202,10 @@ nonisolated struct TimelineSemanticProjection: Sendable {
             let upperRows = (lastDay.assets.upperBound - range.upperBound) / columns
             range = max(firstDay.assets.lowerBound, firstDay.assets.upperBound - lowerRows * columns)
                 ..< min(lastDay.assets.upperBound, lastDay.assets.upperBound - upperRows * columns)
+            // Scene连续展开的原索引可跨日非单调；整月保留可避免原窗口把封面后成员截成半组。
+            if let scenes {
+                range = scenes.completeWindow(range)
+            }
         } else {
             let plans = catalog.mosaicBlocks(at: scale, layout: .resolved(viewportSize: size))
             let blocks = plans.filter { $0.range.overlaps(range) }

@@ -60,6 +60,9 @@ struct TimelineSemanticCollectionView: UIViewControllerRepresentable {
     var tracksStartupPhotos = false
     var openingStore: PhotosTimelineStore?
     var openingTileDisplayed: (() -> Void)?
+    var scenePlan: TimelineScenePlan?
+    var assetSelectionActive = false
+    var toggleScene: (String) -> Bool = { _ in false }
     let hiddenThumbnailID: String?
     let hiddenLivePhotoID: String?
     var additionalHiddenThumbnailIDs: Set<String> = []
@@ -74,6 +77,11 @@ struct TimelineSemanticCollectionView: UIViewControllerRepresentable {
     let refresh: () async -> Void
     var loadOlder: () async -> Void = {}
     var focusChanged: (TimelineAssetSummary) -> Void = { _ in }
+
+    /// 任何单张/批量选择模式都恢复原始投影，封面不能被暗中解释为整组资产选择。
+    var effectiveScenePlan: TimelineScenePlan? {
+        assetSelectionActive || isOpeningWindow ? nil : scenePlan
+    }
 
     func makeUIViewController(context _: Context) -> TimelineSemanticCollectionController {
         let controller = TimelineSemanticCollectionController()
@@ -545,6 +553,8 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
     private var scale: TimelineSemanticScale = .square
     private var projection: TimelineSemanticProjection?
     private var completeProjections: [TimelineSemanticScale: CompleteProjection] = [:]
+    private var resolvedScenes: ResolvedTimelineScenes?
+    private var pendingSceneAnchor: (assetID: String, viewportY: CGFloat)?
 
     private struct CompleteProjection {
         let projection: TimelineSemanticProjection
@@ -781,12 +791,14 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         if previous == nil, pendingRootReturn == nil {
             pendingRootReturn = value.runtime.browsingAnchor
         }
-        if pendingRootReturn == nil, let previous, revision == value.revision, scale == value.scale,
+        if pendingRootReturn == nil, pendingSceneAnchor == nil, let previous, revision == value.revision, scale == value.scale,
            previous.isOpeningWindow == value.isOpeningWindow,
            previous.isActive == value.isActive, previous.latestRequest == value.latestRequest,
            previous.hiddenThumbnailID == value.hiddenThumbnailID, previous.hiddenLivePhotoID == value.hiddenLivePhotoID,
            previous.additionalHiddenThumbnailIDs == value.additionalHiddenThumbnailIDs,
            previous.additionalHiddenBadgeIDs == value.additionalHiddenBadgeIDs,
+           previous.effectiveScenePlan?.revision == value.effectiveScenePlan?.revision,
+           previous.assetSelectionActive == value.assetSelectionActive,
            abs(previous.bottomClearance - value.bottomClearance) < 0.5,
            abs(previous.topClearance - value.topClearance) < 0.5,
            abs((previous.pinnedHeaderTopClearance ?? previous.topClearance)
@@ -803,11 +815,16 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         let latest = projection == nil || isAtLatest
         let wasAtTop = collection.contentOffset.y <= -collection.contentInset.top + 1
         let needsCatalog = revision != value.revision || completesOpeningWindow
-        if needsCatalog {
+        let needsScenes = previous?.effectiveScenePlan?.revision != value.effectiveScenePlan?.revision
+            || previous?.assetSelectionActive != value.assetSelectionActive
+        if needsCatalog || needsScenes {
             completeProjections.removeAll()
         }
         catalog = value.catalog
         revision = value.revision
+        if needsCatalog || needsScenes {
+            resolvedScenes = value.effectiveScenePlan.map { ResolvedTimelineScenes(plan: $0, catalog: value.catalog) }
+        }
         let needsScale = scale != value.scale
         scale = value.scale
         let bottomInsetChanged = abs(collection.contentInset.bottom - value.bottomClearance) > 0.5
@@ -857,8 +874,16 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
                 value.catalog.assetIndexes[$0.assetID] != nil ? $0 : nil
             }
         }
-        if let anchor = pendingRootReturn, scale.isAssets, value.isActive,
-           let focus = value.catalog.assetIndexes[anchor.assetID], lastSize.width > 0
+        if let anchor = pendingSceneAnchor, scale.isAssets, value.isActive,
+           let original = value.catalog.assetIndexes[anchor.assetID], lastSize.width > 0
+        {
+            let focus = resolvedScenes?.visibleAnchor(for: original) ?? original
+            install(makeProjection(scale: scale, focus: focus), focusing: focus, viewportY: anchor.viewportY,
+                    latest: false, refreshContents: true)
+            pendingSceneAnchor = nil
+            pendingRootReturn = nil
+        } else if let anchor = pendingRootReturn, scale.isAssets, value.isActive,
+                  let focus = value.catalog.assetIndexes[anchor.assetID], lastSize.width > 0
         {
             install(makeProjection(scale: scale, focus: focus), focusing: focus,
                     viewportY: anchor.viewportFraction * collection.bounds.height,
@@ -881,12 +906,12 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
                     settleLatestScroll(distance: needsCatalog || needsScale ? collection.bounds.height : oldBottomGap, velocity: velocity)
                 }
             }
-        } else if needsCatalog || needsScale || projectionMissing || bottomInsetChanged {
+        } else if needsCatalog || needsScale || needsScenes || projectionMissing || bottomInsetChanged {
             let focus = oldFocusID.flatMap { value.catalog.assetIndexes[$0] } ?? max(0, value.catalog.assets.count - 1)
             if lastSize.width > 0 {
-                install(makeProjection(scale: scale, focus: focus, range: needsCatalog || needsScale || projectionMissing ? nil : projection?.nodeRange),
+                install(makeProjection(scale: scale, focus: focus, range: needsCatalog || needsScale || needsScenes || projectionMissing ? nil : projection?.nodeRange),
                         focusing: focus, viewportY: focusY, latest: latest && !needsScale,
-                        refreshContents: needsCatalog, alignTop: wasAtTop && !latest && !needsScale && !completesOpeningWindow)
+                        refreshContents: needsCatalog || needsScenes, alignTop: wasAtTop && !latest && !needsScale && !completesOpeningWindow)
             }
         }
         if hiddenThumbnailID != value.hiddenThumbnailID || hiddenLivePhotoID != value.hiddenLivePhotoID
@@ -983,7 +1008,7 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         defer { Self.signposter.endInterval("ProjectionBuild", interval) }
         return completeProjection(at: scale).window(
             catalog: catalog!, focusAssetIndex: focus, size: lastSize,
-            isPhone: traitCollection.userInterfaceIdiom == .phone, requestedRange: range
+            isPhone: traitCollection.userInterfaceIdiom == .phone, requestedRange: range, scenes: scale.isAssets ? resolvedScenes : nil
         )
     }
 
@@ -991,11 +1016,16 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         if let cached = completeProjections[scale] {
             return cached.projection
         }
-        let complete = TimelineSemanticProjection.complete(
+        let original = TimelineSemanticProjection.complete(
             catalog: catalog!, scale: scale, size: lastSize,
             isPhone: traitCollection.userInterfaceIdiom == .phone,
             dark: traitCollection.userInterfaceStyle == .dark
-        ).bottomAligned(minimumHeight: max(0, collection.bounds.height - collection.contentInset.bottom))
+        )
+        let geometry = resolvedScenes.map {
+            TimelineSceneGeometry.apply(to: original, scenes: $0, size: lastSize,
+                                        isPhone: traitCollection.userInterfaceIdiom == .phone, dark: traitCollection.userInterfaceStyle == .dark)
+        } ?? original
+        let complete = geometry.bottomAligned(minimumHeight: max(0, collection.bounds.height - collection.contentInset.bottom))
         // Keep the active and neighboring scales warm without retaining every
         // full-library asset layout after traversing the zoom ladder.
         if completeProjections.count >= 3,
@@ -1012,7 +1042,8 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
     private func offset(for next: TimelineSemanticProjection, focus: Int, viewportY: CGFloat?, latest: Bool) -> CGFloat {
         let height = max(next.height, collection.bounds.height - collection.contentInset.bottom)
         let maximum = max(0, height - collection.bounds.height + collection.contentInset.bottom)
-        guard !latest, let item = next.items.first(where: { !$0.isHeader && $0.assetRange.contains(focus) }) else { return maximum }
+        let target = next.scale.isAssets ? resolvedScenes?.visibleAnchor(for: focus) ?? focus : focus
+        guard !latest, let item = next.items.first(where: { !$0.isHeader && $0.assetRange.contains(target) }) else { return maximum }
         return min(maximum, max(-collection.contentInset.top, item.frame.midY - (viewportY ?? collection.bounds.height / 2)))
     }
 
@@ -1128,8 +1159,7 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
                                        visibilityChanged: { _, _ in }, viewportChanged: { _, _ in },
                                        transitionNamespace: input.namespace,
                                        assetSelected: { [weak self] selected in
-                                           guard self?.gesture == nil, self?.animator == nil else { return }
-                                           input.selectAsset(selected, Array(catalog.assets[max(0, assetIndex - 80) ..< min(catalog.assets.count, assetIndex + 81)].reversed()))
+                                           self?.activateAsset(selected.id)
                                        },
                                        placeholderImage: handoffImages[item.id],
                                        imageLoaded: { [weak self, weak cell] image in
@@ -1142,6 +1172,10 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
                                        hiddenReturningThumbnailAssetID: input.hiddenThumbnailID)
                     .environment(\.timelineHiddenSourceAssetIDs, input.additionalHiddenThumbnailIDs)
                     .environment(\.timelineHiddenBadgeAssetIDs, input.additionalHiddenBadgeIDs)
+                    .modifier(TimelineSceneDecoration(group: resolvedScenes?.covers[assetIndex],
+                                                      originalDate: sceneMemberDate(at: assetIndex),
+                                                      hidden: input.additionalHiddenBadgeIDs.contains(asset.id) || input.hiddenThumbnailID == asset.id,
+                                                      toggle: { [weak self] in self?.toggleSceneGroup(at: asset.id) }))
                     .environment(\.timelineAssetPreviewAction, TimelineAssetPreviewAction { [weak self] asset, image, _ in
                         guard let self, gesture == nil, animator == nil,
                               let input = self.input, input.isActive else { return }
@@ -1195,6 +1229,35 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
             cell.accessibilityTraits = .button
         }
         cell.setPresentationVisible(transitionSurface == nil || (isPresentationCrossfading && !item.isHeader))
+    }
+
+    /// assetID来自真实单张点击；折叠封面先展开，其他路径仍传原catalog邻域，不把封面当整组资产选择。
+    func activateAsset(_ assetID: String) {
+        guard gesture == nil, animator == nil, let input, input.isActive, let catalog,
+              let index = catalog.assetIndexes[assetID] else { return }
+        if let group = resolvedScenes?.covers[index], !group.expanded, !input.assetSelectionActive, toggleSceneGroup(at: assetID) {
+            return
+        }
+        input.selectAsset(catalog.assets[index], Array(catalog.assets[max(0, index - 80) ..< min(catalog.assets.count, index + 81)].reversed()))
+    }
+
+    /// 跨日成员附注真正拍摄日；只读原catalog，不把封面日期写回成员摘要。
+    private func sceneMemberDate(at index: Int) -> Date? {
+        guard let catalog, let cover = resolvedScenes?.coverByMember[index], cover != index,
+              TimelineCaptureDay(capturedAt: catalog.assets[cover].captureLocalDate) != TimelineCaptureDay(capturedAt: catalog.assets[index].captureLocalDate) else { return nil }
+        return catalog.assets[index].captureLocalDate
+    }
+
+    /// coverID为已验证封面；先记录其当前屏幕Y再改显示状态，下次SwiftUI更新锚定该真实原asset索引。
+    @discardableResult
+    func toggleSceneGroup(at coverID: String) -> Bool {
+        guard gesture == nil, animator == nil, let input, input.isActive, !input.assetSelectionActive,
+              let index = catalog?.assetIndexes[coverID], let group = resolvedScenes?.covers[index],
+              let item = projection?.items.first(where: { !$0.isHeader && $0.id == coverID }) else { return false }
+        let anchor = (coverID, item.frame.midY - collection.contentOffset.y)
+        guard input.toggleScene(group.id) else { return false }
+        pendingSceneAnchor = anchor
+        return true
     }
 
     func groupCoverDidLoad(_ image: UIImage, assetID: String, thumbnailRevision: Date,

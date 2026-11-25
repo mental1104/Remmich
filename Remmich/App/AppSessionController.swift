@@ -154,6 +154,7 @@ final class AppSessionController {
         }
         photos = PhotosTimelineStore(
             reader: photosReader,
+            sceneSource: previewReader == nil ? timeline : nil,
             persistentRefreshPolicy: .acceptedIndexPublication
         )
         videos = PhotosTimelineStore(
