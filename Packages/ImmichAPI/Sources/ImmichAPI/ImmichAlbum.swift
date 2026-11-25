@@ -1,5 +1,6 @@
 import Foundation
 
+/// Remmich自有相簿读取投影；保留首位owner展示字段，并完整携带官方成员中的所有owner身份供本人筛选。
 public struct ImmichAlbum: Hashable, Sendable, Identifiable {
     public let id: String
     public let name: String
@@ -14,4 +15,5 @@ public struct ImmichAlbum: Hashable, Sendable, Identifiable {
     public let isShared: Bool
     public let ownerName: String?
     public let ownerID: String?
+    public let ownerIDs: [String]
 }

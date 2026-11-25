@@ -903,7 +903,21 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     func forkAlbumDirectory() async throws -> ForkAlbumDirectory? {
         let (_, requestGeneration) = try requestContext()
         guard let session, let activeEndpoint else { throw TimelineReadError.routeUnavailable }
-        let result = try await ForkServerReader(apiURL: activeEndpoint, token: session.accessToken).albumDirectory()
+        let reader = ForkServerReader(apiURL: activeEndpoint, token: session.accessToken)
+        // 每路GET回到原repo核对代际；首响应迟到时不能再用捕获的旧token发第二路请求。
+        let validateContext: @Sendable () async throws -> Void = { [self] in
+            try await requireCurrent(requestGeneration)
+        }
+        let result: ForkAlbumDirectory? = if let readLoader {
+            // 沿用原仓库既有GET注入，不让目录分支绕过同一受限测试会话后访问真实网络。
+            try await reader.albumDirectory(read: { request in
+                let (data, response) = try await readLoader(request, "forkAlbumDirectory")
+                return (data, response as URLResponse)
+            }, validateContext: validateContext)
+        } else {
+            try await reader.albumDirectory(validateContext: validateContext)
+        }
+        try Task.checkCancellation()
         try requireCurrent(requestGeneration)
         return result
     }
@@ -916,13 +930,14 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         return Self.map(album)
     }
 
+    /// album来自真实SDK；保留旧首owner字段，并把fresh全owner集合传到App摘要，不从名字或共享标记推断本人。
     private static func map(_ album: ImmichAlbum) -> AlbumSummary {
         .init(id: album.id, name: album.name, description: album.description,
               thumbnailAssetID: album.thumbnailAssetID, assetCount: album.assetCount,
               updatedAt: album.updatedAt, createdAt: album.createdAt,
               startDate: album.startDate, endDate: album.endDate, isShared: album.isShared,
               lastModifiedAssetTimestamp: album.lastModifiedAssetTimestamp,
-              ownerName: album.ownerName, ownerID: album.ownerID)
+              ownerName: album.ownerName, ownerID: album.ownerID, ownerIDs: album.ownerIDs)
     }
 
     private func requestContext() throws -> (ImmichClient, UInt64) {

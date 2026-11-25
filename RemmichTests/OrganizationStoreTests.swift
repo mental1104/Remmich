@@ -102,6 +102,20 @@ struct OrganizationStoreTests {
         await pending.value
         #expect(store.assets.isEmpty && store.error == nil && !store.hasLoaded && !store.isLoading)
     }
+
+    /// 读取器故意不响应取消；旧成功/失败在新抽样发布后释放，不能覆盖新批次或清其状态。
+    @Test(arguments: [false, true])
+    @MainActor func aNewShuffleRetiresUncooperativeOldResults(_ oldFails: Bool) async {
+        let source = HeldOrganizationSource(oldRandomFails: oldFails)
+        let store = RandomPhotosStore()
+        let old = Task { await store.refresh(source: source) }
+        await source.waitForRequest()
+        await store.refresh(source: source)
+        #expect(store.assets.map(\.id) == ["new"] && store.hasLoaded && !store.isLoading && store.error == nil)
+        await source.release()
+        await old.value
+        #expect(store.assets.map(\.id) == ["new"] && store.hasLoaded && !store.isLoading && store.error == nil)
+    }
 }
 
 /// id/owner是合成相簿身份；不携带照片或真实目录信息。
@@ -148,13 +162,23 @@ private actor OrganizationSequenceSource: OrganizationReading {
 
 /// 第一请求安装gate后暂停，第二请求直接返回新身份结果，旧请求始终在最后释放。
 private actor HeldOrganizationSource: OrganizationReading {
+    private let oldRandomFails: Bool
     private var requests = 0
     private var gate: CheckedContinuation<Void, Never>?
     private var waiter: CheckedContinuation<Void, Never>?
 
+    /// oldRandomFails仅让旧随机读取在已进入门后失败；默认和待整理既有场景不变。
+    init(oldRandomFails: Bool = false) {
+        self.oldRandomFails = oldRandomFails
+    }
+
     /// 返回旧或新批次；gate不检查取消，由被测状态机执行发布权检查。
     func randomPhotos() async throws -> [TimelineAssetSummary] {
-        await [organizationAsset(identity())]
+        let id = await identity()
+        if id == "old", oldRandomFails {
+            throw NativeSearchError.forbidden
+        }
+        return [organizationAsset(id)]
     }
 
     /// ownerID来自被测Store，响应身份由明确的请求顺序决定，不访问任何账号存储。

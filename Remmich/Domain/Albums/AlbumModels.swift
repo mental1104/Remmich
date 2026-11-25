@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 
+/// App相簿概览与兼容缓存投影；保留首owner展示，并用可选完整owner集合区分fresh证明和旧缓存未知。
 nonisolated struct AlbumSummary: Codable, Identifiable, Hashable, Sendable {
     let id: String
     let name: String
@@ -15,6 +16,18 @@ nonisolated struct AlbumSummary: Codable, Identifiable, Hashable, Sendable {
     var lastModifiedAssetTimestamp: Date? = nil
     let ownerName: String?
     let ownerID: String?
+    /// nil代表旧缓存未保存全成员，继续兼容ownerID；fresh空数组则明确没有owner，不从旧字段猜权属。
+    var ownerIDs: [String]? = nil
+
+    /// userID来自已登录账号；任一明确owner匹配即属于本人，editor/viewer不混入所有者集合。
+    func isOwned(by userID: String) -> Bool {
+        let userID = userID.lowercased()
+        guard !userID.isEmpty else { return false }
+        if let ownerIDs {
+            return ownerIDs.contains { $0.lowercased() == userID }
+        }
+        return ownerID?.lowercased() == userID
+    }
 
     var title: String {
         name.isEmpty ? "Untitled Album" : name
