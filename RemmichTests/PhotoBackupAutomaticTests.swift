@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import Photos
 import Synchronization
 import Testing
@@ -286,6 +287,31 @@ struct PhotoBackupAutomaticTests {
         }
     }
 
+    /// 冷自动周期已running但仍等真实Coordinator旧操作退役，尚未apply配置；此时明确停止也须等待并持久关闭。
+    @Test(.timeLimit(.minutes(1))) @MainActor func manualStopBeforeConfigurationLoadPersistsOff() async throws {
+        try await withAutomaticBackupFixture(enabled: true, cloud: true) { fixture in
+            let gate = fixture.holdCoordinator()
+            try #require(await gate.waitForEntry())
+            let automatic = fixture.activate()
+            try #require(await gate.waitForCancellation())
+            #expect(fixture.controller.running && !fixture.controller.automaticRunning && fixture.controller.selected.isEmpty)
+            let stop = fixture.stopManually()
+            fixture.observeStopStart(stop, gate: gate)
+            // 真正的配置写入门变化证明stop已经执行，原缺陷则由stop提前结束返回false；不靠sleep猜顺序。
+            try #require(await gate.waitForStopStart())
+            #expect(fixture.controller.configuringAutomatic && !fixture.controller.foregroundAutomaticEnabled)
+            gate.release()
+            await stop.value; await automatic?.value
+            let cold = try await fixture.coldJournal()
+            #expect(cold.foregroundAutomaticEnabled == false && cold.allowCloud && cold.selectedAlbumIDs == ["include"] && cold.excludedAlbumIDs == ["exclude"])
+            #expect(cold.jobs.isEmpty && !fixture.controller.running && !fixture.controller.configuringAutomatic)
+            await fixture.controller.automaticConditionsChanged(using: fixture.manager, scope: fixture.scope, active: false)?.value
+            await fixture.activate()?.value; await fixture.request()?.value
+            #expect(fixture.exporter.observations.isEmpty && fixture.server.counts == [0, 0])
+            #expect(try await fixture.coldJournal().foregroundAutomaticEnabled == false)
+        }
+    }
+
     /// 后台取消保留开关但不自动重试已经开始的未知项；新前台周期只处理尚未尝试的新资源。
     @Test(.timeLimit(.minutes(1))) @MainActor func backgroundCancellationDoesNotRetryAnAttemptedSource() async throws {
         try await withAutomaticBackupFixture(enabled: true) { fixture in
@@ -507,6 +533,7 @@ struct PhotoBackupUnattemptedRecoveryTests {
     private var tasks: [Task<Void, Never>] = []
     private var observers: [Task<Void, Never>] = []
     private var closeTask: Task<Void, Never>?
+    private var retirementGate: AutomaticBackupRetirementGate?
 
     /// enabled/cloud模拟用户此前明确扫描保存的配置；failingHTTP仅改变实际查重状态码。
     init(enabled: Bool, cloud: Bool, failingHTTP: Bool) async throws {
@@ -560,6 +587,29 @@ struct PhotoBackupUnattemptedRecoveryTests {
         let task = Task { await controller.stopManually(using: manager) }
         tasks.append(task)
         return task
+    }
+
+    /// 在真实Coordinator内保持不立即响应取消的旧操作；只持有退役屏障，不写队列或伪造Worker状态。
+    func holdCoordinator() -> AutomaticBackupRetirementGate {
+        let gate = AutomaticBackupRetirementGate()
+        retirementGate = gate
+        let blocker = Task { [scope] in
+            _ = try? await PhotoBackupRunCoordinator.perform(scope: scope) { await gate.hold() }
+            gate.finished()
+        }
+        tasks.append(blocker)
+        return gate
+    }
+
+    /// 观察实际configuringAutomatic写入，或stop提前结束；两条结果均解除测试等待，能确定旧门禁是否直接return。
+    func observeStopStart(_ stop: Task<Void, Never>, gate: AutomaticBackupRetirementGate) {
+        withObservationTracking { _ = controller.configuringAutomatic } onChange: { [weak controller, weak gate] in
+            Task { @MainActor in
+                guard let controller, let gate else { return }
+                gate.stopStarted(controller.configuringAutomatic)
+            }
+        }
+        observers.append(Task { await stop.value; gate.stopFinished() })
     }
 
     /// 真实手动继续任务也纳入门和清理观察；用它建立非合作导出await，不模拟Controller的task字段。
@@ -621,7 +671,7 @@ struct PhotoBackupUnattemptedRecoveryTests {
     /// 所有同时进入的close调用等待同一退役任务；不能因另一个调用已开始就提前返回并删除仍使用中的文件。
     private func closeOnce() async {
         let retirement = controller.automaticConditionsChanged(using: manager, scope: scope, active: false)
-        controller.cancel(); tasks.forEach { $0.cancel() }; exporter.abort()
+        controller.cancel(); tasks.forEach { $0.cancel() }; exporter.abort(); retirementGate?.release()
         await retirement?.value
         for task in tasks {
             await task.value
@@ -632,6 +682,78 @@ struct PhotoBackupUnattemptedRecoveryTests {
         manager.configure(session: nil, endpoint: nil)
         AutomaticBackupURLProtocol.remove(endpoint: endpoint)
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+/// 旧Coordinator操作的退役门与真实配置写入观察；所有事件均有提前结束的失败值，清理释放全部continuation。
+@MainActor private final class AutomaticBackupRetirementGate {
+    /// 三个可观察业务检查点，非时间推断或生产私有字段注入。
+    private enum Event: CaseIterable, Hashable, Sendable { case entry, cancellation, stopStart }
+    private var values: [Event: Bool] = [:]
+    private var waiters: [Event: [CheckedContinuation<Bool, Never>]] = [:]
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    /// 实际operation进入后等待明确释放；取消只记录检查点，故可稳定保持自动周期在apply之前。
+    func hold() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                publish(.entry, value: true)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.publish(.cancellation, value: true) }
+        }
+    }
+
+    /// 返回真实旧operation已进入，而非Task刚创建。
+    func waitForEntry() async -> Bool {
+        await wait(.entry)
+    }
+
+    /// 返回自动周期确实在同一Coordinator要求旧operation退役。
+    func waitForCancellation() async -> Bool {
+        await wait(.cancellation)
+    }
+
+    /// 返回stop确实进入配置写入门，旧缺陷直接结束时返回false而不悬挂。
+    func waitForStopStart() async -> Bool {
+        await wait(.stopStart)
+    }
+
+    /// value来自真实Observation变更后读取的configuringAutomatic。
+    func stopStarted(_ value: Bool) {
+        publish(.stopStart, value: value)
+    }
+
+    /// stop未写门禁就结束也唤醒观察者，以形成旧实现可确定失败的断言。
+    func stopFinished() {
+        publish(.stopStart, value: false)
+    }
+
+    /// 只放行旧operation，不能改变自动备份开关或生成成功回执。
+    func release() {
+        continuation?.resume(); continuation = nil
+    }
+
+    /// operation失败或退出时解除所有尚未到达的检查点。
+    func finished() {
+        Event.allCases.forEach { publish($0, value: false) }
+    }
+
+    /// event已有结果立即返回，否则挂真实事件continuation；结果只发布一次。
+    private func wait(_ event: Event) async -> Bool {
+        if let value = values[event] {
+            return value
+        }
+        return await withCheckedContinuation { waiters[event, default: []].append($0) }
+    }
+
+    /// event/value只唤醒对应观察者，提前结束不会覆盖已证明的true事件。
+    private func publish(_ event: Event, value: Bool) {
+        guard values[event] == nil else { return }
+        values[event] = value
+        let pending = waiters.removeValue(forKey: event) ?? []
+        pending.forEach { $0.resume(returning: value) }
     }
 }
 

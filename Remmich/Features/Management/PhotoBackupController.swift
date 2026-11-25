@@ -462,8 +462,9 @@ extension PhotoBackupController {
     /// enabled是对最近保存相簿/iCloud选项的明确同意；关闭先取消并等待真实任务，再持久保存关闭。
     /// 读取/写入错误可见且不上传；未保存草稿只影响页面，不借切换自动开关偷偷保存。
     func setForegroundAutomaticEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
-        guard !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope,
-              !enabled || (!running && !manager.busy && !requiresSelectionScan) else { return }
+        // 启用须读取过当前账号配置；冷启动自动周期可能先等待旧任务，明确关闭不能被尚未apply的配置挡回。
+        guard !configuringAutomatic, let scope = manager.backupScope,
+              !enabled || (configurationScope == scope && !running && !manager.busy && !requiresSelectionScan) else { return }
         let owner = manager.generation
         configuringAutomatic = true
         defer { configuringAutomatic = false }
