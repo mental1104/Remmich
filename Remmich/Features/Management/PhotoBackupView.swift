@@ -10,6 +10,7 @@ struct PhotoBackupView: View {
     @State private var queueReadTask: Task<Void, Never>?
     @State private var confirmsResume = false
     @State private var retryID: UUID?
+    @State private var resumesUnattempted = false
     @State private var confirmationOwner: UUID?
 
     /// controller提供当前鉴权通道，backup由Media统一持有，页面草稿/手动任务与前台自动化共享同一持久队列事实。
@@ -78,9 +79,15 @@ struct PhotoBackupView: View {
                         Button("扫描并更新备份队列") { backup.scan(using: controller) }
                             .disabled(loadingQueue || backup.configuringAutomatic || !backup.hasLoadedAlbums || backup.loadingAlbums || backup.selected.isEmpty || controller.client == nil || controller.busy)
                         Button("继续备份队列") {
-                            retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
+                            resumesUnattempted = false; retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
                         }
                         .disabled(loadingQueue || backup.configuringAutomatic || backup.requiresSelectionScan || !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) } || controller.client == nil || controller.busy)
+                        Button("仅继续未尝试项目") {
+                            resumesUnattempted = true; retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
+                        }
+                        .disabled(loadingQueue || backup.configuringAutomatic || backup.requiresSelectionScan || backup.selected.isEmpty || backup.unattemptedSummary.eligibleJobIDs.isEmpty || controller.client == nil || controller.busy)
+                        Text("可重新核对并继续最多 \(backup.unattemptedSummary.eligibleJobIDs.count) 项。跳过：失败 \(backup.unattemptedSummary.failed) 项、已尝试或回执待核查 \(backup.unattemptedSummary.attemptedOrUnconfirmed) 项、已取消 \(backup.unattemptedSummary.cancelled) 项、已完成 \(backup.unattemptedSummary.completed) 项。相簿权限及成员会先重新核对；失败或未知项可单独明确重试。")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 if !backup.running, !backup.jobs.isEmpty {
@@ -94,7 +101,7 @@ struct PhotoBackupView: View {
                                 if [.queued, .paused, .failed].contains(job.stage) {
                                     HStack {
                                         Button("只重试这一项") {
-                                            retryID = job.id; confirmationOwner = controller.generation; confirmsResume = true
+                                            resumesUnattempted = false; retryID = job.id; confirmationOwner = controller.generation; confirmsResume = true
                                         }
                                         .disabled(backup.requiresSelectionScan)
                                         Button("取消任务", role: .destructive) { backup.cancelJob(job.id, using: controller) }
@@ -109,13 +116,21 @@ struct PhotoBackupView: View {
             }
             .navigationTitle("照片备份")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { backup.cancelPageWork(); dismiss() } } }
-            .confirmationDialog(retryID == nil ? "继续当前账户的备份队列？" : "只重试所选任务？", isPresented: $confirmsResume, titleVisibility: .visible) {
+            .confirmationDialog(resumesUnattempted ? "仅继续未尝试项目？" : retryID == nil ? "继续当前账户的备份队列？" : "只重试所选任务？", isPresented: $confirmsResume, titleVisibility: .visible) {
                 Button("继续上传并查重") {
                     guard !loadingQueue, confirmationOwner == controller.generation else { return }
-                    backup.resume(using: controller, jobID: retryID)
+                    if resumesUnattempted {
+                        backup.resumeUnattempted(using: controller)
+                    } else {
+                        backup.resume(using: controller, jobID: retryID)
+                    }
                 }
             } message: {
-                Text("使用最近扫描保存的相簿排除和 iCloud 选项；更改后需重新扫描。成功回执仍会重新查重和核对配对；不自动重试未知结果。")
+                if resumesUnattempted {
+                    Text("重新核对保存的包含/排除相簿及已有照片权限后，最多继续 \(backup.unattemptedSummary.eligibleJobIDs.count) 个从未尝试且没有部分回执的项目；iCloud 使用已保存选项。失败、已尝试未知、取消和完成项保持原状态，不会重新开启前台自动备份。")
+                } else {
+                    Text("使用最近扫描保存的相簿排除和 iCloud 选项；更改后需重新扫描。成功回执仍会重新查重和核对配对；不自动重试未知结果。")
+                }
             }
             .task { await reloadBackupQueue() }
             .onChange(of: controller.generation) { _, _ in queueReadTask?.cancel(); backup.cancelPageWork(); dismiss() }

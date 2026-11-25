@@ -57,6 +57,11 @@ import Photos
     private(set) var foregroundAutomaticEnabled = false
     private(set) var automaticRunning = false
     private(set) var configuringAutomatic = false
+    /// 当前列表可恢复上限与跳过原因；实际继续前仍重新读取SQLite和完整保存相簿规则。
+    var unattemptedSummary: PhotoBackupUnattemptedSummary {
+        .init(jobs: jobs)
+    }
+
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let exporter: any PhotoBackupResourceExporting
@@ -259,8 +264,39 @@ import Photos
     /// 返回实际执行任务供调用方等待完整退役；nil表示前置门禁拒绝，页面可忽略该句柄。
     @discardableResult
     func resume(using manager: LibraryManagementController, jobID: UUID? = nil) -> Task<Void, Never>? {
+        runSavedQueue(using: manager, mode: .verification(jobID))
+    }
+
+    /// 用户明确选择只继续未尝试尾队列；不会开启自动规则或把失败/未知回执当作新任务重发。
+    @discardableResult
+    func resumeUnattempted(using manager: LibraryManagementController) -> Task<Void, Never>? {
+        runSavedQueue(using: manager, mode: .unattempted)
+    }
+
+    /// verification保留现有明确重试语义；unattempted只计划安全尾队列，二者共用同一执行与持久化路径。
+    private nonisolated enum ResumeMode: Sendable {
+        case verification(UUID?), unattempted
+        /// 只选择新恢复语义；已有全部/单项明确核查路径保持原权限与计划行为。
+        var onlyUnattempted: Bool {
+            if case .unattempted = self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// mode只决定已有日志的计划，不替换Worker或上传契约；manager仍绑定真实当前账号与端点。
+    /// 返回实际Task，门禁拒绝返回nil；新恢复模式使用保存规则并只检查已有Photos授权。
+    private func runSavedQueue(using manager: LibraryManagementController, mode: ResumeMode) -> Task<Void, Never>? {
         guard !running, !configuringAutomatic, !requiresSelectionScan, !manager.busy, let scope = manager.backupScope,
               configurationScope == scope, let client = manager.client else { return nil }
+        let authorization = authorizationStatus()
+        if mode.onlyUnattempted {
+            guard !selected.isEmpty else { status = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
+            guard !unattemptedSummary.eligibleJobIDs.isEmpty else { status = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
+            guard authorization == .authorized || authorization == .limited else { status = "请先确认照片授权，再继续未尝试项目；未启动上传。"; return nil }
+        }
         let owner = manager.generation
         running = true
         completed = 0; duplicates = 0; failed = 0
@@ -273,7 +309,16 @@ import Photos
                     try Self.validate(manager, owner: owner, scope: scope)
                     // 前一会话可能已失去发布权而不能暂停；屏障后由当前会话接管恢复，不能跳过遗留in-flight。
                     journal.recoverInterrupted()
-                    try journal.resumeForVerification(only: jobID)
+                    switch mode {
+                    case let .verification(id): try journal.resumeForVerification(only: id)
+                    case .unattempted:
+                        try Task.checkCancellation()
+                        guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
+                        let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
+                        let scan = try selection.scan(self.albumScanner(selection.included.union(selection.excluded)))
+                        guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
+                        try journal.resumeUnattempted(scan)
+                    }
                     try await store.savePhotoBackups(journal, scope: scope)
                     try Self.validate(manager, owner: owner, scope: scope)
                     self.total = journal.jobs.count { $0.stage == .queued }
@@ -282,7 +327,12 @@ import Photos
                     return try await manager.perform(publishChange: false) { _ in
                         try await PhotoBackupWorker(store: store, exporter: exporter).run(
                             scope: scope, userID: client.userID, allowCloud: cloud, client: client,
-                            validateContext: { try Self.validate(manager, owner: owner, scope: scope) },
+                            validateContext: {
+                                try Self.validate(manager, owner: owner, scope: scope)
+                                if mode.onlyUnattempted {
+                                    guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
+                                }
+                            },
                             progress: { _, result in
                                 self.completed = result.completed; self.duplicates = result.duplicates; self.failed = result.failed
                                 self.status = "已确认 \(result.completed) 项，失败 \(result.failed) 项。"
@@ -293,13 +343,13 @@ import Photos
                 try Self.validate(manager, owner: owner, scope: scope)
                 let current = try await store.loadPhotoBackups(scope: scope)
                 try Self.validate(manager, owner: owner, scope: scope)
-                apply(current, scope: scope)
+                apply(current, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
                 status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮已确认 \(result.completed) 项（重复 \(result.duplicates)），失败 \(result.failed) 项。"
             } catch {
                 showFailure(error, manager: manager, owner: owner)
                 if manager.generation == owner, let journal = try? await store.loadPhotoBackups(scope: scope) {
                     if manager.generation == owner {
-                        apply(journal, scope: scope)
+                        apply(journal, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
                     }
                 }
             }

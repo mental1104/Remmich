@@ -319,6 +319,141 @@ struct PhotoBackupAutomaticTests {
     }
 }
 
+/// 断网后的明确尾队列恢复复用真实Controller/Worker/客户端；未知项仍须由用户选择原单项核查路径。
+@Suite("Explicit unattempted backup recovery")
+struct PhotoBackupUnattemptedRecoveryTests {
+    /// 计数完整划分队列；部分Live回执/手动重排未知项不伪装未尝试，恢复只排原队列仍符合保存规则的安全项。
+    @Test func summaryAndPlanKeepUnknownAndTerminalHistory() throws {
+        let names = ["completed", "failed", "cancelled", "partial", "requeued", "safe", "moved-out"]
+        let sources = names.map { PhotoBackupSource(localID: $0, modifiedAt: nil, kind: $0 == "partial" ? .livePhoto : .photo) }
+        let selection = try PhotoBackupAlbumSelection(included: ["include"], excluded: ["exclude"])
+        var journal = PhotoBackupJournal(namespace: "synthetic")
+        try journal.applyAlbumScan(selection.scan([.init(id: "include", assets: sources.map { .init(source: $0, capturedAt: nil) }), .init(id: "exclude", assets: [])]), allowCloud: true)
+        let ids = journal.jobs.map(\.id)
+        try journal.update(ids[0]) { try $0.begin(); try $0.exported(); try $0.recordPrimary(UUID(), duplicate: true); try $0.confirmVerifiedReceipt() }
+        try journal.update(ids[1]) { $0.fail(.network) }
+        try journal.update(ids[2]) { $0.cancel() }
+        let motion = UUID()
+        try journal.update(ids[3]) { try $0.begin(); try $0.exported(); try $0.recordMotion(motion); $0.pause() }
+        try journal.update(ids[4]) { try $0.begin(); $0.pause(); $0.queueForVerification() }
+        try journal.update(ids[5]) { $0.pause() }
+        try journal.update(ids[6]) { $0.pause() }
+        let summary = PhotoBackupUnattemptedSummary(jobs: journal.jobs)
+        #expect(summary.eligibleJobIDs == Set([ids[5], ids[6]]))
+        #expect(summary.failed == 1 && summary.cancelled == 1 && summary.completed == 1 && summary.attemptedOrUnconfirmed == 2)
+        let new = PhotoBackupSource(localID: "not-in-the-saved-queue", modifiedAt: nil, kind: .photo)
+        let scan = try selection.scan([.init(id: "include", assets: (Array(sources.dropLast()) + [new]).map { .init(source: $0, capturedAt: nil) }), .init(id: "exclude", assets: [])])
+        #expect(try journal.resumeUnattempted(scan) == 1)
+        #expect(journal.jobs.map(\.stage) == [.completed, .failed, .cancelled, .paused, .paused, .queued, .cancelled])
+        #expect(journal.jobs.count == 7 && journal.jobs[3].motionAssetID == motion && journal.allowCloud)
+        #expect(journal.jobs[4].attempts == 1 && journal.jobs[1].failure == .network)
+    }
+
+    /// 实际自动周期收到503后关闭规则；新SQLite/controller仅继续未尝试尾项，随后明确单项重试仍重新SHA1查重/fresh GET。
+    @Test(.timeLimit(.minutes(1))) @MainActor func networkFailureColdRecoveryAndExplicitUnknownRetryRemainSeparate() async throws {
+        try await withAutomaticBackupFixture(enabled: true, cloud: true, failingHTTP: true) { fixture in
+            fixture.port.sources.append(.init(localID: "unattempted-tail", modifiedAt: nil, kind: .photo))
+            await fixture.activate()?.value
+            let interrupted = try await fixture.coldJournal()
+            #expect(interrupted.jobs.map(\.stage) == [.failed, .paused] && interrupted.jobs.map(\.attempts) == [1, 0])
+            #expect(interrupted.foregroundAutomaticEnabled == false && fixture.server.counts == [1, 0])
+            fixture.server.setFailing(false)
+            let cold = fixture.coldController()
+            await cold.load(using: fixture.manager)
+            #expect(cold.unattemptedSummary.eligibleJobIDs.count == 1 && cold.unattemptedSummary.failed == 1)
+            await fixture.resumeUnattempted(using: cold)?.value
+            let resumed = try await fixture.coldJournal()
+            #expect(resumed.jobs.map(\.stage) == [.failed, .completed] && resumed.jobs.map(\.attempts) == [1, 1])
+            #expect(resumed.foregroundAutomaticEnabled == false && fixture.server.counts == [2, 1])
+            #expect(fixture.exporter.observations.map(\.localID) == ["first", "unattempted-tail"])
+            #expect(fixture.exporter.observations.allSatisfy(\.allowCloud))
+            let failed = try #require(resumed.jobs.first?.id)
+            await fixture.retry(failed, using: cold)?.value
+            let verified = try await fixture.coldJournal()
+            #expect(verified.jobs.map(\.stage) == [.completed, .completed] && verified.jobs.map(\.attempts) == [2, 1])
+            #expect(fixture.server.counts == [3, 2] && fixture.exporter.observations.map(\.localID) == ["first", "unattempted-tail", "first"])
+            #expect(verified.foregroundAutomaticEnabled == false)
+        }
+    }
+
+    /// 已保存排除失效或授权不足均在导出前停止，原恢复资料/自动开关不变，不能静默扩大尾队列范围。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func savedExclusionOrPermissionFailureDoesNotReplayTheQueue(_ denied: Bool) async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            try await fixture.seedUnattemptedQueue()
+            await fixture.controller.load(using: fixture.manager)
+            fixture.port.authorization = denied ? .denied : .authorized
+            fixture.port.exclusionMissing = !denied
+            await fixture.resumeUnattempted(using: fixture.controller)?.value
+            let cold = try await fixture.coldJournal()
+            #expect(cold.jobs.first?.stage == .paused && cold.jobs.first?.attempts == 0 && cold.excludedAlbumIDs == ["exclude"])
+            #expect(cold.foregroundAutomaticEnabled == false && fixture.server.counts == [0, 0] && fixture.exporter.observations.isEmpty)
+        }
+    }
+
+    /// 新恢复入口挂起在真实导出后取消，不能发HTTP；冷恢复保留已尝试暂停，下一次仅未尝试操作只执行尾项。
+    @Test(.timeLimit(.minutes(1))) @MainActor func cancellationLeavesAttemptedWorkForExplicitVerification() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            fixture.port.sources.append(.init(localID: "tail-after-cancel", modifiedAt: nil, kind: .photo))
+            try await fixture.seedUnattemptedQueue()
+            await fixture.controller.load(using: fixture.manager)
+            fixture.exporter.hold = true
+            let old = fixture.resumeUnattempted(using: fixture.controller)
+            try #require(await fixture.exporter.waitUntilHeld())
+            fixture.controller.cancel()
+            await fixture.exporter.waitUntilCancellation()
+            fixture.exporter.release()
+            await old?.value
+            let paused = try await fixture.coldJournal()
+            #expect(paused.jobs.map(\.stage) == [.paused, .paused] && paused.jobs.map(\.attempts) == [1, 0])
+            #expect(fixture.server.counts == [0, 0])
+            fixture.exporter.hold = false
+            let cold = fixture.coldController()
+            await cold.load(using: fixture.manager)
+            await fixture.resumeUnattempted(using: cold)?.value
+            #expect(try await fixture.coldJournal().jobs.map(\.stage) == [.paused, .completed])
+            #expect(fixture.exporter.observations.map(\.localID) == ["first", "tail-after-cancel"] && fixture.server.counts == [1, 1])
+        }
+    }
+
+    /// 已读取账号配置后存在草稿时，明确尾队列恢复也不得保存草稿或启动Worker。
+    @Test(.timeLimit(.minutes(1))) @MainActor func draftRemainsUnsavedAndBlocksRecovery() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            try await fixture.seedUnattemptedQueue()
+            await fixture.controller.load(using: fixture.manager)
+            fixture.controller.excluded = ["draft-exclude"]
+            fixture.controller.allowCloud = true
+            #expect(fixture.resumeUnattempted(using: fixture.controller) == nil)
+            let cold = try await fixture.coldJournal()
+            #expect(cold.excludedAlbumIDs == ["exclude"] && !cold.allowCloud && cold.jobs.first?.attempts == 0)
+            #expect(fixture.controller.excluded == ["draft-exclude"] && fixture.controller.requiresSelectionScan)
+            #expect(fixture.server.counts == [0, 0] && fixture.exporter.observations.isEmpty)
+        }
+    }
+
+    /// 仅继续未尝试项已进入真实导出await后撤销权限，旧资源不得上传；冷恢复后它成为待核查而不能再从新入口重放。
+    @Test(.timeLimit(.minutes(1))) @MainActor func permissionRetirementKeepsTheStartedItemUnknown() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            try await fixture.seedUnattemptedQueue()
+            await fixture.controller.load(using: fixture.manager)
+            fixture.exporter.hold = true
+            let old = fixture.resumeUnattempted(using: fixture.controller)
+            try #require(await fixture.exporter.waitUntilHeld())
+            fixture.port.authorization = .denied
+            fixture.exporter.release()
+            await old?.value
+            let unknown = try await fixture.coldJournal()
+            #expect(unknown.jobs.first?.stage == .exporting && unknown.jobs.first?.attempts == 1 && unknown.jobs.first?.primaryAssetID == nil)
+            #expect(unknown.foregroundAutomaticEnabled == false && fixture.server.counts == [0, 0])
+            fixture.port.authorization = .authorized
+            let cold = fixture.coldController()
+            await cold.load(using: fixture.manager)
+            #expect(cold.jobs.first?.stage == .paused && cold.unattemptedSummary.attemptedOrUnconfirmed == 1)
+            #expect(fixture.resumeUnattempted(using: cold) == nil && fixture.exporter.observations.count == 1)
+        }
+    }
+}
+
 /// operation使用完全隔离的账号/数据库/磁盘/HTTP；错误及测试取消也必须退役任务并释放真实导出门。
 @MainActor private func withAutomaticBackupFixture(enabled: Bool, cloud: Bool = false, failingHTTP: Bool = false,
                                                    operation: @MainActor (AutomaticBackupFixture) async throws -> Void) async throws
@@ -430,6 +565,33 @@ struct PhotoBackupAutomaticTests {
     /// 真实手动继续任务也纳入门和清理观察；用它建立非合作导出await，不模拟Controller的task字段。
     func resumeManually() -> Task<Void, Never>? {
         track(controller.resume(using: manager))
+    }
+
+    /// 仅构造明确保存且尚未尝试的暂停尾队列；用真实领域转换/SQLite，不编造上传回执或成功行。
+    func seedUnattemptedQueue() async throws {
+        var journal = try await coldJournal()
+        try journal.enqueue(port.sources)
+        for id in journal.jobs.map(\.id) {
+            try journal.update(id) { $0.pause() }
+        }
+        try await store.savePhotoBackups(journal, scope: scope)
+    }
+
+    /// 新Controller和SQLite连接模拟冷恢复；Photos与HTTP仍是同一例系统边界，恢复事实只能来自磁盘。
+    func coldController() -> PhotoBackupController {
+        PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: database), exporter: exporter,
+                              albumLoader: { [port] in try await port.requestAlbums() }, albumScanner: { [port] in try port.scan($0) },
+                              authorizationStatus: { [port] in port.authorization }, observeAutomaticPhotos: false)
+    }
+
+    /// 记录实际新恢复任务，保证取消/超时也等待其Worker退役。
+    func resumeUnattempted(using value: PhotoBackupController) -> Task<Void, Never>? {
+        track(value.resumeUnattempted(using: manager))
+    }
+
+    /// 原单项明确核查路径也使用真实Controller并进入相同清理集合。
+    func retry(_ id: UUID, using value: PhotoBackupController) -> Task<Void, Never>? {
+        track(value.resume(using: manager, jobID: id))
     }
 
     /// task是实际Controller任务，不以测试自造运行状态替代；观察任务只负责解除提前失败时的测试等待。
@@ -567,7 +729,7 @@ struct PhotoBackupAutomaticTests {
 /// 私有合成HTTP响应，Mutex仅保护请求计数；不会替换生产鉴权/序列化/状态码解析与fresh核对。
 private final nonisolated class AutomaticBackupHTTPServer: Sendable {
     let endpoint: URL
-    let failing: Bool
+    private let failing: Mutex<Bool>
     private let requests = Mutex<[Int]>([0, 0])
     var counts: [Int] {
         requests.withLock { $0 }
@@ -575,7 +737,12 @@ private final nonisolated class AutomaticBackupHTTPServer: Sendable {
 
     /// endpoint固定随机.invalid主机，failing只用于失败状态码回归。
     init(endpoint: URL, failing: Bool) {
-        self.endpoint = endpoint; self.failing = failing
+        self.endpoint = endpoint; self.failing = Mutex(failing)
+    }
+
+    /// 明确切换隔离HTTP服务的故障状态，用真实请求建立断网后恢复序列，不替换上传返回值。
+    func setFailing(_ value: Bool) {
+        failing.withLock { $0 = value }
     }
 
     /// request为URLSession真实请求；仅接受官方查重与fresh GET，未知方法/路径/认证/校验和均失败。
@@ -590,7 +757,7 @@ private final nonisolated class AutomaticBackupHTTPServer: Sendable {
             // 参考SHA1独立由Node crypto计算，不调用生产checksum生成预期答案。
             guard value.assets.count == 1, UUID(uuidString: item.id) != nil, item.checksum == "f0dfc36a29e0f039816e54ddb59e0c7fc202c11c" else { throw URLError(.cannotDecodeContentData) }
             requests.withLock { $0[0] += 1 }
-            if failing {
+            if failing.withLock({ $0 }) {
                 return (503, Data(#"{"message":"synthetic unavailable"}"#.utf8))
             }
             let result = "{\"results\":[{\"id\":\"\(item.id)\",\"action\":\"reject\",\"assetId\":\"22222222-2222-4222-8222-222222222222\",\"isTrashed\":false}]}"

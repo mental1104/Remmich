@@ -194,6 +194,34 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     }
 }
 
+/// 当前队列的保守恢复摘要；eligibleJobIDs只包含从未尝试、无失败/回执且没有同源未知历史的既有任务。
+/// 展示数是重新核相簿前的上限，不能代替本轮真实包含/排除扫描。
+nonisolated struct PhotoBackupUnattemptedSummary: Sendable {
+    let eligibleJobIDs: Set<UUID>
+    let blockedLocalIDs: Set<String>
+    let failed: Int
+    let attemptedOrUnconfirmed: Int
+    let cancelled: Int
+    let completed: Int
+
+    /// jobs来自当前账号完整冷快照；取消/失败和任何未完成尝试/回执都阻断同localID的新任务自动或批量重放。
+    init(jobs: [PhotoBackupJob]) {
+        let blocked = Set(jobs.filter {
+            $0.stage == .cancelled || $0.stage == .failed || ($0.stage != .completed
+                && ($0.attempts > 0 || $0.failure != nil || $0.motionAssetID != nil || $0.primaryAssetID != nil || $0.rawReceipt != nil || $0.jpegReceipt != nil))
+        }.map(\.source.localID))
+        blockedLocalIDs = blocked
+        eligibleJobIDs = Set(jobs.filter {
+            [.queued, .paused].contains($0.stage) && !blocked.contains($0.source.localID)
+                && $0.attempts == 0 && $0.failure == nil && $0.motionAssetID == nil && $0.primaryAssetID == nil && $0.rawReceipt == nil && $0.jpegReceipt == nil
+        }.map(\.id))
+        failed = jobs.count { $0.stage == .failed }
+        cancelled = jobs.count { $0.stage == .cancelled }
+        completed = jobs.count { $0.stage == .completed }
+        attemptedOrUnconfirmed = jobs.count - eligibleJobIDs.count - failed - cancelled - completed
+    }
+}
+
 /// 当前账号的备份日志；不含凭据/文件字节，资源在真正执行时从授权PhotoKit重新读取。
 nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 不含任务数组的日志头；热路径只检查版本/账号，完整任务由SQLite独立行保存。
@@ -288,10 +316,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
               Set(selectedAlbumIDs) == scan.selection.included, Set(excludedAlbumIDs ?? []) == scan.selection.excluded
         else { throw PhotoBackupStateError.invalidTransition }
         let eligible = Set(scan.sources)
-        let blockedIDs = Set(jobs.filter {
-            $0.stage == .cancelled || $0.stage == .failed || ($0.stage != .completed
-                && ($0.attempts > 0 || $0.failure != nil || $0.motionAssetID != nil || $0.primaryAssetID != nil || $0.rawReceipt != nil || $0.jpegReceipt != nil))
-        }.map(\.source.localID))
+        let blockedIDs = PhotoBackupUnattemptedSummary(jobs: jobs).blockedLocalIDs
         let existing = Set(jobs.map(\.source))
         for index in jobs.indices where jobs[index].stage == .queued || jobs[index].stage == .paused {
             let job = jobs[index]
@@ -400,6 +425,30 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
                 jobs[index].pause()
             }
         }
+    }
+
+    /// scan重新确认已保存的完整相簿规则；只恢复既有安全未尝试项，不新增源或重新发送任何未知历史。
+    /// 返回实际排队数；失败/取消/完成及已尝试暂停保持原样，不再属于当前源快照的安全项仅取消本地任务。
+    @discardableResult mutating func resumeUnattempted(_ scan: PhotoBackupAlbumScan) throws -> Int {
+        try validate(namespace: namespace)
+        guard !jobs.contains(where: \.stage.isInFlight), Set(selectedAlbumIDs) == scan.selection.included,
+              Set(excludedAlbumIDs ?? []) == scan.selection.excluded else { throw PhotoBackupStateError.invalidTransition }
+        let summary = PhotoBackupUnattemptedSummary(jobs: jobs)
+        let current = Set(scan.sources)
+        var count = 0
+        for index in jobs.indices {
+            if summary.eligibleJobIDs.contains(jobs[index].id) {
+                if current.contains(jobs[index].source) {
+                    jobs[index].queueForVerification(); count += 1
+                } else {
+                    jobs[index].cancel()
+                }
+            } else if jobs[index].stage == .queued {
+                // 即便手动重排曾把未知项变成queued，本入口也不能让Worker顺带执行它。
+                jobs[index].pause()
+            }
+        }
+        return count
     }
 
     /// 进程中断后恢复为可明确继续的暂停状态；已完成/失败/取消保持原样。
