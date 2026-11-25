@@ -1,6 +1,11 @@
 import CryptoKit
 import Foundation
 
+/// 仅候选详情GET的精确服务端拒绝可产生此错误；不代表所有400或其他读取/写入失败都是未匹配。
+nonisolated enum LocalMediaCandidateError: Error, Sendable {
+    case inaccessible
+}
+
 /// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
     case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
@@ -35,6 +40,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let projectionType: String?
     let updatedAt: String?
     let checksum: String?
+    let isOffline: Bool?
 
     /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
@@ -53,10 +59,11 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 
     /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
-    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum/isOffline缺省nil兼容旧构造，存在时仍真实解码。
+    /// isOffline缺失保持未知，新的双原图完整确认不能把nil推断为在线。
     init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
          originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
-         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil, isOffline: Bool? = nil)
     {
         self.id = id
         self.ownerId = ownerId
@@ -70,6 +77,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
         self.projectionType = projectionType
         self.updatedAt = updatedAt
         self.checksum = checksum
+        self.isOffline = isOffline
     }
 }
 
@@ -127,11 +135,22 @@ final nonisolated class LibraryMutationClient: Sendable {
     }
 
     /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
-    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    /// 只读取资产信息；仅HTTP400且精确JSON拒绝正文抛LocalMediaCandidateError，其余错误保留原语义。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
         let expected = try validID(id)
-        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
-        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        let (data, response) = try await session.data(for: request("GET", ["assets", expected]))
+        try Task.checkCancellation()
+        // 当前服务的权限前不存在/不可读和权限后消失均为400；只在此候选GET识别拥有者合同，不放宽通用send。
+        if let response = response as? HTTPURLResponse, response.statusCode == 400,
+           response.mimeType?.lowercased() == "application/json",
+           let body = try? JSONDecoder().decode([String: String].self, from: data), body.count == 1,
+           let message = body["message"], ["Not found or no asset.read access", "Asset not found"].contains(message)
+        {
+            throw LocalMediaCandidateError.inaccessible
+        }
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: bytes)
         guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
         return asset
     }
