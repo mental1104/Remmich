@@ -157,8 +157,9 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
         let operations = try db.query("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? ORDER BY position",
                                       [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupAlbumSyncOperation)
-        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version, creations: header.creations ?? [])
-        guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
+        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version,
+                                              creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false)
+        guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
         try state.validate(namespace: scope.cacheNamespace)
         return state
     }
@@ -180,8 +181,11 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
                 guard let current = byID[old.id], current.localAlbumID == old.localAlbumID, current.targetID == old.targetID,
                       current.source == old.source, current.assets == old.assets else { throw PhotoBackupStateError.invalidJournal }
             }
+            // 手动计划/创建回执不能覆盖另一任务刚保存的自动开关；只有窄setter能够改变此意愿。
+            var persisted = state
+            persisted.automaticEnabled = previous.automaticEnabled
             try db.execute("INSERT INTO photo_backup_album_sync_headers(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
-                           [.text(scope.cacheNamespace), .text(String(decoding: JSONEncoder().encode(state.header), as: UTF8.self))])
+                           [.text(scope.cacheNamespace), .text(String(decoding: JSONEncoder().encode(persisted.header), as: UTF8.self))])
             try db.execute("DELETE FROM photo_backup_album_sync_operations WHERE scope=?", [.text(scope.cacheNamespace)])
             for (position, operation) in state.operations.enumerated() {
                 try db.execute("INSERT INTO photo_backup_album_sync_operations(scope,operation_id,position,phase,payload) VALUES(?,?,?,?,?)",
@@ -192,6 +196,26 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         }
     }
 
+    /// 只改当前账号自动意愿；事务fresh读取保留创建/历史，单独写header，不获取上传Coordinator或重写operation行。
+    /// enabled来自明确设置，返回完整fresh状态；删除账号/未来格式/取消/持久化失败均抛错且不重建旧账号。
+    func setPhotoBackupAlbumSyncAutomaticEnabled(_ enabled: Bool, scope: MediaAccountScope) throws -> PhotoBackupAlbumSyncState {
+        try Task.checkCancellation()
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        var result: PhotoBackupAlbumSyncState? = nil
+        try db.transaction {
+            var current = try loadPhotoBackupAlbumSync(scope: scope)
+            current.version = PhotoBackupAlbumSyncState.currentVersion
+            current.automaticEnabled = enabled
+            try current.validate(namespace: scope.cacheNamespace)
+            try db.execute("INSERT INTO photo_backup_album_sync_headers(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
+                           [.text(scope.cacheNamespace), .text(String(decoding: JSONEncoder().encode(current.header), as: UTF8.self))])
+            try Task.checkCancellation()
+            result = current
+        }
+        guard let result else { throw PhotoBackupStateError.invalidJournal }
+        return result
+    }
+
     /// 热检查点仅更新已计划的同源/同目标/同证明组；不能插入新任务或重写全部历史。
     func savePhotoBackupAlbumSyncOperation(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope) throws {
         try Task.checkCancellation(); try operation.validate()
@@ -199,8 +223,9 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         try db.transaction {
             guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { throw PhotoBackupStateError.invalidJournal }
             let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
-            guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
-            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version, creations: header.creations ?? []).validate(namespace: scope.cacheNamespace)
+            guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
+            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: [operation], version: header.version,
+                                          creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false).validate(namespace: scope.cacheNamespace)
             guard let previous = try db.queryOne("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? AND operation_id=?",
                                                  [.text(scope.cacheNamespace), .text(operation.id.uuidString)], map: Self.decodePhotoBackupAlbumSyncOperation),
                 previous.localAlbumID == operation.localAlbumID, previous.targetID == operation.targetID, previous.source == operation.source, previous.assets == operation.assets

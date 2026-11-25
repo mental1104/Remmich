@@ -2,6 +2,8 @@
 
 后续第三片扩展已有共享editor目标；本次201的恢复仍只认本人owner，见[编辑者目标](photo-backup-album-editors.md)。以下保留第二片原范围与未运行声明。
 
+后续RAW/JPEG与自动组织共用辅助头v3，保留v1/v2创建意图；当前创建/恢复先升v3，header-only意愿保存不覆盖201事实，旧读取器明确拒绝v3。见[当前证明与格式边界](photo-backup-raw-jpeg-existing-proof.md)。下文保留创建首片v2的历史实现与未运行证据。
+
 2026-11-25，`codex/feature-photo-backup-album-create`，基于首片f13f7e35f6a8472ba858d5516258abb0780e179d。上游672f02e和父服务端官方v3.4.2基线未变，未同步、修改或部署服务端/官方mobile/API/生成SDK/workflow。
 
 备份表单每个已保存包含相簿现在可以单独输入名称，先预览再确认创建。预览持久保存意图并显示当前同名目标数，不发POST；确认明确说明会另建空相簿、替换本地映射，保留原相簿及成员。创建成功后仍须另外预览/确认照片补入。原有成员补入和创建共用一个confirmationDialog，避免两个宿主互相覆盖。

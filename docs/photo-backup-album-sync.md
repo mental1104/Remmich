@@ -1,5 +1,7 @@
 # 相簿同步第一片：已有自有目标的手动增量补入
 
+当前后续已接入无上传回执RAW+JPEG的本机完整双SHA1交集证明、普通completed主体摘要fallback及辅助头v3/自动意愿保全，见[当前双原图证明](photo-backup-raw-jpeg-existing-proof.md)。以下f13第一片历史中的“仅双回执/普通必须本机匹配/头v1”不再代表当前全部能力；验收仍统一留在项目末尾。
+
 后续已在独立第二片接入明确预览/确认的空相簿创建、精确201身份持久恢复及辅助头v2防重放，见[创建闭环](photo-backup-album-create.md)。下文保留f13第一片的范围和检查，不将新Swift声明场景计为已运行。
 
 2026-11-25，独立分支 `codex/feature-photo-backup-album-sync`，基于 `e45100a7fd42055e5b34b99ae01d55eaddc3111d`。未同步上游；客户端上游基线仍为672f02e，服务端拥有方为父仓库dev的官方v3.4.2加既有Fork功能。本片不改变服务端、官方mobile、API/生成SDK、workflow、签名或父gitlink，也不代表整个相簿同步目标已经完成。
