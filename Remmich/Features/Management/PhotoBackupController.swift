@@ -20,9 +20,30 @@ import Photos
     nonisolated enum AlbumReadError: Error, Equatable, Sendable { case permission, invalidCatalog }
 
     var albums: [Album] = []
-    var selected: Set<String> = []
-    var excluded: Set<String> = []
-    var allowCloud = false
+    var selected: Set<String> = [] {
+        didSet {
+            if selected != oldValue {
+                markSelectionDraftChanged()
+            }
+        }
+    }
+
+    var excluded: Set<String> = [] {
+        didSet {
+            if excluded != oldValue {
+                markSelectionDraftChanged()
+            }
+        }
+    }
+
+    var allowCloud = false {
+        didSet {
+            if allowCloud != oldValue {
+                markSelectionDraftChanged()
+            }
+        }
+    }
+
     private(set) var loadingAlbums = false
     private(set) var hasLoadedAlbums = false
     private(set) var requiresSelectionScan = false
@@ -52,17 +73,24 @@ import Photos
         self.albumScanner = albumScanner ?? Self.albumSnapshots
     }
 
-    /// 进入页面只冷恢复并读取配置，不自动扫描/上传；同一页面重读队列时保留尚未扫描的相簿草稿与门禁。
+    /// manager绑定本次读取账号；只冷恢复/读取配置，同scope保留未扫描草稿，不自动扫描或上传。
+    /// 调用取消在读取前后与发布前检查；取消或账号退役不应用迟到配置，已完成的安全暂停恢复仍保留。
     func load(using manager: LibraryManagementController) async {
         guard let scope = manager.backupScope else { status = "请先连接服务器。"; return }
         let owner = manager.generation
         do {
+            try Task.checkCancellation()
             let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                try Task.checkCancellation()
                 try Self.validate(manager, owner: owner, scope: scope)
                 try await store.recoverPhotoBackupWork(scope: scope)
+                try Task.checkCancellation()
                 try Self.validate(manager, owner: owner, scope: scope)
-                return try await store.loadPhotoBackups(scope: scope)
+                let journal = try await store.loadPhotoBackups(scope: scope)
+                try Task.checkCancellation()
+                return journal
             }
+            try Task.checkCancellation()
             try Self.validate(manager, owner: owner, scope: scope)
             apply(journal, scope: scope, restoreConfiguration: !requiresSelectionScan)
             if requiresSelectionScan {
@@ -72,7 +100,7 @@ import Photos
             }
         } catch {
             guard manager.generation == owner else { return }
-            status = "无法读取备份恢复资料，未清空队列或开始上传。"
+            status = error is CancellationError ? "队列读取已停止，现有选择和恢复资料已保留，未开始上传。" : "无法读取备份恢复资料，未清空队列或开始上传。"
         }
     }
 
@@ -287,6 +315,13 @@ import Photos
         if running {
             status = "正在停止并保存队列；再次继续会重新查重。"
         }
+    }
+
+    /// 已读取账户配置后的包含/排除/iCloud改动都属于未保存草稿；直到成功扫描才解除恢复/重试门禁。
+    /// 初始构造不创建草稿；apply恢复配置时会在全部字段赋值后统一清除标记。
+    private func markSelectionDraftChanged() {
+        guard configurationScope != nil else { return }
+        requiresSelectionScan = true
     }
 
     /// journal/scope为刚验证的当前账号快照；restoreConfiguration为false时仅保留同scope未扫描草稿。

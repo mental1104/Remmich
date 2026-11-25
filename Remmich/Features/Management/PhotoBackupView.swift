@@ -7,6 +7,7 @@ struct PhotoBackupView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var backup = PhotoBackupController()
     @State private var loadingQueue = false
+    @State private var queueReadTask: Task<Void, Never>?
     @State private var confirmsResume = false
     @State private var retryID: UUID?
     @State private var confirmationOwner: UUID?
@@ -22,8 +23,15 @@ struct PhotoBackupView: View {
                         ProgressView(value: Double(backup.completed + backup.failed), total: Double(max(1, backup.total)))
                         Button("停止并保存队列", role: .destructive) { backup.cancel() }
                     } else {
-                        Button("重新读取备份队列") { Task { await reloadBackupQueue() } }
-                            .disabled(loadingQueue || backup.running || controller.busy || controller.client == nil)
+                        Button("重新读取备份队列") {
+                            guard queueReadTask == nil else { return }
+                            // 按钮创建的Task须随页面/账号退役取消，不能依赖SwiftUI只取消首次.task读取。
+                            queueReadTask = Task {
+                                await reloadBackupQueue()
+                                queueReadTask = nil
+                            }
+                        }
+                        .disabled(loadingQueue || backup.running || controller.busy || controller.client == nil)
                         Button("读取手机相簿…") { Task { await backup.loadAlbums() } }
                             .disabled(backup.loadingAlbums || loadingQueue)
                         if loadingQueue {
@@ -33,6 +41,7 @@ struct PhotoBackupView: View {
                             ProgressView("正在读取手机相簿")
                         }
                         Toggle("允许下载 iCloud 原片（可能使用移动数据）", isOn: $backup.allowCloud)
+                            .disabled(loadingQueue)
                         ForEach(backup.albums) { album in
                             Toggle(album.title, isOn: Binding(
                                 get: { backup.selected.contains(album.id) },
@@ -44,9 +53,12 @@ struct PhotoBackupView: View {
                                     }
                                 }
                             ))
+                            .disabled(loadingQueue)
                         }
                         unavailableSelections
+                            .disabled(loadingQueue)
                         exclusionChoices
+                            .disabled(loadingQueue)
                         Button("扫描并更新备份队列") { backup.scan(using: controller) }
                             .disabled(loadingQueue || !backup.hasLoadedAlbums || backup.loadingAlbums || backup.selected.isEmpty || controller.client == nil || controller.busy)
                         Button("继续备份队列") {
@@ -90,13 +102,14 @@ struct PhotoBackupView: View {
                 Text("使用最近扫描保存的相簿排除和 iCloud 选项；更改后需重新扫描。成功回执仍会重新查重和核对配对；不自动重试未知结果。")
             }
             .task { await reloadBackupQueue() }
-            .onChange(of: controller.generation) { _, _ in backup.cancel(); dismiss() }
+            .onChange(of: controller.generation) { _, _ in queueReadTask?.cancel(); backup.cancel(); dismiss() }
             .onChange(of: scenePhase) {
                 _, phase in if phase == .background {
+                    queueReadTask?.cancel()
                     backup.cancel()
                 }
             }
-            .onDisappear { backup.cancel() }
+            .onDisappear { queueReadTask?.cancel(); backup.cancel() }
         }
         .interactiveDismissDisabled(backup.running)
     }

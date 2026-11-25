@@ -268,6 +268,67 @@ import Testing
         #expect(try encoder.encode(savedSecond) == encoder.encode(secondJournal))
     }
 
+    /// 普通包含/排除/iCloud改动也是未保存草稿；真实队列重读或取消读取都不能恢复旧字段、启动上传或清除扫描要求。
+    /// 再明确取消任务只保存该任务；新Controller仍应恢复旧配置，证明草稿没有偷偷落盘。
+    /// option指定修改的配置字段；cancelRead为true时在读取Task进入前取消，不冒充已验证任意中途取消时序。
+    @Test(.timeLimit(.minutes(1)), arguments: ["included", "excluded", "cloud"], [false, true])
+    func ordinaryDraftSurvivesQueueReloadAndJobCancellation(_ option: String, _ cancelRead: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupAlbumDraft-\(UUID())", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let endpoint = try #require(URL(string: "https://backup-draft-\(UUID().uuidString.lowercased()).example.invalid/api"))
+        let account = backupAlbumAccount(owner: "draft-owner", endpoint: endpoint)
+        let database = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: database)
+        try await store.prepare(scope: account.scope)
+        let source = PhotoBackupSource(localID: "partial-live", modifiedAt: nil, kind: .livePhoto)
+        let selection = try PhotoBackupAlbumSelection(included: ["keep"], excluded: ["private"])
+        let scan = try selection.scan([.init(id: "keep", assets: [.init(source: source, capturedAt: nil)]), .init(id: "private", assets: [])])
+        var journal = PhotoBackupJournal(namespace: account.scope.cacheNamespace)
+        try journal.applyAlbumScan(scan, allowCloud: false)
+        let id = try #require(journal.jobs.first?.id)
+        let motionID = UUID()
+        try journal.update(id) { job in try job.begin(); try job.exported(); try job.recordMotion(motionID); job.pause() }
+        try await store.savePhotoBackups(journal, scope: account.scope)
+        let exporter = UnexpectedBackupAlbumExporter()
+        let controller = PhotoBackupController(store: store, exporter: exporter)
+        await controller.load(using: account.manager)
+        #expect(!controller.requiresSelectionScan)
+        switch option {
+        case "included": controller.selected.insert("additional")
+        case "excluded": controller.excluded.insert("additional")
+        default: controller.allowCloud = true
+        }
+        let included = controller.selected, excluded = controller.excluded, cloud = controller.allowCloud
+        #expect(controller.requiresSelectionScan)
+
+        // 主actor上创建后立即取消，明确覆盖已取消调用的进入边界；非取消场景实际完成Coordinator/SQLite读取。
+        let reload = Task { await controller.load(using: account.manager) }
+        if cancelRead {
+            reload.cancel()
+        }
+        await reload.value
+        #expect(controller.selected == included && controller.excluded == excluded && controller.allowCloud == cloud)
+        #expect(controller.requiresSelectionScan && controller.jobs.first?.motionAssetID == motionID)
+        let resume = controller.resume(using: account.manager)
+        #expect(resume == nil && exporter.calls == 0)
+        let saved = try await store.loadPhotoBackups(scope: account.scope)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(try encoder.encode(saved) == encoder.encode(journal))
+
+        controller.cancelJob(id, using: account.manager)
+        try await waitUntil { !controller.running }
+        #expect(controller.selected == included && controller.excluded == excluded && controller.allowCloud == cloud)
+        #expect(controller.requiresSelectionScan)
+        let cancelled = try await store.loadPhotoBackups(scope: account.scope)
+        #expect(cancelled.selectedAlbumIDs == ["keep"] && cancelled.excludedAlbumIDs == ["private"] && !cancelled.allowCloud)
+        #expect(cancelled.jobs.first?.stage == .cancelled && cancelled.jobs.first?.motionAssetID == motionID)
+        let cold = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: database), exporter: exporter)
+        await cold.load(using: account.manager)
+        #expect(cold.selected == ["keep"] && cold.excluded == ["private"] && !cold.allowCloud && !cold.requiresSelectionScan)
+        #expect(exporter.calls == 0)
+    }
+
     /// condition观察当前Controller任务是否退役；有界等待只保护回归卡死，不靠固定sleep推测业务顺序。
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0 ..< 150 {
