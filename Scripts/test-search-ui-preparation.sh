@@ -220,9 +220,11 @@ run_case tablet true bootstatus '' 0 "$ci_phone"; expect_status "$actual" 23
 expect_actions "xcrun simctl shutdown $ci_phone" "xcrun simctl boot $tablet" "xcrun simctl bootstatus $tablet -b"
 absent '^xcodebuild'; passed
 
-new_case ci-phone-timeout-no-recovery Shutdown Booted
+new_case ci-phone-two-timeouts-fail Shutdown Booted
 run_case phone true '' '' 0 "$ci_phone" timeout-always; expect_status "$actual" 124
-expect_actions "xcrun simctl bootstatus $ci_phone -b"
+expect_actions "xcrun simctl bootstatus $ci_phone -b" "xcrun simctl shutdown $ci_phone" \
+    "xcrun simctl boot $ci_phone" "xcrun simctl bootstatus $ci_phone -b"
+[[ "$(rg -c 'timed out after 1 seconds' "$current/output/xcodebuild.log")" = 2 ]]
 absent '^xcodebuild'; expect_hangs_reaped; passed
 
 new_case local-tablet-timeout-no-recovery Shutdown Booted
@@ -257,5 +259,75 @@ new_case ci-tablet-ui-failure-never-retried Shutdown Booted
 run_case tablet true '' '' 19 "$ci_phone"; expect_status "$actual" 19
 expect_actions "xcrun simctl shutdown $ci_phone" "xcrun simctl boot $tablet" "xcrun simctl bootstatus $tablet -b"
 [[ "$(rg -c '^xcodebuild ' "$current/calls")" = 1 ]]; passed
+
+# 与真实phone日志相同的Shutdown→boot→首次status超时；仅当前CI手机可恢复，其他设备不启动/关闭。
+new_case ci-phone-recovers-first-timeout Shutdown Shutdown
+run_case phone true '' '' 0 "$ci_phone" timeout-once; expect_status "$actual" 0
+expect_actions "xcrun simctl boot $ci_phone" "xcrun simctl bootstatus $ci_phone -b" \
+    "xcrun simctl shutdown $ci_phone" "xcrun simctl boot $ci_phone" "xcrun simctl bootstatus $ci_phone -b"
+jq -e --arg id "$ci_phone" '.udid==$id' "$current/output/device.json" >/dev/null
+[[ "$(rg -c '^xcodebuild ' "$current/calls")" = 1 ]]
+rg -q 'timed out after 1 seconds' "$current/output/xcodebuild.log"
+rg -q 'CI phone bootstatus timed out with exit code 124; restarting selected simulator' "$current/output/xcodebuild.log"
+rg -q 'mock xcodebuild exit 0' "$current/output/xcodebuild.log"
+expect_hangs_reaped; passed
+
+# 恢复后的第二次原生错误必须原样暴露，不能再启动第三轮或把准备失败记为UI失败。
+new_case ci-phone-second-status-failure Booted Booted
+run_case phone true '' '' 0 "$ci_phone" timeout-then-fail; expect_status "$actual" 41
+expect_actions "xcrun simctl bootstatus $ci_phone -b" "xcrun simctl shutdown $ci_phone" \
+    "xcrun simctl boot $ci_phone" "xcrun simctl bootstatus $ci_phone -b"
+[[ "$(cat "$current/bootstatus.count")" = 2 ]]
+absent '^xcodebuild'; expect_hangs_reaped; passed
+
+# simctl自行返回124不是脚本等待超时；两种非超时错误都不得关闭/重启目标。
+new_case ci-phone-native-124-no-recovery Booted Booted
+run_case phone true '' '' 0 "$ci_phone" native-124; expect_status "$actual" 124
+expect_actions "xcrun simctl bootstatus $ci_phone -b"
+absent '^xcodebuild'; passed
+
+new_case ci-phone-status-error-no-recovery Booted Booted
+run_case phone true bootstatus '' 0 "$ci_phone"; expect_status "$actual" 23
+expect_actions "xcrun simctl bootstatus $ci_phone -b"
+absent '^xcodebuild'; passed
+
+# 普通Mac和显式UUID即使首次等待超时，也不能取得CI命名设备才有的一次自动恢复权限。
+new_case local-phone-timeout-no-recovery Shutdown Booted
+run_case phone false '' '' 0 "$ci_phone" timeout-once; expect_status "$actual" 124
+expect_actions "xcrun simctl boot $local_phone" "xcrun simctl bootstatus $local_phone -b"
+absent '^xcodebuild'; expect_hangs_reaped; passed
+
+new_case ci-explicit-phone-timeout-no-recovery Booted Booted
+run_case "$ci_phone" true '' '' 0 "$ci_phone" timeout-once; expect_status "$actual" 124
+expect_actions "xcrun simctl bootstatus $ci_phone -b"
+absent '^xcodebuild'; expect_hangs_reaped; passed
+
+# 初始boot失败发生在status前，不满足恢复条件；保留原错误且不启动实际UI测试。
+new_case ci-phone-boot-error-no-recovery Shutdown Shutdown
+run_case phone true boot '' 0 "$ci_phone"; expect_status "$actual" 23
+expect_actions "xcrun simctl boot $ci_phone"
+absent '^xcodebuild'; passed
+
+# 恢复shutdown/boot任一步失败即退出，实际失败码和首次超时的子进程回收都要成立。
+for recovery_failure in shutdown boot; do
+    new_case "ci-phone-recovery-$recovery_failure-fails" Booted Booted
+    run_case phone true '' '' 0 "$ci_phone" timeout-once "$recovery_failure"; expect_status "$actual" 37
+    [[ "$(cat "$current/bootstatus.count")" = 1 ]]
+    if [[ "$recovery_failure" = shutdown ]]; then
+        expect_actions "xcrun simctl bootstatus $ci_phone -b" "xcrun simctl shutdown $ci_phone"
+    else
+        expect_actions "xcrun simctl bootstatus $ci_phone -b" "xcrun simctl shutdown $ci_phone" "xcrun simctl boot $ci_phone"
+    fi
+    absent '^xcodebuild'; expect_hangs_reaped; passed
+done
+
+# 准备恢复成功后实际UI仍可能失败；只能执行一次xcodebuild，原19必须保留而不再重试测试。
+new_case ci-phone-ui-failure-after-recovery-never-retried Booted Booted
+run_case phone true '' '' 19 "$ci_phone" timeout-once; expect_status "$actual" 19
+expect_actions "xcrun simctl bootstatus $ci_phone -b" "xcrun simctl shutdown $ci_phone" \
+    "xcrun simctl boot $ci_phone" "xcrun simctl bootstatus $ci_phone -b"
+[[ "$(rg -c '^xcodebuild ' "$current/calls")" = 1 ]]
+rg -q 'mock xcodebuild exit 19' "$current/output/xcodebuild.log"
+expect_hangs_reaped; passed
 
 printf 'PASS: %s real-script mock cases. Evidence: %s\n' "$count" "$root"
