@@ -352,11 +352,35 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
-        .onChange(of: media.management.revision) { _, _ in sessionController?.libraryIndex.syncNow() }
+        // 同一管理观察器交付日期/伙伴索引核对，并通知原备份Controller；两条消费路径共用原账号上下文。
+        .onChange(of: media.management.revision) { _, _ in
+            sessionController?.libraryIndex.syncNow(metadataDates: media.management.takeMetadataDateProjections(),
+                                                    partnerTimelineRefresh: media.management.takePartnerTimelineRefreshRequest(), manager: media.management)
+            media.photoBackups.automaticLibraryChanged()
+            media.photoBackupAlbumAutomation.managementChanged(media.management.revision)
+        }
+        .onChange(of: media.photoBackups.running) {
+            _, running in if !running {
+                media.photoBackupAlbumAutomation.contentsChanged()
+            }
+        }
+        .onChange(of: media.localMediaMatches.revision) { _, _ in media.photoBackupAlbumAutomation.contentsChanged() }
+        .onChange(of: media.localMediaMatches.running) {
+            _, running in if !running {
+                media.photoBackupAlbumAutomation.contentsChanged()
+            }
+        }
+        .onChange(of: media.photoBackupAlbumSync.state.mappings) { _, _ in media.photoBackupAlbumAutomation.contentsChanged() }
         .onAppear { media.logShellPresented() }
+        .onChange(of: media.photoBackups.backgroundAutomaticEnabled) { _, _ in
+            // 冷恢复或明确修改同意后更新原系统请求；不会移动已排请求的最早日期。
+            LibraryBackgroundSyncCoordinator.shared.scheduleNextSync()
+        }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }
         .onChange(of: exportScenePhase, initial: true) { _, phase in
             media.exports.sceneActivityChanged(active: phase == .active)
+            media.photoBackups.automaticConditionsChanged(using: media.management, scope: media.scope, active: phase == .active)
+            media.photoBackupAlbumAutomation.conditionsChanged(using: media.management, scope: media.scope, active: phase == .active)
             if phase == .active {
                 // 恢复当前账号本机关联；只检查已有权限，重复前台事件复用当前扫描，不主动弹授权框。
                 media.localMediaMatches.restoreAndRefresh(using: media.management, scope: media.scope)

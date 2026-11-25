@@ -49,14 +49,16 @@ final class PeopleManagementStore {
         }
     }
 
-    /// expected/name由用户确认；不根据文本输入自动提交，也不在失败后重试。
+    /// expected/name由用户确认；fresh完整列表须匹配新姓名及原隐藏状态，不以PUT回执代替最终读后核对。
     func rename(_ expected: ManagedPerson, name: String, source: any PeopleManaging) async {
-        await perform(source: source) { try await source.renamePerson(expected, name: name) }
+        let confirmed = ManagedPerson(id: expected.id, name: name, isHidden: expected.isHidden)
+        await perform(source: source, confirming: confirmed) { try await source.renamePerson(expected, name: name) }
     }
 
-    /// expected为当前记录；隐藏/显示成功后fresh重读列表，主浏览仅接收非隐藏人物。
+    /// expected为当前记录；fresh列表须同时确认新隐藏状态及原姓名，隐藏人物仍由withHidden完整读取。
     func setHidden(_ expected: ManagedPerson, hidden: Bool, source: any PeopleManaging) async {
-        await perform(source: source) { try await source.setPersonHidden(expected, hidden: hidden) }
+        let confirmed = ManagedPerson(id: expected.id, name: expected.name, isHidden: hidden)
+        await perform(source: source, confirming: confirmed) { try await source.setPersonHidden(expected, hidden: hidden) }
     }
 
     /// 两个明确选择的人物只提交一次；POST失败/部分结果之后必须重新读取和重新确认方向。
@@ -64,8 +66,11 @@ final class PeopleManagementStore {
         await perform(source: source) { try await source.mergePeople(target: target, source: sourcePerson) }
     }
 
-    /// operation只由本类型三种显式动作提供；accepted区分写入已确认但刷新失败，任何情况都不重放写入。
-    private func perform(source: any PeopleManaging, operation: @Sendable () async throws -> Void) async {
+    /// operation只由三种显式动作提供；expected固定改名/隐藏的确认字段，nil保留既有合并行为。
+    /// accepted仅表示原写通道已校验回执；fresh读取失败或字段不符时仍需Reload，任何情况都不重放写入。
+    private func perform(source: any PeopleManaging, confirming expected: ManagedPerson? = nil,
+                         operation: @Sendable () async throws -> Void) async
+    {
         guard !busy, !needsReload else { return }
         let owner = generation
         busy = true
@@ -87,6 +92,11 @@ final class PeopleManagementStore {
             let fresh = try await source.managementPeople()
             try Task.checkCancellation()
             guard owner == generation else { return }
+            if let expected {
+                // 200回执后可能出现旧/不同列表；目标缺失、重复或任一可编辑字段不符均不能发布成功。
+                let matches = fresh.filter { $0.id.lowercased() == expected.id.lowercased() }
+                guard matches.count == 1, expected.matchesEditableFields(matches[0]) else { throw PeopleManagementError.unconfirmedPerson }
+            }
             adopt(fresh)
             notice = "Server change confirmed and people reloaded."
         } catch {
@@ -95,10 +105,10 @@ final class PeopleManagementStore {
             if !accepted {
                 mutationRevision += 1
             }
-            self.error = accepted ? "The server accepted the change, but people could not be reloaded. Reload before another change."
-                : (error as? PeopleManagementError)?.errorDescription
-                ?? (error as? LibraryWriteError)?.errorDescription
-                ?? "The operation could not be confirmed. It may have changed server records. Reload before another change."
+            self.error = (error as? PeopleManagementError)?.errorDescription
+                ?? (accepted ? "The server accepted the change, but people could not be reloaded. Reload before another change."
+                    : (error as? LibraryWriteError)?.errorDescription
+                    ?? "The operation could not be confirmed. It may have changed server records. Reload before another change.")
         }
     }
 

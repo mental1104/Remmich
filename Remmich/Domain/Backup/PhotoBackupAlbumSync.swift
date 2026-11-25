@@ -1,0 +1,176 @@
+import Foundation
+
+/// 空远端相簿的明确创建意图；201回执UUID才是本次POST的身份依据，同名列表不能替代。
+nonisolated struct PhotoBackupAlbumCreation: Codable, Identifiable, Sendable {
+    /// prepared尚未发送；sending/unknown禁止重发；received有持久201身份可只读恢复；mapped/rejected/abandoned为已处理。
+    enum Phase: String, Codable, Sendable { case prepared, sending, received, unknown, mapped, rejected, abandoned }
+    let id: UUID
+    let localAlbumID: String
+    let name: String
+    var phase: Phase = .prepared
+    var receiptID: UUID?
+    var mappedTargetID: UUID?
+
+    /// localAlbumID来自已保存包含规则，name为明确输入并trim后的名称；本地id不发送为虚构幂等键。
+    init(id: UUID = UUID(), localAlbumID: String, name: String) {
+        self.id = id; self.localAlbumID = localAlbumID; self.name = name
+    }
+
+    /// 未决创建必须保留，禁止同一本地相簿再发送另一次POST；明确选择已有目标可结束未知意图。
+    var unresolved: Bool {
+        phase != .mapped && phase != .rejected && phase != .abandoned
+    }
+
+    /// 持久化前核对有限状态；received必须有201身份，mapped必须有实际明确目标，其他阶段不得伪造映射成功。
+    func validate() throws {
+        guard !localAlbumID.isEmpty, !name.isEmpty, name == name.trimmingCharacters(in: .whitespacesAndNewlines),
+              phase != .received || receiptID != nil,
+              (phase == .mapped) == (mappedTargetID != nil),
+              phase != .prepared || receiptID == nil,
+              phase != .sending || receiptID == nil else { throw PhotoBackupStateError.invalidJournal }
+    }
+
+    /// old是磁盘事实；身份和已收到UUID不可替换，未知/已发送绝不能回退prepared让POST被重放。
+    func validate(replacing old: Self) throws {
+        guard id == old.id, localAlbumID == old.localAlbumID, name == old.name,
+              old.receiptID == nil || receiptID == old.receiptID,
+              old.mappedTargetID == nil || mappedTargetID == old.mappedTargetID else { throw PhotoBackupStateError.invalidJournal }
+        let allowed: Set<Phase> = switch old.phase {
+        case .prepared: [.prepared, .sending, .abandoned, .mapped]
+        case .sending: [.sending, .received, .unknown, .rejected, .mapped]
+        case .received: [.received, .unknown, .mapped]
+        case .unknown: [.unknown, .mapped]
+        case .mapped: [.mapped]
+        case .rejected: [.rejected]
+        case .abandoned: [.abandoned]
+        }
+        guard allowed.contains(phase) else { throw PhotoBackupStateError.invalidJournal }
+    }
+}
+
+/// 用户明确选择的稳定目标UUID；名称只供显示，不参与同名猜测、自动创建或改名。
+nonisolated struct PhotoBackupAlbumMapping: Codable, Equatable, Sendable {
+    let localAlbumID: String
+    let targetID: UUID
+    let targetName: String
+}
+
+/// 远端主体的组织证据；metadata的远端checksum不宣称本机字节已验证，Live只加primary。
+nonisolated struct PhotoBackupAlbumSyncAsset: Codable, Hashable, Sendable {
+    /// primary涵盖普通照片/视频及Live still，RAW/JPEG则固定两个独立角色。
+    enum Role: String, Codable, Hashable, Sendable { case primary, raw, jpeg }
+    /// 区分组织依据，不将metadata证明提升成本机原片备份回执。
+    enum Proof: String, Codable, Hashable, Sendable { case metadataAssociation, checksumAssociation, originalReceipt, rawJPEGChecksum }
+    let role: Role
+    let assetID: UUID
+    let checksum: String
+    let revision: Date?
+    let proof: Proof
+}
+
+/// 相簿关系操作的安全失败分类；不持久化HTTP正文、token、私人路径或系统错误文本。
+nonisolated enum PhotoBackupAlbumSyncFailure: String, Codable, Sendable {
+    case permission, sourceChanged, unconfirmed, unavailable
+}
+
+/// 单个本地逻辑源在一个目标相簿内的独立组织状态；不修改上传完成或已有配对回执。
+nonisolated struct PhotoBackupAlbumSyncOperation: Codable, Identifiable, Sendable {
+    /// sending须在HTTP前落盘；冷恢复显示unknown，confirmed只在本轮全部fresh核查后产生。
+    enum Phase: String, Codable, Sendable { case queued, sending, confirmed, unknown, failed, cancelled }
+    let id: UUID
+    let localAlbumID: String
+    let targetID: UUID
+    let source: PhotoBackupSource
+    let assets: [PhotoBackupAlbumSyncAsset]
+    /// 保留逐项历史确认供恢复；新一轮仍重核全部主体，不能单凭此集合重新完成整组。
+    var confirmedAssetIDs: Set<UUID>
+    var phase: Phase
+    var failure: PhotoBackupAlbumSyncFailure?
+
+    /// source/target/assets在建计划时固定；确认集合从空开始，不能拿上传完成冒充相簿组织完成。
+    init(id: UUID = UUID(), localAlbumID: String, targetID: UUID, source: PhotoBackupSource, assets: [PhotoBackupAlbumSyncAsset]) {
+        self.id = id; self.localAlbumID = localAlbumID; self.targetID = targetID; self.source = source; self.assets = assets
+        confirmedAssetIDs = []; phase = .queued
+    }
+
+    /// 已知有限源版本、完整角色和canonical SHA1是计划前提；确认状态必须覆盖全部独立主体。
+    func validate() throws {
+        guard !localAlbumID.isEmpty, !source.localID.isEmpty, let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
+              Set(assets.map(\.assetID)).count == assets.count, Set(assets.map(\.role)).count == assets.count,
+              confirmedAssetIDs.isSubset(of: Set(assets.map(\.assetID))), phase != .confirmed || confirmedAssetIDs.count == assets.count
+        else { throw PhotoBackupStateError.invalidJournal }
+        if source.kind == .rawJPEG {
+            guard let pair = source.rawJPEG, assets.count == 2, Set(assets.map(\.role)) == [.raw, .jpeg], Set(assets.map(\.checksum)).count == 2 else {
+                throw PhotoBackupStateError.invalidJournal
+            }
+            try pair.validate()
+            guard Set(assets.map(\.proof)).count == 1,
+                  assets.allSatisfy({ $0.proof == .originalReceipt || $0.proof == .rawJPEGChecksum && $0.revision != nil })
+            else { throw PhotoBackupStateError.invalidJournal }
+        } else {
+            guard source.rawJPEG == nil, assets.count == 1, assets.first?.role == .primary,
+                  assets.first?.proof != .rawJPEGChecksum else { throw PhotoBackupStateError.invalidJournal }
+        }
+        for asset in assets {
+            guard let bytes = Data(base64Encoded: asset.checksum), bytes.count == 20, bytes.base64EncodedString() == asset.checksum,
+                  asset.revision.map(\.timeIntervalSince1970.isFinite) ?? true,
+                  asset.proof == .originalReceipt || asset.revision != nil
+            else { throw PhotoBackupStateError.invalidJournal }
+        }
+    }
+
+    /// 新RAW独立双hash或普通完整上传SHA1证明仅能写入v3；旧reader必须先拒绝新辅助头，不能忽略证明后覆盖。
+    var requiresVersion3: Bool {
+        assets.contains { $0.proof == .rawJPEGChecksum || source.kind != .rawJPEG && $0.proof == .originalReceipt }
+    }
+}
+
+/// 相簿组织账本与上传日志分离；映射头和逐组行仍存同一账号SQLite，未知格式不能覆盖恢复资料。
+nonisolated struct PhotoBackupAlbumSyncState: Sendable {
+    static let currentVersion = 3
+    /// 轻量头保存版本、账号、明确映射/创建与自动意愿；逐组操作历史另行持久化。
+    nonisolated struct Header: Codable, Sendable {
+        let version: Int
+        let namespace: String
+        let mappings: [PhotoBackupAlbumMapping]
+        let creations: [PhotoBackupAlbumCreation]?
+        let automaticEnabled: Bool?
+    }
+
+    var version: Int
+    let namespace: String
+    var mappings: [PhotoBackupAlbumMapping]
+    var operations: [PhotoBackupAlbumSyncOperation]
+    var creations: [PhotoBackupAlbumCreation]
+    var automaticEnabled: Bool
+
+    /// namespace固定账号；读v1/v2保留实际版本，v3新增双hash证明和默认关闭的自动组织意愿。
+    init(namespace: String, mappings: [PhotoBackupAlbumMapping] = [], operations: [PhotoBackupAlbumSyncOperation] = [], version: Int = 1,
+         creations: [PhotoBackupAlbumCreation] = [], automaticEnabled: Bool = false)
+    {
+        self.namespace = namespace; self.mappings = mappings; self.operations = operations; self.version = version; self.creations = creations
+        self.automaticEnabled = automaticEnabled
+    }
+
+    /// 小型映射头不含操作历史，用于热更新前检查未来版本/账号。
+    var header: Header {
+        .init(version: version, namespace: namespace, mappings: mappings, creations: version == 1 ? nil : creations,
+              automaticEnabled: version >= 3 ? automaticEnabled : nil)
+    }
+
+    /// expected来自当前认证scope；操作历史允许保留旧映射，但ID、版本、角色和回执必须始终完整。
+    func validate(namespace expected: String) throws {
+        guard (1 ... Self.currentVersion).contains(version), version != 1 || creations.isEmpty,
+              version >= 3 || !automaticEnabled, namespace == expected, mappings.allSatisfy({ !$0.localAlbumID.isEmpty }),
+              Set(mappings.map(\.localAlbumID)).count == mappings.count, Set(operations.map(\.id)).count == operations.count,
+              Set(creations.map(\.id)).count == creations.count,
+              Set(creations.filter(\.unresolved).map(\.localAlbumID)).count == creations.filter(\.unresolved).count else { throw PhotoBackupStateError.invalidJournal }
+        for operation in operations {
+            try operation.validate()
+            guard version >= 3 || !operation.requiresVersion3 else { throw PhotoBackupStateError.invalidJournal }
+        }
+        for intent in creations {
+            try intent.validate()
+        }
+    }
+}

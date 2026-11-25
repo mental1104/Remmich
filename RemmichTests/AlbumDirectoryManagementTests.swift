@@ -50,7 +50,8 @@ struct AlbumDirectoryManagementTests {
             nextState = #"{"categories":[{"id":"\#(directoryCategoryID)","name":"Travel"}],"groups":[]}"#
             nextAlbums = directoryAlbums.replacingOccurrences(of: #""North""#, with: response)
         }
-        let fixture = DirectoryFixture(exchanges: directoryReads() + [write] + directoryReads(state: nextState, albums: nextAlbums))
+        let preflight = kind == "move" || kind == "clear" ? [directoryAlbumPreflight()] : []
+        let fixture = DirectoryFixture(exchanges: directoryReads() + preflight + [write] + directoryReads(state: nextState, albums: nextAlbums))
         defer { fixture.close() }
         let store = AlbumDirectoryManagementStore()
         try await loadDirectory(store, fixture: fixture)
@@ -60,9 +61,9 @@ struct AlbumDirectoryManagementTests {
         #expect(store.hasFreshData && !store.isWorking && store.error == nil && store.notice != nil)
         #expect(fixture.manager.revision == 1 && !fixture.manager.busy)
         let requests = await fixture.script.requests()
-        try #require(requests.count == 5)
-        try assertDirectoryBody(requests[2], expected: body)
-        #expect(requests.map(\.method) == ["GET", "GET", write.method, "GET", "GET"])
+        try #require(requests.count == 5 + preflight.count)
+        try assertDirectoryBody(requests[2 + preflight.count], expected: body)
+        #expect(requests.map(\.method) == ["GET", "GET"] + preflight.map(\.method) + [write.method, "GET", "GET"])
         let directory = try #require(store.directory)
         if kind == "delete" || kind == "default" {
             #expect(directory.categoryID(for: "North") == nil)
@@ -82,7 +83,7 @@ struct AlbumDirectoryManagementTests {
         }
         #expect(directory.albums.count == 2)
         #expect(store.start(plan, manager: fixture.manager) == nil)
-        #expect(await fixture.script.requests().count == 5)
+        #expect(await fixture.script.requests().count == 5 + preflight.count)
     }
 
     /// status含错成功码与权限/冲突/限流/服务异常；失败后不自动重放或伪装成功，明确重载才恢复。
@@ -125,7 +126,8 @@ struct AlbumDirectoryManagementTests {
             command = .moveAlbum(id: directoryAlbumID, groupName: "South"); method = "PATCH"; path = "albums/\(directoryAlbumID)"
             json = #"{"id":"\#(directoryAlbumID)","albumName":"Owned album","ownerId":"owner","customGroupName":"South"}"#
         }
-        let fixture = DirectoryFixture(exchanges: directoryReads() + [
+        let preflight = kind == "move" ? [directoryAlbumPreflight()] : []
+        let fixture = DirectoryFixture(exchanges: directoryReads() + preflight + [
             .init(method: method, path: path, status: status == "forbidden" ? 403 : kind == "move" ? 201 : 200, json: json),
         ])
         defer { fixture.close() }
@@ -135,7 +137,7 @@ struct AlbumDirectoryManagementTests {
         await operation.value
         #expect(!store.hasFreshData && !store.isUnsupported && store.notice == nil && store.error != nil)
         #expect(fixture.manager.revision == (status == "forbidden" ? 0 : 1))
-        #expect(await fixture.script.requests().count == 3)
+        #expect(await fixture.script.requests().count == 3 + preflight.count)
     }
 
     /// 用户取消已经发送的写入时，未知结果必须显式核对；取消不生成新的自动GET或重发命令。
@@ -224,7 +226,8 @@ struct AlbumDirectoryManagementTests {
         case "missing-group": #"{"id":"\#(directoryAlbumID)","albumName":"Owned album","ownerId":"owner"}"#
         default: #"{"id":"\#(directoryAlbumID)","albumName":"Owned album","ownerId":"owner","customGroupName":"North"}"#
         }
-        let fixture = DirectoryFixture(exchanges: directoryReads() + [
+        let preflight = isGroup ? [directoryAlbumPreflight()] : []
+        let fixture = DirectoryFixture(exchanges: directoryReads() + preflight + [
             .init(method: "PATCH", path: isGroup ? "albums/\(directoryAlbumID)" : "fork/album-categories/\(directoryCategoryID)", status: 200, json: json),
         ])
         defer { fixture.close() }
@@ -234,7 +237,7 @@ struct AlbumDirectoryManagementTests {
         await operation.value
         #expect(!store.hasFreshData && store.notice == nil && store.error != nil)
         #expect(fixture.manager.revision == 1)
-        #expect(await fixture.script.requests().count == 3)
+        #expect(await fixture.script.requests().count == 3 + preflight.count)
     }
 
     /// scenario以真实在途GET/PATCH触发账号或端点变更；旧任务不能覆盖新快照或增加新上下文revision。
@@ -281,6 +284,12 @@ private nonisolated let directoryAlbumID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 private nonisolated let directorySharedID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 private nonisolated let directoryState = #"{"categories":[{"id":"\#(directoryCategoryID)","name":"Travel"}],"groups":[{"groupName":"North","categoryId":"\#(directoryCategoryID)"}]}"#
 private nonisolated let directoryAlbums = #"[{"id":"\#(directoryAlbumID)","albumName":"Owned album","ownerId":"owner","customGroupName":"North"},{"id":"\#(directorySharedID)","albumName":"Shared album","ownerId":"someone-else","customGroupName":null}]"#
+
+/// 仅相簿属性写新增fresh角色预检；明确旧owner响应保留旧夹具，其余个人目录动作不新增权限GET。
+private nonisolated func directoryAlbumPreflight() -> DirectoryExchange {
+    .init(method: "GET", path: "albums/\(directoryAlbumID)", status: 200,
+          json: #"{"id":"\#(directoryAlbumID)","albumName":"Owned album","ownerId":"owner","customGroupName":"North"}"#)
+}
 
 /// state/albums是独立声明的固定JSON；返回真实顺序的两个GET交换，写后调用也必须消耗新响应。
 private nonisolated func directoryReads(state: String = directoryState, albums: String = directoryAlbums) -> [DirectoryExchange] {

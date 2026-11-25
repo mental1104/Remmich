@@ -280,16 +280,18 @@ public actor ImmichClient {
         } catch { throw Self.map(error) }
     }
 
+    /// response为官方完整相簿DTO；首owner展示投影保持兼容，所有明确owner身份另存供本人相簿筛选。
     private static func album(from response: Components.Schemas.AlbumResponseDto) throws -> ImmichAlbum {
         guard !response.id.isEmpty, response.assetCount >= 0 else { throw ImmichAPIError.invalidResponse }
-        let owner = response.albumUsers.first { $0.role == .owner }?.user
+        let owners = response.albumUsers.filter { $0.role == .owner }.map(\.user)
+        let owner = owners.first
         return ImmichAlbum(id: response.id, name: response.albumName, description: response.description,
                            thumbnailAssetID: response.albumThumbnailAssetId, assetCount: response.assetCount,
                            updatedAt: response.updatedAt, createdAt: response.createdAt,
                            startDate: response.startDate, endDate: response.endDate,
                            lastModifiedAssetTimestamp: response.lastModifiedAssetTimestamp,
                            isShared: response.shared || response.hasSharedLink,
-                           ownerName: owner?.name, ownerID: owner?.id)
+                           ownerName: owner?.name, ownerID: owner?.id, ownerIDs: owners.map(\.id))
     }
 
     public func timelineBuckets(
@@ -774,6 +776,72 @@ public actor ImmichClient {
                 }, hasNextPage: result.hasNextPage ?? (page <= result.total / size && page * size < result.total))
             case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
             }
+        } catch { throw Self.map(error) }
+    }
+
+    /// 官方stack列表是无分页数组；调用方使用前台读取client，不复用持久索引GET。
+    public func managementStacks() async throws -> [ImmichNativeStack] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().searchStacks(.init())
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response): return try response.body.json.map(Self.nativeStack)
+            case let .undocumented(code, _): throw Self.map(status: code)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// id为官方stack UUID；返回真实当前成员，未知ID的权限失败保持原样，不能等同于已删除证明。
+    public func managementStack(_ id: String) async throws -> ImmichNativeStack {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard UUID(uuidString: id) != nil else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().getStack(.init(path: .init(id: id)))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response): return try Self.nativeStack(response.body.json)
+            case let .undocumented(code, _): throw Self.map(status: code)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// response由官方生成DTO解码；成员映射复用原始图片/视频显示元数据，不伪造完整隐藏成员数。
+    private static func nativeStack(_ response: Components.Schemas.StackResponseDto) -> ImmichNativeStack {
+        .init(id: response.id, primaryAssetID: response.primaryAssetId, assets: response.assets.map(timelineAsset))
+    }
+
+    /// assetIDs为一个完整已加载桶的至多5000个唯一UUID；空值不作ready探针，调用前失败而不发送HTTP。
+    /// 返回服务端证据标志与原始组；严格成员范围由领域validator再次检查，错误不伪装成空分组。
+    public func sceneStackGroups(assetIDs: [String]) async throws -> ImmichSceneStackReply {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 5000).contains(assetIDs.count), assetIDs.allSatisfy({ UUID(uuidString: $0) != nil }),
+              Set(assetIDs.map { $0.lowercased() }).count == assetIDs.count else { throw ImmichAPIError.invalidResponse }
+        // 仅编码公开合同的ids字段，不附加账号、路径或服务端扫描配置。
+        struct Body: Encodable { let ids: [String] }
+        let data = try JSONEncoder().encode(Body(ids: assetIDs.map { $0.lowercased() }))
+        let operationID = "forkSceneStacksQuery"
+        let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/scene-stacks/query",
+                                  headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])
+        let network = forkSmartTransport
+        do {
+            try Task.checkCancellation()
+            let (response, body) = try await AuthenticationMiddleware(credential: credential).intercept(
+                request, body: HTTPBody(data, length: .known(Int64(data.count)), iterationBehavior: .multiple),
+                baseURL: apiURL, operationID: operationID
+            ) { request, body, baseURL in
+                try await network.send(request, body: body, baseURL: baseURL, operationID: operationID)
+            }
+            try Task.checkCancellation()
+            guard response.status.code == 201 else { throw Self.map(status: response.status.code) }
+            guard let body else { throw ImmichAPIError.invalidResponse }
+            let bytes = try await Data(collecting: body, upTo: 4 * 1024 * 1024)
+            let result = try JSONDecoder().decode(ImmichSceneStackReply.self, from: bytes)
+            try Task.checkCancellation()
+            guard result.available || result.groups.isEmpty else { throw ImmichAPIError.invalidResponse }
+            return result
         } catch { throw Self.map(error) }
     }
 

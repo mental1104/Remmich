@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// 热循环只读一项/写一项；扫描及界面冷快照不进入这个接口，避免每个检查点遍历完整历史。
@@ -61,58 +62,63 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                     let resources = try await exporter.export(job.source, allowCloud: allowCloud)
                     defer { try? FileManager.default.removeItem(at: resources.directory) }
                     try checkContext(validateContext)
-                    guard (job.source.kind == .livePhoto) == (resources.motion != nil) else {
+                    guard (job.source.kind == .livePhoto) == (resources.motion != nil), (job.source.kind == .rawJPEG) == (resources.jpeg != nil) else {
                         throw PhotoBackupExportError(reason: .unsupportedResources)
                     }
                     try job.exported()
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
-                    if let motion = resources.motion {
-                        let receipt = try await client.upload(file: motion.file, filename: motion.name, created: resources.created,
-                                                              modified: resources.modified, favorite: false, hidden: true, livePhotoVideoID: nil)
+                    if job.source.kind == .rawJPEG {
+                        try await uploadImages(&job, resources: resources, scope: scope, userID: userID, client: client, validateContext: validateContext)
+                    } else {
+                        if let motion = resources.motion {
+                            let receipt = try await client.upload(file: motion.file, filename: motion.name, created: resources.created,
+                                                                  modified: resources.modified, favorite: false, hidden: true, livePhotoVideoID: nil)
+                            try checkContext(validateContext)
+                            guard let id = UUID(uuidString: receipt.id), ["created", "duplicate"].contains(receipt.status) else {
+                                throw LibraryWriteError.malformedResponse
+                            }
+                            try job.recordMotion(id)
+                            try await checkpoint(job, scope: scope, validateContext: validateContext)
+                        }
+                        let primary = try await client.upload(file: resources.primary.file, filename: resources.primary.name,
+                                                              created: resources.created, modified: resources.modified, favorite: resources.favorite,
+                                                              hidden: false, livePhotoVideoID: job.motionAssetID?.uuidString)
                         try checkContext(validateContext)
-                        guard let id = UUID(uuidString: receipt.id), ["created", "duplicate"].contains(receipt.status) else {
+                        guard let primaryID = UUID(uuidString: primary.id), ["created", "duplicate"].contains(primary.status) else {
                             throw LibraryWriteError.malformedResponse
                         }
-                        try job.recordMotion(id)
+                        try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate", checksum: primary.checksum)
                         try await checkpoint(job, scope: scope, validateContext: validateContext)
-                    }
-                    let primary = try await client.upload(file: resources.primary.file, filename: resources.primary.name,
-                                                          created: resources.created, modified: resources.modified, favorite: resources.favorite,
-                                                          hidden: false, livePhotoVideoID: job.motionAssetID?.uuidString)
-                    try checkContext(validateContext)
-                    guard let primaryID = UUID(uuidString: primary.id), ["created", "duplicate"].contains(primary.status) else {
-                        throw LibraryWriteError.malformedResponse
-                    }
-                    try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate")
-                    try await checkpoint(job, scope: scope, validateContext: validateContext)
-                    // created与duplicate都回读真实主体；部分Live Photo回执永远不能替代最终配对核对。
-                    let confirmed = try await client.asset(primaryID.uuidString)
-                    try checkContext(validateContext)
-                    guard UUID(uuidString: confirmed.id) == primaryID, confirmed.ownerId == userID, !confirmed.isTrashed,
-                          confirmed.type == (job.source.kind == .video ? "VIDEO" : "IMAGE")
-                    else {
-                        throw LibraryWriteError.malformedResponse
-                    }
-                    if job.source.kind == .livePhoto {
-                        guard let motionID = job.motionAssetID,
-                              confirmed.livePhotoVideoId.flatMap(UUID.init(uuidString:)) == motionID
-                        else {
-                            throw PhotoBackupExportError(reason: .livePhotoMismatch)
-                        }
-                        // 主体关联不代表动态资源当前仍可用；完成前独立fresh回读，保留verifying检查点。
-                        let motion = try await client.asset(motionID.uuidString)
+                        // created与duplicate都回读真实主体；部分Live Photo回执永远不能替代最终配对核对。
+                        let confirmed = try await client.asset(primaryID.uuidString)
                         try checkContext(validateContext)
-                        guard UUID(uuidString: motion.id) == motionID, motion.ownerId == userID,
-                              motion.type == "VIDEO", !motion.isTrashed
+                        guard UUID(uuidString: confirmed.id) == primaryID, confirmed.ownerId == userID, !confirmed.isTrashed,
+                              confirmed.type == (job.source.kind == .video ? "VIDEO" : "IMAGE")
                         else {
                             throw LibraryWriteError.malformedResponse
                         }
-                        // 既有动态视频可能归档，不强制hidden；两次读取之间仍没有服务端CAS/原子快照。
+                        if job.source.kind == .livePhoto {
+                            guard let motionID = job.motionAssetID,
+                                  confirmed.livePhotoVideoId.flatMap(UUID.init(uuidString:)) == motionID
+                            else {
+                                throw PhotoBackupExportError(reason: .livePhotoMismatch)
+                            }
+                            // 主体关联不代表动态资源当前仍可用；完成前独立fresh回读，保留verifying检查点。
+                            let motion = try await client.asset(motionID.uuidString)
+                            try checkContext(validateContext)
+                            guard UUID(uuidString: motion.id) == motionID, motion.ownerId == userID,
+                                  motion.type == "VIDEO", !motion.isTrashed
+                            else {
+                                throw LibraryWriteError.malformedResponse
+                            }
+                            // 既有动态视频可能归档，不强制hidden；两次读取之间仍没有服务端CAS/原子快照。
+                        }
+                        try job.confirmVerifiedReceipt()
                     }
-                    try job.confirmVerifiedReceipt()
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
                     result.completed += 1
-                    if job.primaryWasDuplicate {
+                    let duplicate = job.source.kind == .rawJPEG ? job.rawReceipt?.duplicate == true && job.jpegReceipt?.duplicate == true : job.primaryWasDuplicate
+                    if duplicate {
                         result.duplicates += 1
                     }
                     progress(job, result)
@@ -145,6 +151,64 @@ nonisolated struct PhotoBackupRunResult: Sendable {
         }
     }
 
+    /// RAW/JPEG每份都经完整字节摘要、现有upload内查重及独立fresh确认后落盘；旧UUID绝不跳过当前尝试。
+    /// resources来自完整导出，scope/userID/context固定；第二份失败保留第一份回执，不删除远端或自动重发。
+    private func uploadImages(_ job: inout PhotoBackupJob, resources: PhotoBackupResources, scope: MediaAccountScope,
+                              userID: String, client: any PhotoBackupUploading, validateContext: @MainActor () throws -> Void) async throws
+    {
+        guard let pair = job.source.rawJPEG, let jpeg = resources.jpeg, resources.motion == nil,
+              resources.primary.name == pair.raw.originalFilename, jpeg.name == pair.jpeg.originalFilename
+        else {
+            throw PhotoBackupExportError(reason: .unsupportedResources)
+        }
+        for (role, file) in [(PhotoBackupImageRole.raw, resources.primary), (.jpeg, jpeg)] {
+            try checkContext(validateContext)
+            let checksum = try await Self.originalChecksum(file.file)
+            try checkContext(validateContext)
+            let uploaded = try await client.upload(file: file.file, filename: file.name, created: resources.created,
+                                                   modified: resources.modified, favorite: resources.favorite, hidden: false, livePhotoVideoID: nil)
+            try checkContext(validateContext)
+            guard let id = UUID(uuidString: uploaded.id), ["created", "duplicate"].contains(uploaded.status) else {
+                throw LibraryWriteError.malformedResponse
+            }
+            let receipt = PhotoBackupImageReceipt(assetID: id, checksum: checksum, duplicate: uploaded.status == "duplicate")
+            let asset = try await client.asset(id.uuidString)
+            try checkContext(validateContext)
+            try Self.verifyImage(asset, receipt: receipt, userID: userID)
+            try job.recordImage(receipt, role: role)
+            try await checkpoint(job, scope: scope, validateContext: validateContext)
+        }
+        try job.imagesUploaded()
+        try await checkpoint(job, scope: scope, validateContext: validateContext)
+        // 第一份确认后仍可能被回收/删除；整组完成前再分别fresh读取，不能把先前部分确认当成最终快照。
+        guard let raw = job.rawReceipt, let jpeg = job.jpegReceipt else { throw LibraryWriteError.malformedResponse }
+        for receipt in [raw, jpeg] {
+            let asset = try await client.asset(receipt.assetID.uuidString)
+            try checkContext(validateContext)
+            try Self.verifyImage(asset, receipt: receipt, userID: userID)
+        }
+        try job.confirmVerifiedImages()
+    }
+
+    /// 独立fresh资产必须精确对应实际文件SHA1、账号及IMAGE身份且明确在线；缺checksum/isOffline也不能确认。
+    private static func verifyImage(_ asset: ManagedAsset, receipt: PhotoBackupImageReceipt, userID: String) throws {
+        guard UUID(uuidString: asset.id) == receipt.assetID, asset.ownerId == userID, asset.type == "IMAGE", !asset.isTrashed,
+              asset.checksum == receipt.checksum, asset.isOffline == false else { throw LibraryWriteError.malformedResponse }
+    }
+
+    /// 从完整私有临时文件流式SHA1，不占主Actor、不接受空文件；当前Task取消在每块读取前传播。
+    @concurrent private static func originalChecksum(_ file: URL) async throws -> String {
+        var hash = Insecure.SHA1(); var count: Int64 = 0
+        let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
+        while true {
+            try Task.checkCancellation()
+            guard let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty else { break }
+            hash.update(data: data); count += Int64(data.count)
+        }
+        guard count > 0 else { throw PhotoBackupExportError(reason: .unsupportedResources) }
+        return Data(hash.finalize()).base64EncodedString()
+    }
+
     /// job为当前唯一执行项；存储失败必须逃出循环，不能继续上传或用失败状态覆盖未知持久结果。
     private func checkpoint(_ job: PhotoBackupJob, scope: MediaAccountScope, validateContext: @MainActor () throws -> Void) async throws {
         try checkContext(validateContext)
@@ -164,8 +228,16 @@ nonisolated struct PhotoBackupRunResult: Sendable {
         if let error = error as? PhotoBackupExportError {
             return error.reason
         }
-        if error is URLError {
-            return .network
+        if let error = error as? URLError {
+            // 只有短暂连接失败可进入独立同意的网络重核；超时也可能已提交，仍须完整查重，绝不直接重POST。
+            switch error.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet:
+                return .network
+            case .userAuthenticationRequired, .userCancelledAuthentication, .clientCertificateRejected, .clientCertificateRequired:
+                return .permission
+            default:
+                return .unconfirmedResponse
+            }
         }
         if let error = error as? LibraryWriteError {
             switch error {

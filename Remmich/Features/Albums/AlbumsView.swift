@@ -49,6 +49,7 @@ private struct AlbumScopeCaptureKey: Equatable {
     let viewport: CGSize
 }
 
+/// 原生相簿总览保留卡片转场/搜索/scope状态，标题栏按当前窗口与字号适配，不更改相簿业务或服务器契约。
 struct AlbumsView: View {
     private struct LoadRequest: Equatable {
         let endpoint: URL?
@@ -58,6 +59,7 @@ struct AlbumsView: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .body) private var headerTextHeight: CGFloat = 24
+    @ScaledMetric(relativeTo: .subheadline) private var scopeFontSize: CGFloat = 13
     let source: any AlbumReading & TimelineReading
     let media: MediaLibraryController
     let assetDetails: any AssetDetailReading
@@ -149,12 +151,25 @@ struct AlbumsView: View {
         isSearchExpanded && listVisible && navigationPath.isEmpty && tabSelectionState.canActivateContent(in: .albums)
     }
 
-    private var topClearance: CGFloat {
-        windowTopInset + headerRowHeight + 16
+    /// metrics提供当前窗口实际内容宽度；标题分行后的高度同时进入内容、滚动指示和原有锚定计算。
+    private func topClearance(for metrics: AlbumReflowMetrics) -> CGFloat {
+        headerLayout(for: metrics).contentTopClearance(windowTopInset: windowTopInset)
     }
 
+    /// 控件行至少44点，并为当前文字行保留完整高度；不把动态字号塞回固定44高的UIKit分段框。
     private var headerRowHeight: CGFloat {
-        max(headerControlSize, headerTextHeight + 12)
+        AlbumOverviewHeaderLayout.controlRowHeight(fontSize: scopeFontSize, textHeight: headerTextHeight)
+    }
+
+    /// 只按窗口与当前字号生成几何，不缓存旧宽度或改变搜索/排序/相簿卡片的身份。
+    private func headerLayout(for metrics: AlbumReflowMetrics) -> AlbumOverviewHeaderLayout {
+        .init(availableWidth: metrics.width, fontSize: scopeFontSize, textHeight: headerTextHeight, searchExpanded: isSearchExpanded)
+    }
+
+    /// 快捷键只属于可交互的相簿根页；保留的旧导航树、其他tab、查看器或管理sheet不能响应后方命令。
+    private var headerInteractionsEnabled: Bool {
+        listVisible && navigationPath.isEmpty && !showsAlbumManagement && viewerPresentations.activeID == nil
+            && scenePhase == .active && tabSelectionState.canActivateContent(in: .albums) && !scopeSlide.isActive
     }
 
     var body: some View {
@@ -231,8 +246,11 @@ struct AlbumsView: View {
         .nativeEdgeBackAction(active: canDismissSearchBySwipe, animatesContent: false, action: dismissSearchBySwipe)
     }
 
+    /// availableWidth为含横向安全区的窗口点宽，viewportHeight为可见窗口点高，labelHeight为当前字号实测卡片标题高度。
+    /// 返回原有稳定相簿树；标题栏总高度同时用于内容留白、滚动指示和重排可用视口，查询/转场仍由原状态控制。
     private func albumContent(availableWidth: CGFloat, viewportHeight: CGFloat, labelHeight: CGFloat) -> some View {
         let metrics = AlbumReflowMetrics.overview(availableWidth: availableWidth, labelHeight: labelHeight)
+        let clearance = topClearance(for: metrics)
         let request = reorderGeneration
         let albums = filtered
         let openingHeight = metrics.height(count: albums.count, list: showsList)
@@ -287,7 +305,7 @@ struct AlbumsView: View {
                 .padding(.vertical)
                 // Count header clearance in the scroll extent from the first
                 // layout, so attachment cannot rebase the bottom offset.
-                .padding(.top, topClearance)
+                .padding(.top, clearance)
                 .onGeometryChange(for: AlbumScopeContentGeometry.self) { [scopeName = contentScope.rawValue] geometry in
                     AlbumScopeContentGeometry(scope: scopeName, height: geometry.size.height)
                 } action: { scopeSlide.contentChanged($0) }
@@ -298,7 +316,7 @@ struct AlbumsView: View {
             }
             .ignoresSafeArea(.container, edges: .horizontal)
             .scrollDisabled(pinchInteraction.isActive)
-            .contentMargins(.top, topClearance, for: .scrollIndicators)
+            .contentMargins(.top, clearance, for: .scrollIndicators)
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.bottom, for: .alignment)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
@@ -343,7 +361,7 @@ struct AlbumsView: View {
                 }
                 // Reflow gestures still use the viewport below the
                 // header, even though the reserved space is now in the content.
-                reflowViewport.visibleHeight = max(0, new.viewportHeight - topClearance)
+                reflowViewport.visibleHeight = max(0, new.viewportHeight - clearance)
             }
             .refreshable { await store.load(fresh: true) }
             .onChange(of: contentScope) {
@@ -357,6 +375,12 @@ struct AlbumsView: View {
             }
             .onChange(of: Set(albums.map(\.id))) { _, _ in cancelAlbumReflow() }
             .onChange(of: metrics) { _, _ in
+                cancelAlbumReflow()
+                scopeSlide.cancel(clearCache: true)
+            }
+            .onChange(of: clearance) { _, new in
+                // 字号或分行高度可独立于窗口尺寸变化；立即更新可用视口，避免下一次手势仍沿用旧标题高度。
+                reflowViewport.visibleHeight = max(0, reflowViewport.frame.height - new)
                 cancelAlbumReflow()
                 scopeSlide.cancel(clearCache: true)
             }
@@ -403,30 +427,16 @@ struct AlbumsView: View {
         }
     }
 
+    /// metrics固定当前窗口宽度；用同一控件树切换单/双行位置，防止大字号被固定44高的分段框裁切。
     private func albumHeader(metrics: AlbumReflowMetrics) -> some View {
-        let spacing: CGFloat = 12
-        return GeometryReader { geometry in
-            let searchWidth = isSearchExpanded ? max(headerControlSize, geometry.size.width - headerControlSize - spacing) : headerControlSize
-            ZStack(alignment: .leading) {
-                AlbumScopeControl(selection: Binding(get: { scope }, set: selectAlbumScope))
-                    .frame(height: headerControlSize)
-                    .padding(.horizontal, headerControlSize + spacing)
-                    .opacity(isSearchExpanded ? 0 : 1)
-                    .allowsHitTesting(!isSearchExpanded && !scopeSlide.isActive)
-                    .accessibilityHidden(isSearchExpanded)
-
-                HStack(spacing: 0) {
-                    searchControl(width: searchWidth)
-                    Spacer(minLength: spacing)
-                    albumOptions(metrics: metrics)
-                }
-                .allowsHitTesting(!scopeSlide.isActive)
-            }
+        let layout = headerLayout(for: metrics)
+        return AlbumOverviewHeader(layout: layout, scope: Binding(get: { scope }, set: selectAlbumScope), fontSize: scopeFontSize) {
+            searchControl(width: layout.searchFrame.width)
+        } options: {
+            albumOptions(metrics: metrics)
         }
-        .frame(height: headerRowHeight)
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .padding(.top, windowTopInset)
+        .disabled(!headerInteractionsEnabled)
+        .modifier(AlbumOverviewHeaderInsets(windowTopInset: windowTopInset))
         .background {
             ZStack {
                 TimelineMemoryGradientBackdrop(visible: true, extended: true, reduceMotion: reduceMotion)
@@ -441,24 +451,21 @@ struct AlbumsView: View {
         .ignoresSafeArea(.container, edges: .horizontal)
     }
 
+    /// width为当前标题栏分配的搜索宽度；Cmd-F始终打开/聚焦，展开后的独立关闭按钮支持Escape。
     private func searchControl(width: CGFloat) -> some View {
         let focusRequest = searchFocusRequest
         return HStack(spacing: 0) {
-            Button {
-                if isSearchExpanded {
-                    dismissSearch()
-                } else {
-                    expandSearch()
-                }
-            } label: {
-                Image(systemName: isSearchExpanded ? "xmark" : "magnifyingglass")
-                    .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
-                    .frame(width: headerControlSize, height: headerControlSize)
+            Button { focusAlbumSearch() } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 20))
+                    .frame(width: headerControlSize, height: headerRowHeight)
                     .contentShape(.circle)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Text(isSearchExpanded ? "Close Search" : "Search Albums"))
-            .accessibilityIdentifier(isSearchExpanded ? "albums-search-close-button" : "albums-search-button")
+            .keyboardShortcut("f", modifiers: .command)
+            .hoverEffect(.highlight)
+            .accessibilityLabel("Search Albums")
+            .accessibilityIdentifier("albums-search-button")
 
             if isSearchExpanded {
                 TextField("Search Albums", text: $query)
@@ -467,20 +474,27 @@ struct AlbumsView: View {
                     .autocorrectionDisabled()
                     .submitLabel(.search)
                     .accessibilityIdentifier("albums-search")
-                    .padding(.trailing, 16)
                     .transition(.opacity)
                     .task(id: focusRequest) {
                         guard let focusRequest, searchFocusRequest == focusRequest, canDismissSearchBySwipe, !Task.isCancelled else { return }
                         searchFocusRequest = nil
                         searchFocused = true
                     }
+                Button { dismissSearch() } label: {
+                    Image(systemName: "xmark").font(.system(size: 20))
+                        .frame(width: headerControlSize, height: headerRowHeight).contentShape(.circle)
+                }
+                .buttonStyle(.plain).keyboardShortcut(.cancelAction).hoverEffect(.highlight)
+                .accessibilityLabel("Close Search")
+                .accessibilityIdentifier("albums-search-close-button")
             }
         }
-        .frame(width: width, height: isSearchExpanded ? headerRowHeight : headerControlSize, alignment: .leading)
+        .frame(width: width, height: headerRowHeight, alignment: .leading)
         .clipped()
         .glassEffect(.regular.interactive(), in: .capsule)
     }
 
+    /// metrics沿用原排序/列表切换参数；只适配菜单命中区域和指针反馈，保留全部现有操作。
     private func albumOptions(metrics: AlbumReflowMetrics) -> some View {
         Menu {
             if media.management.client != nil {
@@ -516,11 +530,22 @@ struct AlbumsView: View {
             Divider()
             Toggle("List View", isOn: Binding(get: { showsList }, set: { updateAlbumLayout(sort: sort, direction: sortDirection, list: $0, metrics: metrics) }))
         } label: {
-            Image(systemName: "arrow.up.arrow.down").frame(width: headerControlSize, height: headerControlSize)
+            Image(systemName: "arrow.up.arrow.down").font(.system(size: 20)).frame(width: headerControlSize, height: headerRowHeight)
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .circle)
+        .hoverEffect(.highlight)
         .accessibilityLabel("Album Options")
+    }
+
+    /// 对当前可交互相簿根页打开或聚焦搜索；重复Cmd-F保留查询，不把快捷键当作关闭按钮。
+    private func focusAlbumSearch() {
+        guard headerInteractionsEnabled else { return }
+        if isSearchExpanded {
+            searchFocused = true
+        } else {
+            expandSearch()
+        }
     }
 
     private func expandSearch() {
@@ -547,6 +572,8 @@ struct AlbumsView: View {
         dismissSearch()
     }
 
+    /// album为真实相簿，compact/progress为原卡片向列表的布局端点/进度，metrics为当前窗口几何；proxy执行原滚动锚定。
+    /// generation拒绝旧重排回调，initiallyMounted保留原首次挂载策略；返回稳定按钮，锚点只改用当前完整标题栏高度。
     private func albumLink(_ album: AlbumSummary, compact: Bool, progress: CGFloat, metrics: AlbumReflowMetrics,
                            proxy: ScrollViewProxy, generation: Int, initiallyMounted: Bool) -> some View
     {
@@ -579,7 +606,7 @@ struct AlbumsView: View {
             guard generation == reorderGeneration else { return }
             reflowViewport.items[album.id] = geometry.frame
             if let anchor = reflowViewport.consumeMotionSample(albumID: album.id, size: geometry.size, generation: generation) {
-                let alignment = anchor.alignment(for: geometry.size.height, topClearance: topClearance)
+                let alignment = anchor.alignment(for: geometry.size.height, topClearance: topClearance(for: metrics))
                 withTransaction(Transaction(animation: nil)) {
                     proxy.scrollTo(anchor.albumID, anchor: UnitPoint(x: 0.5, y: alignment))
                 }
@@ -988,47 +1015,6 @@ private struct AlbumScopeSlideAnchor: UIViewRepresentable {
 
     func updateUIView(_ view: UIView, context _: Context) {
         slide.anchor = view
-    }
-}
-
-private struct AlbumScopeControl: UIViewRepresentable {
-    @Binding var selection: AlbumScope
-
-    func makeUIView(context: Context) -> UISegmentedControl {
-        let control = UISegmentedControl(items: AlbumScope.allCases.map(\.rawValue))
-        control.accessibilityIdentifier = "albums-scope"
-        control.addTarget(context.coordinator, action: #selector(Coordinator.selectionChanged(_:)), for: .valueChanged)
-        return control
-    }
-
-    func updateUIView(_ control: UISegmentedControl, context: Context) {
-        context.coordinator.selection = $selection
-        control.selectedSegmentIndex = AlbumScope.allCases.firstIndex(of: selection) ?? 0
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UISegmentedControl, context _: Context) -> CGSize? {
-        let intrinsic = uiView.intrinsicContentSize
-        return CGSize(width: proposal.width ?? intrinsic.width, height: proposal.height ?? intrinsic.height)
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(selection: $selection)
-    }
-
-    final class Coordinator: NSObject {
-        var selection: Binding<AlbumScope>
-
-        init(selection: Binding<AlbumScope>) {
-            self.selection = selection
-        }
-
-        @objc func selectionChanged(_ control: UISegmentedControl) {
-            let scopes = AlbumScope.allCases
-            guard scopes.indices.contains(control.selectedSegmentIndex) else { return }
-            selection.wrappedValue = scopes[control.selectedSegmentIndex]
-            // The scope can reject another selection while its slide is in flight.
-            control.selectedSegmentIndex = scopes.firstIndex(of: selection.wrappedValue) ?? 0
-        }
     }
 }
 

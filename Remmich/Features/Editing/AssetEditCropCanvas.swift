@@ -6,9 +6,18 @@ struct AssetEditCropCanvas: View {
     let image: UIImage
     let sourceSize: AssetEditPixelSize
     @Binding var crop: AssetEditPixelCrop
+    let focusRequest: Int
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.scenePhase) private var scenePhase
     @State private var dragSession = AssetEditCropDragSession()
-    @State private var pinchStart: AssetEditPixelCrop?
+    @State private var pinchSession = AssetEditCropMagnificationSession()
+    @GestureState private var isPinching = false
     @FocusState private var cropFocused: Bool
+
+    /// image/sourceSize/crop沿用原图像素契约；focusRequest每次明确键盘聚焦意愿递增，缺省0保留旧调用。
+    init(image: UIImage, sourceSize: AssetEditPixelSize, crop: Binding<AssetEditPixelCrop>, focusRequest: Int = 0) {
+        self.image = image; self.sourceSize = sourceSize; _crop = crop; self.focusRequest = focusRequest
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -35,8 +44,11 @@ struct AssetEditCropCanvas: View {
                     .frame(width: selected.width, height: selected.height)
                     .position(x: selected.midX, y: selected.midY)
                     .gesture(moveGesture(in: rect))
-                    .simultaneousGesture(magnificationGesture())
-                    .onTapGesture { cropFocused = true }
+                    .simultaneousGesture(magnificationGesture(in: rect))
+                    .onTapGesture {
+                        guard isEnabled, scenePhase == .active else { return }
+                        cropFocused = true
+                    }
                     .hoverEffect(.highlight)
                     .focusable().focused($cropFocused)
                     .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { keyPress($0) }
@@ -45,7 +57,8 @@ struct AssetEditCropCanvas: View {
                     .accessibilityValue("X \(crop.x)，Y \(crop.y)，宽 \(crop.width)，高 \(crop.height) 像素")
                     .accessibilityHint("上下调整缩放范围，更多操作可按像素移动，或使用精确像素调整。")
                     .accessibilityAdjustableAction { direction in
-                        dragSession.reset(); pinchStart = nil
+                        guard isEnabled, scenePhase == .active else { return }
+                        dragSession.reset(); pinchSession.reset()
                         switch direction {
                         case .increment: crop = crop.magnified(by: 1.05, in: sourceSize)
                         case .decrement: crop = crop.magnified(by: 1 / 1.05, in: sourceSize)
@@ -70,7 +83,19 @@ struct AssetEditCropCanvas: View {
                 }
             }
             .clipped()
-            .onChange(of: geometry.size) { _, _ in dragSession.reset(); pinchStart = nil }
+            // 保留正在捏合的累积倍率锚点，由下一实际事件按新rect重锚，不能再乘整轮倍率。
+            .onChange(of: geometry.size) { _, _ in dragSession.reset() }
+            .onChange(of: focusRequest) { _, _ in
+                // 焦点只属于当前可操作的前台裁剪页；旧请求不抢确认框、后台或账号失效后的焦点。
+                guard isEnabled, scenePhase == .active else { return }
+                cropFocused = true
+            }
+            .onChange(of: isPinching) { _, active in
+                if !active {
+                    pinchSession.reset(); dragSession.reset()
+                }
+            }
+            .onDisappear { pinchSession.reset(); dragSession.reset() }
         }
         .accessibilityIdentifier("asset-editor-crop-canvas")
     }
@@ -100,9 +125,9 @@ struct AssetEditCropCanvas: View {
     private func moveGesture(in imageRect: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                guard imageRect.width > 0, imageRect.height > 0 else { return }
+                guard isEnabled, scenePhase == .active, imageRect.width > 0, imageRect.height > 0 else { return }
                 // 双指捏合期间暂停平移；恢复时重新记录位移起点，避免松开一根手指后跳框。
-                guard pinchStart == nil else { dragSession.reset(); return }
+                guard !pinchSession.isActive, !isPinching else { dragSession.reset(); return }
                 crop = dragSession.updated(crop: crop, translation: value.translation, imageRect: imageRect, source: sourceSize)
             }
             .onEnded { _ in dragSession.reset() }
@@ -112,24 +137,24 @@ struct AssetEditCropCanvas: View {
     private func resizeGesture(corner: AssetEditPixelCrop.Corner, in imageRect: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                guard imageRect.width > 0, imageRect.height > 0 else { return }
-                guard pinchStart == nil else { dragSession.reset(); return }
+                guard isEnabled, scenePhase == .active, imageRect.width > 0, imageRect.height > 0 else { return }
+                guard !pinchSession.isActive, !isPinching else { dragSession.reset(); return }
                 crop = dragSession.updated(crop: crop, translation: value.translation, imageRect: imageRect, source: sourceSize, corner: corner)
             }
             .onEnded { _ in dragSession.reset() }
     }
 
-    /// 捏合倍率只作用于当前草稿区域；不放大下载分辨率，也不改变旋转/镜像状态。
-    private func magnificationGesture() -> some Gesture {
+    /// imageRect为当前真实视口；整轮累计倍率交给同一像素session，换窗后只消费重锚之后的倍率比。
+    /// GestureState在系统取消时同样退休，避免失去onEnded后留下阻止后续单指平移的旧锚点。
+    private func magnificationGesture(in imageRect: CGRect) -> some Gesture {
         MagnificationGesture()
+            .updating($isPinching) { _, active, _ in active = true }
             .onChanged { value in
-                if pinchStart == nil {
-                    pinchStart = crop; dragSession.reset()
-                }
-                guard let pinchStart else { return }
-                crop = pinchStart.magnified(by: Double(value), in: sourceSize)
+                guard isEnabled, scenePhase == .active else { return }
+                dragSession.reset()
+                crop = pinchSession.updated(crop: crop, magnification: Double(value), imageRect: imageRect, source: sourceSize)
             }
-            .onEnded { _ in pinchStart = nil; dragSession.reset() }
+            .onEnded { _ in pinchSession.reset(); dragSession.reset() }
     }
 
     /// corner选择对应选框角；返回Canvas点坐标，角柄本身保持44点可交互区域。
@@ -145,7 +170,7 @@ struct AssetEditCropCanvas: View {
     /// key只在裁剪框取得硬件焦点后进入；Cmd/Control交给其余界面，Shift为10像素，Option调整右下边。
     /// iPad使用onKeyPress，Apple的onMoveCommand当前仅支持macOS/tvOS，不能拿它假装iPad键盘可用。
     private func keyPress(_ key: KeyPress) -> KeyPress.Result {
-        guard !key.modifiers.contains(.command), !key.modifiers.contains(.control) else { return .ignored }
+        guard isEnabled, scenePhase == .active, !key.modifiers.contains(.command), !key.modifiers.contains(.control) else { return .ignored }
         let direction: AssetEditCropKeyboardDirection
         switch key.key {
         case .leftArrow: direction = .left
@@ -154,14 +179,15 @@ struct AssetEditCropCanvas: View {
         case .downArrow: direction = .down
         default: return .ignored
         }
-        dragSession.reset(); pinchStart = nil
+        dragSession.reset(); pinchSession.reset()
         crop = direction.applied(to: crop, in: sourceSize, resizing: key.modifiers.contains(.option), accelerated: key.modifiers.contains(.shift))
         return .handled
     }
 
     /// direction为VoiceOver的一像素移动意图；重设在途手势锚点，避免下一事件覆盖辅助功能调整。
     private func nudge(_ direction: AssetEditCropKeyboardDirection) {
-        dragSession.reset(); pinchStart = nil
+        guard isEnabled, scenePhase == .active else { return }
+        dragSession.reset(); pinchSession.reset()
         crop = direction.applied(to: crop, in: sourceSize, resizing: false, accelerated: false)
     }
 }

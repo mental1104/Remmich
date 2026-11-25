@@ -1,6 +1,14 @@
 import CryptoKit
 import Foundation
 
+/// 仅候选详情GET的精确服务端拒绝可产生此错误；不代表所有400或其他读取/写入失败都是未匹配。
+nonisolated enum LocalMediaCandidateError: Error, Sendable {
+    case inaccessible
+}
+
+/// 单项相簿成员的HTTP回执，尚非组织成功；放在传输边界以保留独立离线契约编译输入。
+nonisolated enum PhotoBackupAlbumMemberReceipt: Sendable { case added, duplicate, denied }
+
 /// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
     case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
@@ -35,6 +43,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let projectionType: String?
     let updatedAt: String?
     let checksum: String?
+    let isOffline: Bool?
 
     /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
@@ -53,10 +62,11 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 
     /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
-    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum/isOffline缺省nil兼容旧构造，存在时仍真实解码。
+    /// isOffline缺失保持未知，新的双原图完整确认不能把nil推断为在线。
     init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
          originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
-         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil, isOffline: Bool? = nil)
     {
         self.id = id
         self.ownerId = ownerId
@@ -70,13 +80,78 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
         self.projectionType = projectionType
         self.updatedAt = updatedAt
         self.checksum = checksum
+        self.isOffline = isOffline
     }
 }
 
+/// 相簿管理的身份与完整权限快照；ownerId保留旧展示投影，任何写许可必须读取独立access。
 nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+    let access: ManagedAlbumAccess
+
+    /// id/albumName/ownerId为既有显式旧版身份，access可提供完整成员；nil仅兼容原明确owner构造。
+    init(id: String, albumName: String, ownerId: String, access: ManagedAlbumAccess? = nil) {
+        self.id = id; self.albumName = albumName; self.ownerId = ownerId
+        self.access = access ?? .init(legacyOwnerID: ownerId)
+    }
+
+    /// 保留原ownerId响应读取；该字段缺失/null时才按当前官方有序albumUsers核对首个owner。
+    /// decoder仅提供本次HTTP响应，不从登录用户、任意成员或界面缓存猜测所有者；不完整的新投影直接失败。
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        albumName = try values.decode(String.self, forKey: .albumName)
+        let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId)
+        // 显式成员即权限权威；畸形旧附加字段仍可保留展示，但不能回退ownerId获取写许可。
+        let members = try? values.decode([ManagedAlbumMember].self, forKey: .albumUsers)
+        access = .init(members: members, hasExplicitMembers: values.contains(.albumUsers), legacyOwnerID: legacyOwner)
+        // 已有ownerId合同原样保留，包括旧响应中不同形状的albumUsers附加信息。
+        if let legacyOwner {
+            ownerId = legacyOwner
+            return
+        }
+        guard let first = members?.first, first.role == "owner", !first.user.id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .albumUsers, in: values,
+                                                   debugDescription: "Album users must begin with the owner.")
+        }
+        ownerId = first.user.id
+    }
+
+    /// 只读取实际管理投影字段；未知响应字段保持原Decodable兼容行为。
+    private enum CodingKeys: String, CodingKey { case id, albumName, ownerId, albumUsers }
+}
+
+/// 组织目标的当前权限投影；复用ManagedAlbum身份解码，只按本人UUID查完整角色，不从成员位置猜权限。
+private nonisolated struct AlbumSyncTargetAccess: Decodable, Sendable {
+    let album: ManagedAlbum
+    let members: [Member]?
+    /// 只读权限必需的UUID/role，不要求与此写权限无关的姓名/邮箱字段。
+    struct Member: Decodable, Sendable { let user: User; let role: String }
+    /// 当前服务端用户的稳定UUID，不能以数组位置或名称代替本人身份。
+    struct User: Decodable, Sendable { let id: UUID }
+    private enum CodingKeys: String, CodingKey { case albumUsers }
+
+    /// 同一响应同时解码身份与可选完整成员；legacy无members只保留owner能力，坏members不当作缺省。
+    init(from decoder: any Decoder) throws {
+        album = try ManagedAlbum(from: decoder)
+        members = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent([Member].self, forKey: .albumUsers)
+    }
+
+    /// userID固定当前账户；完整成员含唯一合法UUID、首owner与已知角色才允许owner/editor。
+    /// members存在时不回退legacyownerId；旧响应缺成员只允许明确本人owner，不能猜共享编辑者。
+    func permitsAdding(userID: String, ownerOnly: Bool = false) throws -> Bool {
+        guard UUID(uuidString: album.id) != nil, let owner = UUID(uuidString: album.ownerId), let user = UUID(uuidString: userID) else { throw LibraryWriteError.malformedResponse }
+        guard let members else { return owner == user }
+        guard !members.isEmpty, members.first?.role == "owner", members.first?.user.id == owner,
+              Set(members.map(\.user.id)).count == members.count else { throw LibraryWriteError.malformedResponse }
+        guard members.allSatisfy({ ["owner", "editor", "viewer"].contains($0.role) }), let role = members.first(where: { $0.user.id == user })?.role else { return false }
+        if ownerOnly {
+            return role == "owner" && owner == user
+        }
+        return role == "owner" || role == "editor"
+    }
 }
 
 nonisolated struct AssetEditList: Codable, Sendable {
@@ -127,11 +202,22 @@ final nonisolated class LibraryMutationClient: Sendable {
     }
 
     /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
-    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    /// 只读取资产信息；仅HTTP400且精确JSON拒绝正文抛LocalMediaCandidateError，其余错误保留原语义。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
         let expected = try validID(id)
-        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
-        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        let (data, response) = try await session.data(for: request("GET", ["assets", expected]))
+        try Task.checkCancellation()
+        // 当前服务的权限前不存在/不可读和权限后消失均为400；只在此候选GET识别拥有者合同，不放宽通用send。
+        if let response = response as? HTTPURLResponse, response.statusCode == 400,
+           response.mimeType?.lowercased() == "application/json",
+           let body = try? JSONDecoder().decode([String: String].self, from: data), body.count == 1,
+           let message = body["message"], ["Not found or no asset.read access", "Asset not found"].contains(message)
+        {
+            throw LocalMediaCandidateError.inaccessible
+        }
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: bytes)
         guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
         return asset
     }
@@ -387,6 +473,106 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try (title, JSONEncoder().encode(Body(name: title)))
     }
 
+    /// 返回真实个人标签树；只有精确200且合法身份列表才可使用，鉴权/能力缺失/错误响应不能返回空成功。
+    func managedTags() async throws -> [ManagedTag] {
+        let data = try await send("GET", ["tags"], expectedStatus: 200)
+        return try ManagedTag.catalog(JSONDecoder().decode([ManagedTag].self, from: data))
+    }
+
+    /// id指定当前资源；标签字段必须实际存在，返回同ID的真实单资源关系，永不复用搜索/索引缓存。
+    func taggedAsset(_ id: String) async throws -> TaggedAssetSnapshot {
+        let id = try validID(id)
+        let data = try await send("GET", ["assets", id], expectedStatus: 200)
+        let asset = try JSONDecoder().decode(TaggedAssetSnapshot.self, from: data)
+        guard asset.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return asset
+    }
+
+    /// name为单叶名，parent来自fresh个人树或nil创建根标签；只接受201和匹配的name/parent/path回执。
+    func createManagedTag(name: String, parent: ManagedTag?) async throws -> ManagedTag {
+        let name = try ManagedTag.leafName(name)
+        if let parent {
+            try ManagedTag.requireID(parent.id)
+        }
+        // 创建体不发送颜色默认值，避免把其他客户端管理的色彩意图覆盖为空。
+        struct Body: Encodable { let name: String; let parentId: String? }
+        let data = try await send("POST", ["tags"], body: JSONEncoder().encode(Body(name: name, parentId: parent?.id)), expectedStatus: 201)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.name == name, result.parentId == parent?.id,
+              result.value == (parent.map { $0.value + "/" + name } ?? name) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// tag来自fresh树，name是新叶名；官方PUT200会递归改后代路径，颜色与父级不进入请求体。
+    func renameManagedTag(_ tag: ManagedTag, name: String) async throws -> ManagedTag {
+        try ManagedTag.requireID(tag.id)
+        let name = try ManagedTag.leafName(name)
+        // 只有明确新名称，不附带color:null或不支持的重父级字段。
+        struct Body: Encodable { let name: String }
+        let data = try await send("PUT", ["tags", tag.id], body: JSONEncoder().encode(Body(name: name)), expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.id == tag.id, result.parentId == tag.parentId, result.name == name,
+              result.value == String(tag.value.dropLast(tag.name.count)) + name else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// tag来自fresh个人树，change只设置或明确清除颜色；PUT200回执不能改名称/层级/创建身份，keep不发HTTP。
+    func recolorManagedTag(_ tag: ManagedTag, change: AssetTagColorChange) async throws -> ManagedTag {
+        try ManagedTag.requireID(tag.id)
+        guard change != .keep else { throw AssetTagError.noChanges }
+        let data = try await send("PUT", ["tags", tag.id], body: JSONEncoder().encode(AssetTagColorPatch(change: change)), expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.preservesDefinition(of: tag), change.matches(result) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id是已确认删除的个人标签；204只确认命令，调用方仍须fresh树验证整个后代闭包已移除；照片保留。
+    func deleteManagedTag(_ id: String) async throws {
+        try ManagedTag.requireID(id)
+        _ = try await send("DELETE", ["tags", id], expectedStatus: 204)
+    }
+
+    /// attached选择PUT/DELETE；只发送一个assetID并要求200唯一同ID成功，明确成员错误不冒充全成功。
+    func setAssetTag(_ assetID: String, tagID: String, attached: Bool) async throws {
+        try ManagedTag.requireID(assetID); try ManagedTag.requireID(tagID)
+        // 官方BulkIdsDto单项调用，不使用无身份的bulk count回执。
+        struct Body: Encodable { let ids: [String] }
+        // 只解码稳定错误枚举；不把服务端errorMessage带到UI/日志。
+        struct Result: Decodable { let id: String; let success: Bool; let error: AssetTagMembershipFailure? }
+        let data = try await send(attached ? "PUT" : "DELETE", ["tags", tagID, "assets"],
+                                  body: JSONEncoder().encode(Body(ids: [assetID])), expectedStatus: 200)
+        let results = try JSONDecoder().decode([Result].self, from: data)
+        guard results.count == 1, let result = results.first, result.id.lowercased() == assetID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        if !result.success, let failure = result.error {
+            throw AssetTagError.membership(failure)
+        }
+        guard result.success, result.error == nil else { throw LibraryWriteError.malformedResponse }
+    }
+
+    /// id为当前管理资源；每次真实GET200并核对响应身份，元数据DTO不复用编辑/备份解码字段。
+    func assetMetadata(_ id: String) async throws -> AssetMetadataSnapshot {
+        let id = try validID(id)
+        let data = try await send("GET", ["assets", id], expectedStatus: 200)
+        let result = try JSONDecoder().decode(AssetMetadataSnapshot.self, from: data)
+        guard result.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
+    /// id为已预检资源，patch只编码明确set/clear字段；精确200、同ID/owner和实际字段回执共同确认。
+    /// 不发送Live Photo关联/描述/可见性等其他属性，不重试；服务端继续执行权限与EXIF锁定/sidecar规则。
+    func updateAssetMetadata(_ id: String, patch: AssetMetadataPatch) async throws -> AssetMetadataSnapshot {
+        let id = try validID(id)
+        let body = try JSONEncoder().encode(patch)
+        let data = try await send("PUT", ["assets", id], body: body, expectedStatus: 200)
+        let result = try JSONDecoder().decode(AssetMetadataSnapshot.self, from: data)
+        guard result.id.lowercased() == id.lowercased(), result.ownerId.lowercased() == userID.lowercased(),
+              !result.isTrashed, patch.isConfirmed(by: result) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
     func asset(_ id: String) async throws -> ManagedAsset {
         try await JSONDecoder().decode(ManagedAsset.self, from: send("GET", ["assets", validID(id)]))
     }
@@ -409,6 +595,220 @@ final nonisolated class LibraryMutationClient: Sendable {
     func albums(containing assetID: String? = nil) async throws -> [ManagedAlbum] {
         let query = try assetID.map { try [URLQueryItem(name: "assetId", value: validID($0))] } ?? []
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
+    }
+
+    /// id是本次明确管理目标；每次真实GET200和相同UUID才返回完整角色，不能用列表/缓存授权后续写入。
+    func managementAlbum(_ id: String) async throws -> ManagedAlbum {
+        let id = try validID(id)
+        let value = try await JSONDecoder().decode(ManagedAlbum.self, from: send("GET", ["albums", id], expectedStatus: 200))
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 组织目标仅当前owner/editor相簿；名称不唯一，必须明确保存UUID，不把viewer/未知角色提升为编辑者。
+    func albumSyncTargets() async throws -> [ManagedAlbum] {
+        let data = try await send("GET", ["albums"], expectedStatus: 200)
+        let values = try JSONDecoder().decode([AlbumSyncTargetAccess].self, from: data)
+        guard Set(values.map { $0.album.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return try values.filter { try $0.permitsAdding(userID: userID) }.map(\.album)
+    }
+
+    /// 仅明确创建空相簿；精确201和本次owner/name/UUID回执才返回，网络/坏回执不得重试或同名认领。
+    func albumSyncCreate(name: String) async throws -> ManagedAlbum {
+        // 不附加用户、成员或伪幂等键；POST身份仅来自官方201响应。
+        struct Body: Encodable { let albumName: String; let assetIds: [UUID] = [] }
+        let data = try await send("POST", ["albums"], body: JSONEncoder().encode(Body(albumName: name)), expectedStatus: 201)
+        let value = try JSONDecoder().decode(ManagedAlbum.self, from: data)
+        guard UUID(uuidString: value.id) != nil, let owner = UUID(uuidString: userID), UUID(uuidString: value.ownerId) == owner, value.albumName == name else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 开始/恢复与写后fresh核同一目标及本人角色；ownerOnly仅用于本次201创建身份，不以旧缓存角色授权。
+    func albumSyncTarget(_ id: UUID, ownerOnly: Bool = false) async throws -> ManagedAlbum {
+        let data = try await send("GET", ["albums", id.uuidString], expectedStatus: 200)
+        let value = try JSONDecoder().decode(AlbumSyncTargetAccess.self, from: data)
+        guard UUID(uuidString: value.album.id) == id else { throw LibraryWriteError.malformedResponse }
+        guard try value.permitsAdding(userID: userID, ownerOnly: ownerOnly) else { throw LibraryWriteError.http(403) }
+        return value.album
+    }
+
+    /// 只读当前资产metadata，不请求原片/预览；锁定资产不可因存在本机关联而被分享进相簿。
+    func albumSyncAsset(_ id: UUID) async throws -> LocalMediaRemoteAsset {
+        let data = try await send("GET", ["assets", id.uuidString], expectedStatus: 200)
+        let managed = try JSONDecoder().decode(ManagedAsset.self, from: data)
+        guard managed.visibility != "locked" else { throw LibraryWriteError.http(403) }
+        return try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+    }
+
+    /// 精确已匹配UUID的当前mobile-app值；只GET既有官方metadata端点，不走全量stream/ACK，也不读取媒体。
+    func albumSyncMetadata(_ id: UUID) async throws -> LocalMediaMobileMetadata {
+        // 读取完整官方回执身份与版本，缺字段不能当成有效旧metadata。
+        struct Receipt: Decodable { let key: String; let value: LocalMediaMobileMetadata; let updatedAt: String }
+        let data = try await send("GET", ["assets", id.uuidString, "metadata", "mobile-app"], expectedStatus: 200)
+        let receipt = try JSONDecoder().decode(Receipt.self, from: data)
+        let updated = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(receipt.updatedAt))
+            ?? (try? Date.ISO8601FormatStyle().parse(receipt.updatedAt))
+        guard receipt.key == "mobile-app", updated?.timeIntervalSince1970.isFinite == true else { throw LibraryWriteError.malformedResponse }
+        return receipt.value
+    }
+
+    /// 成员查询只传assetId；该参数会使服务端忽略id等其他筛选，必须在返回列表中显式比较目标UUID。
+    func albumSyncContains(_ assetID: UUID, target: UUID) async throws -> Bool {
+        let data = try await send("GET", ["albums"], query: [.init(name: "assetId", value: assetID.uuidString)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([ManagedAlbum].self, from: data)
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.contains { UUID(uuidString: $0.id) == target }
+    }
+
+    /// 一次只写明确主体UUID；success/duplicate都只是待fresh核查的回执，no_permission单项失败不算完成。
+    func albumSyncAdd(_ assetID: UUID, target: UUID) async throws -> PhotoBackupAlbumMemberReceipt {
+        // 仅使用官方ids字段；一项一回执，避免部分结果在数组位置上错配。
+        struct Body: Encodable { let ids: [UUID] }
+        // id必须精确等于请求主体；成功与错误字段冲突时拒绝确认。
+        struct Receipt: Decodable { let id: UUID; let success: Bool; let error: String? }
+        let data = try await send("PUT", ["albums", target.uuidString, "assets"], body: JSONEncoder().encode(Body(ids: [assetID])), expectedStatus: 200)
+        let values = try JSONDecoder().decode([Receipt].self, from: data)
+        guard values.count == 1, let value = values.first, value.id == assetID else { throw LibraryWriteError.malformedResponse }
+        if value.success {
+            guard value.error == nil else { throw LibraryWriteError.malformedResponse }
+            return .added
+        }
+        switch value.error {
+        case "duplicate": return .duplicate
+        case "no_permission": return .denied
+        default: throw LibraryWriteError.malformedResponse
+        }
+    }
+
+    /// 真实读取所有可见相簿及完整有序成员；不要求不存在的ownerId，也不将缺成员降成空列表。
+    func sharingAlbums() async throws -> [AlbumSharingSnapshot] {
+        let values = try await JSONDecoder().decode([AlbumSharingSnapshot].self, from: send("GET", ["albums"], expectedStatus: 200))
+        for value in values {
+            try value.validate()
+        }
+        guard Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values
+    }
+
+    /// id为当前明确选择的相簿；强制fresh200与匹配UUID，不复用列表或索引缓存做写前预检。
+    func sharingAlbum(_ id: String) async throws -> AlbumSharingSnapshot {
+        let id = try validID(id)
+        let value = try await JSONDecoder().decode(AlbumSharingSnapshot.self, from: send("GET", ["albums", id], expectedStatus: 200))
+        try value.validate()
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// direction明确官方单向关系；强制GET200和唯一用户UUID，未知inTimeline保持nil，不走Library索引缓存。
+    func partnerSharing(_ direction: PartnerSharingDirection) async throws -> [ManagedPartner] {
+        let data = try await send("GET", ["partners"], query: [.init(name: "direction", value: direction.rawValue)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([ManagedPartner].self, from: data)
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }),
+              Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.sorted { $0.id.lowercased() < $1.id.lowercased() }
+    }
+
+    /// 仅POST创建本人→目标账户，PUT设置对方→本人的时间线，DELETE撤销本人→对方；精确201/200/204，无重放。
+    func changePartnerSharing(_ command: PartnerSharingCommand) async throws -> ManagedPartner? {
+        let id = try validID(command.userID)
+        let data: Data
+        switch command {
+        case .add:
+            struct Body: Encodable { let sharedWithId: String }
+            data = try await send("POST", ["partners"], body: JSONEncoder().encode(Body(sharedWithId: id)), expectedStatus: 201)
+        case let .timeline(_, enabled):
+            struct Body: Encodable { let inTimeline: Bool }
+            data = try await send("PUT", ["partners", id], body: JSONEncoder().encode(Body(inTimeline: enabled)), expectedStatus: 200)
+        case .remove:
+            _ = try await send("DELETE", ["partners", id], expectedStatus: 204)
+            return nil
+        }
+        let value = try JSONDecoder().decode(ManagedPartner.self, from: data)
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        if case let .timeline(_, enabled) = command, value.inTimeline != enabled {
+            throw LibraryWriteError.malformedResponse
+        }
+        return value
+    }
+
+    /// albumID为明确选择的相簿；官方过滤列表只返回当前创建者的链接，不能当作相簿所有公开链接清单。
+    func albumPublicLinks(_ albumID: String) async throws -> [AlbumPublicLink] {
+        let albumID = try validID(albumID)
+        let data = try await send("GET", ["shared-links"], query: [.init(name: "albumId", value: albumID)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([AlbumPublicLink].self, from: data)
+        for value in values {
+            try value.validate(userID: userID, albumID: albumID)
+        }
+        guard Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.sorted { $0.id.lowercased() < $1.id.lowercased() }
+    }
+
+    /// linkID/albumID固定当前创建者的相簿链接；精确200和fresh嵌套相簿身份共同确认，禁止复用列表缓存。
+    func albumPublicLink(_ linkID: String, albumID: String) async throws -> AlbumPublicLink {
+        let linkID = try validID(linkID); let albumID = try validID(albumID)
+        let data = try await send("GET", ["shared-links", linkID], expectedStatus: 200)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID)
+        guard value.id.lowercased() == linkID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// albumID为用户明确选择且已fresh核权的相簿；options是确认后的完整七字段，创建时应用POST下载规范化。
+    /// 返回201回执；回执可能缺所属相簿，调用者仍须fresh详情/列表确认，状态或字段异常抛错。
+    func createAlbumPublicLink(_ albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
+        let albumID = try validID(albumID); let options = try options.normalized(forCreation: true)
+        guard var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(options)) as? [String: Any] else {
+            throw LibraryWriteError.malformedResponse
+        }
+        object["type"] = "ALBUM"; object["albumId"] = albumID
+        let data = try await send("POST", ["shared-links"], body: JSONSerialization.data(withJSONObject: object), expectedStatus: 201)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID, requiresAlbum: false)
+        guard value.options == options else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// linkID/albumID为当前明确选择的链接与所属相簿；options为完整修改选项，保留合法既有权限组合。
+    /// 返回PATCH200回执，状态或字段异常抛错；调用者必须fresh确认，省略/错误字段不能补成请求值。
+    func updateAlbumPublicLink(_ linkID: String, albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
+        let linkID = try validID(linkID); let albumID = try validID(albumID); let options = try options.normalized()
+        let data = try await send("PATCH", ["shared-links", linkID], body: JSONEncoder().encode(options), expectedStatus: 200)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID, requiresAlbum: false)
+        guard value.id.lowercased() == linkID.lowercased(), value.options == options else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 仅撤销一个当前创建者的链接，照片/相簿不删除；精确204后仍由调用者fresh列表确认消失。
+    func revokeAlbumPublicLink(_ linkID: String) async throws {
+        _ = try await send("DELETE", ["shared-links", validID(linkID)], expectedStatus: 204)
+    }
+
+    /// 只读取现有服务器账户供选择；不按email发邀请，不猜不可见账户，也不暴露管理用户API。
+    func sharingUsers() async throws -> [AlbumSharingUser] {
+        let values = try await JSONDecoder().decode([AlbumSharingUser].self, from: send("GET", ["users"], expectedStatus: 200))
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else {
+            throw LibraryWriteError.malformedResponse
+        }
+        return values
+    }
+
+    /// 仅提交一个明确成员，沿官方PUT200/角色PUT204/DELETE204；无重试、无owner提升或批量部分写推断。
+    func changeAlbumSharing(_ command: AlbumSharingCommand, albumID: String) async throws {
+        let albumID = try validID(albumID); let userID = try validID(command.userID)
+        switch command {
+        case let .add(_, role):
+            struct Body: Encodable { struct Member: Encodable { let userId: String; let role: String }; let albumUsers: [Member] }
+            let data = try await send("PUT", ["albums", albumID, "users"], body: JSONEncoder().encode(Body(albumUsers: [.init(userId: userID, role: role.rawValue)])), expectedStatus: 200)
+            let value = try JSONDecoder().decode(AlbumSharingSnapshot.self, from: data)
+            try value.validate()
+            guard value.id.lowercased() == albumID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        case let .role(_, role):
+            struct Body: Encodable { let role: String }
+            _ = try await send("PUT", ["albums", albumID, "user", userID], body: JSONEncoder().encode(Body(role: role.rawValue)), expectedStatus: 204)
+        case .remove:
+            _ = try await send("DELETE", ["albums", albumID, "user", userID], expectedStatus: 204)
+        }
     }
 
     /// id为当前查看照片；精确200、匹配的assetId及可完整保留的编辑文档才允许进入编辑器。
@@ -506,13 +906,23 @@ final nonisolated class LibraryMutationClient: Sendable {
         else { throw LibraryWriteError.malformedResponse }
     }
 
-    struct UploadResult: Decodable, Sendable { let id: String; let status: String }
+    /// 上传结果携带本次实际字节摘要；wire只信id/status，checksum由同一次流式计算附加，不采信服务器同名字段。
+    struct UploadResult: Decodable, Sendable {
+        let id: String
+        let status: String
+        let checksum: String?
+        /// checksum为本次本机SHA1的canonical Base64；默认nil兼容旧构造，不构造已存在的字节证明。
+        init(id: String, status: String, checksum: String? = nil) {
+            self.id = id; self.status = status; self.checksum = checksum
+        }
+    }
 
     /// 流式计算校验和、先查重、再从磁盘上传；绝不把大视频整体读入内存。
     @concurrent func upload(file: URL, filename: String, created: Date, modified: Date,
                             favorite: Bool, hidden: Bool = false, livePhotoVideoID: String? = nil) async throws -> UploadResult
     {
-        let checksum = try Self.checksum(file)
+        let digests = try Self.checksumValues(file)
+        let checksum = digests.hex
         struct Check: Encodable { let assets: [Item]; struct Item: Encodable { let id: String; let checksum: String } }
         struct Checks: Decodable {
             let results: [Item]
@@ -525,7 +935,7 @@ final nonisolated class LibraryMutationClient: Sendable {
         if result.action == "reject" {
             guard result.isTrashed != true else { throw LibraryWriteError.trashedDuplicate }
             guard let id = result.assetId else { throw LibraryWriteError.malformedResponse }
-            return try UploadResult(id: validID(id), status: "duplicate")
+            return try UploadResult(id: validID(id), status: "duplicate", checksum: digests.base64)
         }
         guard result.action == "accept" else { throw LibraryWriteError.malformedResponse }
         let boundary = "Remmich-\(UUID().uuidString)"
@@ -567,10 +977,16 @@ final nonisolated class LibraryMutationClient: Sendable {
         let uploaded = try JSONDecoder().decode(UploadResult.self, from: checked(data, response))
         _ = try validID(uploaded.id)
         guard ["created", "duplicate"].contains(uploaded.status) else { throw LibraryWriteError.malformedResponse }
-        return uploaded
+        return .init(id: uploaded.id, status: uploaded.status, checksum: digests.base64)
     }
 
+    /// file为现有导出原图；返回原有小写hex SHA1，保持独立契约和旧调用不变。
     static func checksum(_ file: URL) throws -> String {
+        try checksumValues(file).hex
+    }
+
+    /// file为调用方现有导出文件；只流式读一次，以同一SHA1同时输出原查重hex和组织证明Base64。
+    private static func checksumValues(_ file: URL) throws -> (hex: String, base64: String) {
         var hash = Insecure.SHA1()
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
@@ -578,6 +994,7 @@ final nonisolated class LibraryMutationClient: Sendable {
             try Task.checkCancellation()
             hash.update(data: chunk)
         }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let digest = hash.finalize()
+        return (digest.map { String(format: "%02x", $0) }.joined(), Data(digest).base64EncodedString())
     }
 }

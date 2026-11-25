@@ -43,6 +43,48 @@ nonisolated struct AssetEditCropDragSession {
     }
 }
 
+/// 一次累积捏合的像素锚点；视口或外部像素变化时保留当前范围，再只应用重锚之后的倍率比。
+nonisolated struct AssetEditCropMagnificationSession {
+    /// magnification是整轮手势累计倍率，不是每事件增量；imageRect/source共同标识本轮显示坐标。
+    private struct Anchor {
+        let crop: AssetEditPixelCrop
+        let magnification: Double
+        let imageRect: CGRect
+        let source: AssetEditPixelSize
+    }
+
+    private var anchor: Anchor?
+    private var latest: AssetEditPixelCrop?
+
+    /// 返回是否已有有效捏合锚点，供Canvas阻止同一双指过程被平移手势再次消费。
+    var isActive: Bool {
+        anchor != nil
+    }
+
+    /// 松手、取消或离开Canvas时退休；不修改草稿，下一轮重新捕获起始倍率。
+    mutating func reset() {
+        anchor = nil; latest = nil
+    }
+
+    /// crop为当前原图像素，magnification为整轮累计值，imageRect/source为当前真实显示范围与原图尺寸。
+    /// 初次/换视口/外部修改后的首事件仅重锚；后续只按倍率比缩放，拒绝坏倍率或几何而不恢复旧草稿。
+    mutating func updated(crop: AssetEditPixelCrop, magnification: Double, imageRect: CGRect,
+                          source: AssetEditPixelSize) -> AssetEditPixelCrop
+    {
+        guard magnification.isFinite, magnification > 0,
+              [imageRect.minX, imageRect.minY, imageRect.width, imageRect.height].allSatisfy(\.isFinite),
+              imageRect.width > 0, imageRect.height > 0 else { return crop }
+        guard let anchor, anchor.imageRect == imageRect, anchor.source == source, latest == crop else {
+            anchor = Anchor(crop: crop, magnification: magnification, imageRect: imageRect, source: source)
+            latest = crop
+            return crop
+        }
+        let next = anchor.crop.magnified(by: magnification / anchor.magnification, in: source)
+        latest = next
+        return next
+    }
+}
+
 /// 裁剪焦点的硬件键盘方向，与屏幕点数和横竖屏无关；一像素/十像素操作使用同一领域边界校验。
 nonisolated enum AssetEditCropKeyboardDirection: CaseIterable {
     case left, right, up, down

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- dev的Build/Tests与本地App构建使用明确共享的Remmich方案，不依赖开发机自动生成的scheme。 -->
+<Scheme LastUpgradeVersion="2700" version="1.7">
+   <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES">
+      <BuildActionEntries>
+         <!-- App保留运行、分析、归档能力；逻辑测试继续使用原App作为TEST_HOST。 -->
+         <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699433066C25E00C68930" BuildableName="Remmich.app" BlueprintName="Remmich" ReferencedContainer="container:Remmich.xcodeproj"/>
+         </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699503066C25F00C68930" BuildableName="RemmichTests.xctest" BlueprintName="RemmichTests" ReferencedContainer="container:Remmich.xcodeproj"/>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <!-- 此方案只运行既有App逻辑测试；双设备UI回归仍由原RemmichSearchUI方案完整负责。 -->
+   <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+      <Testables>
+         <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699503066C25F00C68930" BuildableName="RemmichTests.xctest" BlueprintName="RemmichTests" ReferencedContainer="container:Remmich.xcodeproj"/>
+         </TestableReference>
+      </Testables>
+      <MacroExpansion>
+         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699433066C25E00C68930" BuildableName="Remmich.app" BlueprintName="Remmich" ReferencedContainer="container:Remmich.xcodeproj"/>
+      </MacroExpansion>
+   </TestAction>
+   <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="NO">
+      <BuildableProductRunnable runnableDebuggingMode="0">
+         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699433066C25E00C68930" BuildableName="Remmich.app" BlueprintName="Remmich" ReferencedContainer="container:Remmich.xcodeproj"/>
+      </BuildableProductRunnable>
+   </LaunchAction>
+   <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+      <BuildableProductRunnable runnableDebuggingMode="0">
+         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="F84699433066C25E00C68930" BuildableName="Remmich.app" BlueprintName="Remmich" ReferencedContainer="container:Remmich.xcodeproj"/>
+      </BuildableProductRunnable>
+   </ProfileAction>
+   <AnalyzeAction buildConfiguration="Debug"/>
+   <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>
+</Scheme>

@@ -45,6 +45,7 @@ struct PhotoBackupJournalTests {
         #expect(confirmed.jobs.first?.stage == .completed)
         #expect(confirmed.jobs.first?.primaryAssetID == primary)
         #expect(confirmed.jobs.first?.primaryWasDuplicate == true)
+        #expect(confirmed.jobs.first?.primaryChecksum == nil)
         #expect(confirmed.jobs.first?.attempts == 2)
     }
 
@@ -105,7 +106,7 @@ struct PhotoBackupJournalTests {
         try job.recordPrimary(UUID(), duplicate: true)
         job.fail(.livePhotoMismatch)
         #expect(job.stage == .failed && job.failure == .livePhotoMismatch)
-        let encoded = #"{"version":2,"namespace":"synthetic","selectedAlbumIDs":[],"allowCloud":false,"jobs":[]}"#
+        let encoded = #"{"version":3,"namespace":"synthetic","selectedAlbumIDs":[],"allowCloud":false,"jobs":[]}"#
         let future = try JSONDecoder().decode(PhotoBackupJournal.self, from: Data(encoded.utf8))
         #expect(throws: PhotoBackupStateError.invalidJournal) { try future.validate(namespace: "synthetic") }
     }
@@ -274,12 +275,12 @@ struct PhotoBackupJournalTests {
         let table: String
         if format == "future-header" {
             try await store.savePhotoBackups(journal, scope: scope)
-            json = #"{"version":2,"namespace":"\#(scope.cacheNamespace)","selectedAlbumIDs":[],"allowCloud":false}"#
+            json = #"{"version":3,"namespace":"\#(scope.cacheNamespace)","selectedAlbumIDs":[],"allowCloud":false}"#
             table = "photo_backup_headers"
             try probe.execute("UPDATE photo_backup_headers SET payload=?", [json])
         } else {
             json = format == "future-legacy"
-                ? #"{"version":2,"namespace":"\#(scope.cacheNamespace)","selectedAlbumIDs":[],"allowCloud":false,"jobs":[]}"# : "{damaged"
+                ? #"{"version":3,"namespace":"\#(scope.cacheNamespace)","selectedAlbumIDs":[],"allowCloud":false,"jobs":[]}"# : "{damaged"
             table = "photo_backups"
             try probe.insertLegacy(json: json, namespace: scope.cacheNamespace)
         }

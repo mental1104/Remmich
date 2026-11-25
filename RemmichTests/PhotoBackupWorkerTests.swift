@@ -9,12 +9,14 @@ struct PhotoBackupWorkerTests {
     @Test @MainActor func persistsEachCheckpointAndVerifiesTheCompletePair() async throws {
         let fixture = try await BackupWorkerFixture(kind: .livePhoto)
         defer { fixture.removeFiles() }
-        let transport = fixture.transport()
+        let digest = Data(repeating: 7, count: 20).base64EncodedString()
+        let transport = fixture.transport(checksum: digest)
         let result = try await fixture.worker.run(scope: fixture.scope, userID: "synthetic", allowCloud: false,
                                                   client: transport, validateContext: {}, progress: { _, _ in })
         let restored = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
         #expect(result.completed == 1 && result.failed == 0 && !result.stopped)
         #expect(restored.jobs.first?.stage == .completed)
+        #expect(restored.jobs.first?.primaryChecksum == digest)
         #expect(await transport.observedStages == [.uploadingMotion, .uploadingPrimary, .verifying, .verifying])
         #expect(await transport.assetReads == [fixture.primaryID.uuidString, fixture.motionID.uuidString])
         #expect(await transport.hiddenFlags == [true, false])
@@ -173,12 +175,12 @@ struct PhotoBackupWorkerTests {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// 参数选择当前例的故障点；仅传Sendable值给actor构造，不跨Actor传递整个主线程fixture。
+    /// 参数选择当前例故障与可选合成checksum；只传Sendable值，不跨Actor传递整个主线程fixture。
     func transport(mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false,
-                   motionResponse: BackupMotionResponse = .valid) -> BackupWorkerTransport
+                   motionResponse: BackupMotionResponse = .valid, checksum: String? = nil) -> BackupWorkerTransport
     {
         .init(store: store, scope: scope, motionID: motionID, primaryID: primaryID, kind: kind,
-              mismatch: mismatch, networkFailure: networkFailure, held: held, motionResponse: motionResponse)
+              mismatch: mismatch, networkFailure: networkFailure, held: held, motionResponse: motionResponse, checksum: checksum)
     }
 }
 
@@ -220,6 +222,7 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
     let held: Bool
     let kind: PhotoBackupSource.Kind
     let motionResponse: BackupMotionResponse
+    let checksum: String?
     private var gate: CheckedContinuation<Void, Never>?
     private var observers: [CheckedContinuation<Bool, Never>] = []
     private var didHold = false
@@ -230,13 +233,14 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
     private(set) var primaryPair: String?
     private(set) var assetReads: [String] = []
 
-    /// store/scope为隔离账号数据库，两个ID是合成回执，kind指定主体类型；其余参数选择明确故障。
+    /// store/scope为隔离数据库，两个ID为合成回执，kind为主体类型；checksum可验证完整透传，其他参数选择故障。
     init(store: SQLiteLibraryIndexStore, scope: MediaAccountScope, motionID: UUID, primaryID: UUID, kind: PhotoBackupSource.Kind,
-         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false, motionResponse: BackupMotionResponse = .valid)
+         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false, motionResponse: BackupMotionResponse = .valid, checksum: String? = nil)
     {
         self.store = store; self.scope = scope; self.motionID = motionID; self.primaryID = primaryID; self.kind = kind
         self.mismatch = mismatch; self.networkFailure = networkFailure; self.held = held
         self.motionResponse = motionResponse
+        self.checksum = checksum
     }
 
     /// 与生产上传签名一致；读取SQLite证明检查点先于网络，按hidden区分动态/主体回执。
@@ -259,7 +263,7 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
         if networkFailure {
             throw URLError(.networkConnectionLost)
         }
-        return .init(id: (hidden ? motionID : primaryID).uuidString, status: "duplicate")
+        return .init(id: (hidden ? motionID : primaryID).uuidString, status: "duplicate", checksum: checksum)
     }
 
     /// id区分主体与动态请求；动态故障只影响最终GET，核对前持久阶段始终为verifying。

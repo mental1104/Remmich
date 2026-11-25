@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 当前账号拥有相簿的管理入口；批量页只在可取得真实前台读源时开放。
+/// 当前账号可见相簿的管理入口；完整成员角色分别控制属性/成员写入与owner删除，批量页仍要求真实前台读源。
 struct AlbumManagementView: View {
     let controller: LibraryManagementController
     let source: (any TimelineReading)?
@@ -14,6 +14,8 @@ struct AlbumManagementView: View {
     @State private var showsRename = false
     @State private var managingPhotos: ManagedAlbum?
     @State private var showsDirectory = false
+    @State private var showsSharing = false
+    @State private var showsPublicLinks = false
 
     /// controller维护写入账号代际；source/media由真实Albums页传入，默认nil保留既有基础管理入口。
     init(controller: LibraryManagementController, source: (any TimelineReading)? = nil,
@@ -39,6 +41,12 @@ struct AlbumManagementView: View {
                     Button("Manage categories and groups") { showsDirectory = true }
                         .disabled(controller.client == nil)
                 }
+                Section("共享相簿") {
+                    Button("成员与共享权限") { showsSharing = true }
+                        .disabled(controller.client == nil)
+                    Button("相簿公开链接") { showsPublicLinks = true }
+                        .disabled(controller.client == nil)
+                }
                 Section("创建相簿") {
                     TextField("相簿名称", text: $name)
                     Button("创建") {
@@ -46,15 +54,18 @@ struct AlbumManagementView: View {
                         run { _ = try await $0.createAlbum(name: title) }
                     }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                Section("我拥有的相簿") {
+                Section("可见相簿") {
                     ForEach(albums) { album in
                         LabeledContent(album.albumName) {
                             Menu("管理") {
                                 Button("Manage photos and cover") { managingPhotos = album }
-                                    .disabled(managementSource == nil || media == nil)
+                                    .disabled(!album.access.allows(.update, userID: controller.client?.userID ?? "") || managementSource == nil || media == nil)
                                 Button("重命名") { renaming = album; name = album.albumName; showsRename = true }
+                                    .disabled(!album.access.allows(.update, userID: controller.client?.userID ?? ""))
                                 Button("删除相簿", role: .destructive) { deleting = album }
+                                    .disabled(!album.access.allows(.delete, userID: controller.client?.userID ?? ""))
                             }
+                            .disabled(!album.access.allows(.update, userID: controller.client?.userID ?? ""))
                         }
                     }
                 }
@@ -67,10 +78,13 @@ struct AlbumManagementView: View {
             .sheet(isPresented: $showsDirectory, onDismiss: { Task { await load() } }) {
                 AlbumDirectoryManagementView(controller: controller)
             }
+            .sheet(isPresented: $showsSharing, onDismiss: { Task { await load() } }) { AlbumSharingView(controller: controller) }
+            .sheet(isPresented: $showsPublicLinks, onDismiss: { Task { await load() } }) { AlbumPublicLinkView(controller: controller) }
             .sheet(item: $managingPhotos, onDismiss: { Task { await load() } }) { album in
                 if let managementSource, let media {
                     BatchAssetManagementView(album: .init(id: album.id, name: album.albumName),
-                                             ownedAlbums: albums.map { .init(id: $0.id, name: $0.albumName) },
+                                             ownedAlbums: albums.filter { $0.access.allows(.assets, userID: controller.client?.userID ?? "") }
+                                                 .map { .init(id: $0.id, name: $0.albumName) },
                                              factory: { try await managementSource.managementTimelineReader() },
                                              media: media, controller: controller)
                 } else {
@@ -84,7 +98,7 @@ struct AlbumManagementView: View {
                     guard let album = renaming else { return }
                     let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !title.isEmpty else { return }
-                    run { try await $0.renameAlbum(album.id, name: title) }
+                    run { try await $0.performAlbumManagement(.rename(id: album.id, name: title)) }
                 }
                 Button("取消", role: .cancel) {}
             }
@@ -94,20 +108,20 @@ struct AlbumManagementView: View {
                 }
             }),
             titleVisibility: .visible, presenting: deleting) { album in
-                Button("删除 \(album.albumName)", role: .destructive) { run { try await $0.deleteAlbum(album.id) } }
+                Button("删除 \(album.albumName)", role: .destructive) { run { try await $0.performAlbumManagement(.delete(id: album.id)) } }
             } message: { _ in Text("删除相簿及其组织关系，保留其中的照片和视频。所有客户端都会看到此变更。") }
         }
         .interactiveDismissDisabled(controller.busy)
     }
 
-    /// 读取当前账号拥有相簿；账号变更或取消后的结果/错误均不能发布到下一上下文。
+    /// 读取全部当前可见相簿并保留完整角色；只读成员也可看到身份，菜单按动作开放，不使用首owner过滤。
     private func load() async {
         guard let client = controller.client else { return }
         let owner = controller.generation
         do {
             let fresh = try await client.albums()
             guard owner == controller.generation, !Task.isCancelled else { return }
-            albums = fresh.filter { $0.ownerId == client.userID }
+            albums = fresh
         } catch {
             guard owner == controller.generation, !Task.isCancelled else { return }
             self.error = "Albums could not be loaded. Check permissions and connection."

@@ -54,6 +54,10 @@ final class MediaLibraryController {
 
     private var session: AccountSession?
     let management = LibraryManagementController()
+    let photoBackups = PhotoBackupController()
+    /// 页面和自动驱动持有同一组织Controller，避免关闭页面后丢失前台自动化或另造成员队列。
+    @ObservationIgnored lazy var photoBackupAlbumSync = PhotoBackupAlbumSyncController(matching: localMediaMatches)
+    @ObservationIgnored lazy var photoBackupAlbumAutomation = PhotoBackupAlbumAutomation(sync: photoBackupAlbumSync, backup: photoBackups, matching: localMediaMatches)
     let exports: MediaExportController
     @ObservationIgnored private var exportRequestIDs: [String: [String]] = [:]
     @ObservationIgnored private var exportManifestLoad: Task<[String: [String]], Never>?
@@ -172,6 +176,8 @@ final class MediaLibraryController {
         self.session = session
         activeAPIURL = activeEndpoint
         management.configure(session: session, endpoint: activeEndpoint)
+        photoBackups.automaticConditionsChanged(using: management, scope: nextScope)
+        photoBackupAlbumAutomation.conditionsChanged(using: management, scope: nextScope)
         localMediaMatches.restoreAndRefresh(using: management, scope: nextScope)
         exports.configure(media: self, scope: nextScope)
         let profileStartedAt = Date()
@@ -184,6 +190,8 @@ final class MediaLibraryController {
     func updateRoute(_ endpoint: URL?) {
         activeAPIURL = endpoint
         management.configure(session: session, endpoint: endpoint)
+        photoBackups.automaticConditionsChanged(using: management, scope: scope)
+        photoBackupAlbumAutomation.conditionsChanged(using: management, scope: scope)
         localMediaMatches.restoreAndRefresh(using: management, scope: scope)
         guard let scope, let session else { return }
         prepareProfileImageCache(scope: scope, session: session, endpoint: endpoint)
@@ -1240,6 +1248,8 @@ final class MediaLibraryController {
     }
 
     func handleBackgroundTransition() {
+        photoBackups.automaticConditionsChanged(using: management, scope: scope, active: false)
+        photoBackupAlbumAutomation.conditionsChanged(using: management, scope: scope, active: false)
         Self.logger.info("App backgrounded; cancelling preload and releasing timeline pins")
         prefetcher?.stopPrefetching()
         cancelViewerPrefetching()
@@ -1256,6 +1266,9 @@ final class MediaLibraryController {
 
     func clearAll() {
         management.configure(session: nil, endpoint: nil)
+        // 换号先撤销旧scope，但前台事实由scene生命周期维护；新账号配置后仍须能读取其独立开关。
+        photoBackups.automaticConditionsChanged(using: management, scope: nil)
+        photoBackupAlbumAutomation.conditionsChanged(using: management, scope: nil)
         localMediaMatches.configure(using: management, scope: nil)
         mediaReadOrigins.removeAll()
         resumeOpeningPhotosHydration()

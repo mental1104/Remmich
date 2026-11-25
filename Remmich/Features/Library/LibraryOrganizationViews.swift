@@ -6,17 +6,10 @@ struct LibraryRandomPhotosView: View {
     let media: MediaLibraryController
     let assetDetails: any AssetDetailReading
     @State private var store = RandomPhotosStore()
-    @State private var selection: Selection?
+    @State private var selection: RandomPhotoSelection?
     @State private var refreshTask: Task<Void, Never>?
     @State private var loadedOwner: UUID?
     @Namespace private var viewerNamespace
-
-    /// 固定点击时的随机批次；后续抽样或账户变化不能修改已打开查看器的读取范围。
-    private struct Selection: Identifiable {
-        let id = UUID()
-        let route: AssetViewerRoute
-        let timeline: PhotosTimelineStore
-    }
 
     var body: some View {
         ScrollView {
@@ -27,7 +20,11 @@ struct LibraryRandomPhotosView: View {
                     Text(error).foregroundStyle(.secondary)
                         .accessibilityIdentifier("random-photos-error")
                     Button("Retry", action: beginRefresh)
-                        .disabled(store.isLoading)
+                }
+                if store.wasCancelled {
+                    Text("Loading cancelled. Shuffle again to request a new batch.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("random-photos-cancelled")
                 }
                 if store.hasLoaded, store.assets.isEmpty, store.error == nil, !store.isLoading {
                     ContentUnavailableView("No photos", systemImage: "shuffle",
@@ -47,6 +44,8 @@ struct LibraryRandomPhotosView: View {
                 }
                 if store.isLoading {
                     ProgressView("Loading random photos")
+                    Button("Cancel loading", action: cancelRefresh)
+                        .accessibilityIdentifier("random-photos-cancel")
                 }
                 if !store.assets.isEmpty {
                     Text("Loaded \(store.assets.count) photos").font(.caption)
@@ -58,7 +57,6 @@ struct LibraryRandomPhotosView: View {
                 Button(action: beginRefresh) {
                     Image(systemName: "shuffle").frame(width: 44, height: 44)
                 }
-                .disabled(store.isLoading)
                 .accessibilityLabel("Shuffle again")
                 .accessibilityIdentifier("random-photos-shuffle")
             }
@@ -78,7 +76,7 @@ struct LibraryRandomPhotosView: View {
             }
         }
         .onChange(of: media.management.generation) { _, _ in refreshTask?.cancel(); loadedOwner = nil; store.invalidate(); selection = nil }
-        .onDisappear { refreshTask?.cancel(); refreshTask = nil }
+        .onDisappear { cancelRefresh() }
         .fullScreenCover(item: $selection) { selected in
             AssetViewerView(route: selected.route, store: selected.timeline, media: media, assetDetails: assetDetails,
                             opensFromSource: false, namespace: viewerNamespace, close: { selection = nil },
@@ -93,14 +91,16 @@ struct LibraryRandomPhotosView: View {
         refreshTask = Task { await store.refresh(source: source) }
     }
 
+    /// 同时撤销按钮Task与Store实际请求；已确认结果和已打开查看器快照保持独立。
+    private func cancelRefresh() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        store.cancel()
+    }
+
     /// asset为当前批次中实际点击项；沿用原生查看器和冻结结果读取器，不写入持久时间线索引。
     private func open(_ asset: TimelineAssetSummary) {
-        let snapshot = NativeSearchSnapshot(assets: store.assets)
-        let timeline = PhotosTimelineStore(reader: snapshot)
-        timeline.bootstrap(.init(generation: 0, summaries: [.init(id: NativeSearchSnapshot.bucket, assetCount: store.assets.count)],
-                                 assetsByBucket: [NativeSearchSnapshot.bucket: store.assets], groupedCatalogs: .init(), isComplete: true))
-        selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
-                                           origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Random photos")), timeline: timeline)
+        selection = RandomPhotoSelection(assetID: asset.id, assets: store.assets)
     }
 }
 

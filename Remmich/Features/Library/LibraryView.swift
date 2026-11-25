@@ -97,6 +97,27 @@ struct LibraryView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("library-pending-albums")
+                                LibraryHubLink {
+                                    NativeStackManagementView(source: collectionSource, media: media)
+                                } label: {
+                                    LibraryCollectionCard(title: "Photo stacks", symbol: "square.stack", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-native-stacks")
+                                LibraryHubLink {
+                                    LibrarySceneStacksView(source: collectionSource, media: media, assetDetails: assetDetails)
+                                } label: {
+                                    LibraryCollectionCard(title: "Scene groups", symbol: "rectangle.on.rectangle.angled", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-scene-stacks")
+                                LibraryHubLink {
+                                    LibrarySteamScenesView(source: collectionSource, ownerID: session.userID, media: media, assetDetails: assetDetails)
+                                } label: {
+                                    LibraryCollectionCard(title: "Steam screenshots", symbol: "gamecontroller", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-steam-scenes")
                                 if preferences?.memoriesEnabled == true, !opening.memories.isConfirmedEmpty {
                                     LibraryMemoriesCard(source: collectionSource, media: media, assetDetails: assetDetails,
                                                         context: collectionNavigation, catalog: opening.memories,
