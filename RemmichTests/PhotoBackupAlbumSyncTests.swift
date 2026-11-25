@@ -243,9 +243,179 @@ struct PhotoBackupAlbumSyncTests {
             let replacement = PhotoBackupAlbumSyncOperation(id: old.id, localAlbumID: old.localAlbumID, targetID: albumSyncTarget1, source: old.source, assets: old.assets)
             await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncOperation(replacement, scope: fixture.scope) }
             #expect(try await fixture.coldState().operations.first?.targetID == albumSyncTarget2)
-            let future = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, version: 2)
+            let future = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, version: 3)
             await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(future, scope: fixture.scope) }
             #expect(try await fixture.coldState().operations.count == 1)
+        }
+    }
+
+    /// 同名两目标不能被自动认领；先保存预览零POST，再精确201/fresh核新UUID/持久映射，照片另行确认补入。
+    @Test(.timeLimit(.minutes(1))) @MainActor func explicitCreationRequiresPreviewAndMapsOnlyIts201Identity() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: " 同名目标 ", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let intent = try #require(preview.creations.first)
+            #expect(preview.version == 2 && intent.phase == .prepared && intent.name == "同名目标")
+            #expect(preview.mappings.isEmpty)
+            #expect(await fixture.server.creationCount() == 0)
+            await fixture.run(fixture.sync.createAndMap(intent.id, using: fixture.manager, backup: fixture.backup))
+            let mapped = try await fixture.coldState()
+            let target = try #require(mapped.mappings.first?.targetID)
+            #expect(target != albumSyncTarget1 && target != albumSyncTarget2)
+            #expect(mapped.creations.first?.receiptID == target && mapped.creations.first?.mappedTargetID == target && mapped.creations.first?.phase == .mapped)
+            #expect(await fixture.server.creationCount() == 1)
+            #expect(await fixture.server.member(albumSyncPrimary, target: target) == false)
+            await fixture.run(fixture.sync.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(await fixture.server.member(albumSyncPrimary, target: target))
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.isEmpty)
+            #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            #expect(await fixture.server.onlyMetadataAndMembershipRoutes(allowCreation: true))
+        }
+    }
+
+    /// 201已落盘但fresh核查断网：冷恢复只读同一UUID完成，不创建第二本，也不借列表同名映射。
+    @Test(.timeLimit(.minutes(1))) @MainActor func persisted201ReceiptRecoversWithGETOnly() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Created", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.server.setMode(.createReadFailure)
+            await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
+            let received = try await fixture.coldState()
+            let receiptID = try #require(received.creations.first?.receiptID)
+            #expect(received.creations.first?.phase == .received && received.mappings.isEmpty)
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.server.setMode(.normal)
+            await fixture.run(restored.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().mappings.first?.targetID == receiptID)
+            #expect(await fixture.server.creationCount() == 1)
+        }
+    }
+
+    /// 已提交但断线、错误成功状态或坏201都不能猜UUID；唯一新增列表项仍不认领，明确选已有目标才结束未知意图。
+    @Test(.timeLimit(.minutes(1)), arguments: [AlbumSyncHTTPServer.Mode.createErrorAfterCommit, .createWrongStatus, .createMalformed])
+    @MainActor private func unknownCreationCannotBeRepostedOrClaimedByName(_ mode: AlbumSyncHTTPServer.Mode) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Unique", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.server.setMode(mode)
+            await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().creations.first?.phase == .unknown)
+            await fixture.server.setMode(.normal)
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(restored.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
+            #expect(restored.targets.count == 3 && restored.state.mappings.isEmpty && restored.state.creations.first?.receiptID == nil)
+            await fixture.run(restored.createAndMap(id, using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.prepareCreation(localID: "include", name: "Again", using: fixture.manager, backup: fixture.backup))
+            #expect(await fixture.server.creationCount() == 1)
+            #expect(try await fixture.coldState().creations.count == 1)
+            await fixture.run(restored.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            let resolved = try await fixture.coldState()
+            #expect(resolved.creations.first?.phase == .mapped && resolved.creations.first?.mappedTargetID == albumSyncTarget2)
+            #expect(await fixture.server.createdIDs().count == 1)
+            #expect(await fixture.server.creationCount() == 1)
+        }
+    }
+
+    /// 实际POST已提交后取消/换到B；旧201不落新上下文，A冷恢复仍未知且只GET，不因单个新相簿重建映射。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func creationCancellationRetainsUnprovenIntentWithoutReplay(_ account: Bool) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Interrupted", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.server.setMode(.heldCreateAfterCommit)
+            await fixture.server.beginObservedWork()
+            let old = try #require(fixture.track(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup)))
+            try #require(await fixture.server.waitUntilHeld())
+            let other = AccountSession(apiURL: fixture.endpoint, accessToken: "album-sync-fixture", userID: albumSyncTarget1.uuidString,
+                                       userEmail: "other@example.invalid", name: "Other", isAdmin: false, serverVersion: fixture.session.serverVersion)
+            let otherScope = MediaAccountScope(session: other)
+            if account {
+                try await fixture.store.prepare(scope: otherScope)
+                try await fixture.store.savePhotoBackups(.init(namespace: otherScope.cacheNamespace), scope: otherScope)
+                try await fixture.store.savePhotoBackupAlbumSyncPlan(.init(namespace: otherScope.cacheNamespace), scope: otherScope)
+                fixture.manager.configure(session: other, endpoint: fixture.endpoint)
+                fixture.matching.configure(using: fixture.manager, scope: otherScope)
+                await fixture.backup.load(using: fixture.manager)
+            }
+            fixture.sync.cancel()
+            await fixture.server.release(); await old.value
+            #expect(try await fixture.coldState().creations.first?.phase == .sending)
+            if account {
+                #expect(try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).creations.isEmpty)
+            }
+            await fixture.restoreAccount()
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            #expect(restored.state.creations.first?.phase == .unknown)
+            await fixture.server.setMode(.normal)
+            await fixture.run(restored.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().mappings.isEmpty)
+            #expect(await fixture.server.creationCount() == 1)
+        }
+    }
+
+    /// 明确403在发送后持久记拒绝；新一轮预览/确认才允许另一个创建意图，不自动重试，也保留原失败历史。
+    @Test(.timeLimit(.minutes(1))) @MainActor func rejectedCreationNeedsANewExplicitPreview() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Denied", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.server.setMode(.createRejected)
+            await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().creations.first?.phase == .rejected)
+            #expect(await fixture.server.createdIDs().isEmpty)
+            await fixture.server.setMode(.normal)
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Allowed", using: fixture.manager, backup: fixture.backup))
+            let latest = try await fixture.coldState()
+            let newID = try #require(latest.creations.last?.id)
+            #expect(newID != id)
+            #expect(await fixture.server.creationCount() == 1)
+            await fixture.run(fixture.sync.createAndMap(newID, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().creations.last?.phase == .mapped)
+            #expect(await fixture.server.creationCount() == 2)
+        }
+    }
+
+    /// v1可读，首次预览升v2；旧格式、丢历史或unknown回退prepared皆不能覆盖SQLite事实并触发重POST。
+    @Test(.timeLimit(.minutes(1))) @MainActor func creationLedgerRejectsDowngradeLossAndSendRewind() async throws {
+        try await withAlbumSyncFixture { fixture in
+            #expect(try await fixture.coldState().version == 1)
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Intent", using: fixture.manager, backup: fixture.backup))
+            var saved = try await fixture.coldState()
+            #expect(saved.version == 2)
+            let oldFormat = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace)
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(oldFormat, scope: fixture.scope) }
+            let lost = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, version: 2)
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(lost, scope: fixture.scope) }
+            saved.creations[0].phase = .sending
+            try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope)
+            saved.creations[0].phase = .unknown
+            try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope)
+            saved.creations[0].phase = .prepared
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope) }
+            #expect(try await fixture.coldState().creations.first?.phase == .unknown)
+            #expect(await fixture.server.creationCount() == 0)
+        }
+    }
+
+    /// 用户取消尚未发送的预览后可重新命名预览；旧意图保留abandoned，全程零POST和零成员写入。
+    @Test(.timeLimit(.minutes(1))) @MainActor func unattemptedCreationPreviewCanBeAbandonedWithoutPOST() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "First", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.run(fixture.sync.abandonPreparedCreation(id, using: fixture.manager, backup: fixture.backup))
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Second", using: fixture.manager, backup: fixture.backup))
+            let latest = try await fixture.coldState()
+            #expect(latest.creations.count == 2 && latest.creations.first?.phase == .abandoned && latest.creations.last?.phase == .prepared)
+            #expect(await fixture.server.creationCount() == 0)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
         }
     }
 }
@@ -284,7 +454,10 @@ private nonisolated struct AlbumSyncRequest: Sendable {
 /// JSON成员服务的逐项故障/恢复边界；只接受既有GET/PUT，不提供上传、媒体下载、POST创建或删除接口。
 private actor AlbumSyncHTTPServer {
     /// 模拟逐项回执、提交后失联以及真实读取/写入等待门，不改变客户端控制流。
-    enum Mode: String, Sendable { case normal, duplicate, errorAfterCommit, missingAfterSuccess, denyJPEG, heldAfterCommit, heldJPEGRead }
+    enum Mode: String, Sendable { case normal, duplicate, errorAfterCommit, missingAfterSuccess, denyJPEG, heldAfterCommit, heldJPEGRead
+        case createErrorAfterCommit, createWrongStatus, createMalformed, createRejected, heldCreateAfterCommit, createReadFailure
+    }
+
     /// 交付给真实URLProtocol的HTTP状态与JSON字节。
     struct Reply: Sendable { let status: Int; let data: Data }
     let endpoint: URL
@@ -301,6 +474,8 @@ private actor AlbumSyncHTTPServer {
     private var heldObservers: [CheckedContinuation<Bool, Never>] = []
     private var active = 0
     private var idleObservers: [CheckedContinuation<Void, Never>] = []
+    private var created: [UUID: String] = [:]
+    private var creates = 0
 
     /// endpoint与kind固定本例公开请求/媒体类型；全部资产与身份都为合成值。
     init(endpoint: URL, kind: PhotoBackupSource.Kind) {
@@ -332,9 +507,19 @@ private actor AlbumSyncHTTPServer {
         puts[id] ?? 0
     }
 
+    /// 独立服务端创建次数/真实UUID集合；不能用客户端状态推断POST是否提交。
+    func creationCount() -> Int {
+        creates
+    }
+
+    /// 返回本例服务真实已创建UUID，不与客户端预期对象共享可变引用。
+    func createdIDs() -> [UUID] {
+        Array(created.keys)
+    }
+
     /// 组织过程不得使用创建、上传、原片/预览下载或删除接口。
-    func onlyMetadataAndMembershipRoutes() -> Bool {
-        events.allSatisfy { $0.0 == "GET" || ($0.0 == "PUT" && $0.1.hasSuffix("/assets")) }
+    func onlyMetadataAndMembershipRoutes(allowCreation: Bool = false) -> Bool {
+        events.allSatisfy { $0.0 == "GET" || ($0.0 == "PUT" && $0.1.hasSuffix("/assets")) || (allowCreation && $0.0 == "POST" && $0.1 == "/api/albums") }
     }
 
     /// 同目标/资产UUID唯一关系；名称与数组顺序不参与身份。
@@ -344,7 +529,7 @@ private actor AlbumSyncHTTPServer {
 
     /// 官方当前相簿投影，两个同名目标靠UUID区分；owner来自有序albumUsers。
     private func album(_ id: UUID) -> [String: Any] {
-        ["id": id.uuidString, "albumName": "同名目标", "albumUsers": [["role": "owner", "user": ["id": mismatch == "target" ? albumSyncPrimary.uuidString : albumSyncOwner]]]]
+        ["id": id.uuidString, "albumName": created[id] ?? "同名目标", "albumUsers": [["role": "owner", "user": ["id": mismatch == "target" ? albumSyncPrimary.uuidString : albumSyncOwner]]]]
     }
 
     /// 将有限合成响应转为真正HTTP字节，不直接返回客户端业务DTO。
@@ -358,15 +543,40 @@ private actor AlbumSyncHTTPServer {
         guard !aborted, request.authorization == "Bearer album-sync-fixture", request.url.host == endpoint.host else { throw URLError(.userAuthenticationRequired) }
         events.append((request.method, request.url.path))
         let path = request.url.path
+        let targets = [albumSyncTarget1, albumSyncTarget2] + created.keys.sorted { $0.uuidString < $1.uuidString }
+        if request.method == "POST", path == "/api/albums" {
+            // 真正POST JSON只允许空相簿名/空assetIds，无用户、成员或自造幂等键。
+            guard let body = request.body else { throw URLError(.cannotDecodeRawData) }
+            let decoded = try JSONSerialization.jsonObject(with: body)
+            guard let object = decoded as? [String: Any], Set(object.keys) == ["albumName", "assetIds"], let name = object["albumName"] as? String,
+                  !name.isEmpty, let ids = object["assetIds"] as? [String], ids.isEmpty else { throw URLError(.cannotDecodeContentData) }
+            creates += 1
+            if mode == .createRejected {
+                return .init(status: 403, data: Data())
+            }
+            let id = UUID(); created[id] = name
+            if mode == .heldCreateAfterCommit {
+                await holdResponse()
+            }
+            if mode == .createErrorAfterCommit {
+                throw URLError(.networkConnectionLost)
+            }
+            let response: [String: Any] = mode == .createMalformed ? ["id": id.uuidString, "albumName": name] : album(id)
+            let data = try json(response).data
+            return .init(status: mode == .createWrongStatus ? 200 : 201, data: data)
+        }
         if request.method == "GET", path == "/api/albums" {
             let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             if query.isEmpty {
-                return try json([album(albumSyncTarget1), album(albumSyncTarget2)])
+                return try json(targets.map { album($0) })
             }
             guard query.count == 1, query.first?.name == "assetId", let text = query.first?.value, let asset = UUID(uuidString: text) else { throw URLError(.badURL) }
-            return try json([albumSyncTarget1, albumSyncTarget2].filter { members.contains(key(asset, $0)) }.map { album($0) })
+            return try json(targets.filter { members.contains(key(asset, $0)) }.map { album($0) })
         }
-        if request.method == "GET", let target = [albumSyncTarget1, albumSyncTarget2].first(where: { path == "/api/albums/" + $0.uuidString }) {
+        if request.method == "GET", let target = targets.first(where: { path == "/api/albums/" + $0.uuidString }) {
+            if mode == .createReadFailure, created[target] != nil {
+                return .init(status: 503, data: Data())
+            }
             return try json(album(target))
         }
         if request.method == "GET", path == "/api/assets/" + albumSyncPrimary.uuidString + "/metadata/mobile-app" {
@@ -383,7 +593,7 @@ private actor AlbumSyncHTTPServer {
                              "updatedAt": albumSyncRevision.addingTimeInterval(mismatch == "revision" ? 1 : 0).ISO8601Format(),
                              "livePhotoVideoId": kind == .livePhoto ? albumSyncMotion.uuidString : NSNull(), "exifInfo": NSNull()])
         }
-        if request.method == "PUT", let target = [albumSyncTarget1, albumSyncTarget2].first(where: { path == "/api/albums/" + $0.uuidString + "/assets" }) {
+        if request.method == "PUT", let target = targets.first(where: { path == "/api/albums/" + $0.uuidString + "/assets" }) {
             // 解码真正客户端请求，未知字段或批量身份均拒绝。
             struct Body: Decodable { let ids: [UUID] }
             guard let body = request.body else { throw URLError(.cannotDecodeRawData) }

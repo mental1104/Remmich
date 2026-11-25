@@ -120,7 +120,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
         let operations = try db.query("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? ORDER BY position",
                                       [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupAlbumSyncOperation)
-        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version)
+        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version, creations: header.creations ?? [])
+        guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
         try state.validate(namespace: scope.cacheNamespace)
         return state
     }
@@ -131,6 +132,12 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         let db = try photoBackupAlbumSyncDatabase(scope: scope)
         try db.transaction {
             let previous = try loadPhotoBackupAlbumSync(scope: scope)
+            guard state.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
+            let intents = Dictionary(uniqueKeysWithValues: state.creations.map { ($0.id, $0) })
+            for old in previous.creations {
+                guard let current = intents[old.id] else { throw PhotoBackupStateError.invalidJournal }
+                try current.validate(replacing: old)
+            }
             let byID = Dictionary(uniqueKeysWithValues: state.operations.map { ($0.id, $0) })
             for old in previous.operations {
                 guard let current = byID[old.id], current.localAlbumID == old.localAlbumID, current.targetID == old.targetID,
@@ -155,7 +162,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         try db.transaction {
             guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { throw PhotoBackupStateError.invalidJournal }
             let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
-            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version).validate(namespace: scope.cacheNamespace)
+            guard header.version != 2 || header.creations != nil else { throw PhotoBackupStateError.invalidJournal }
+            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version, creations: header.creations ?? []).validate(namespace: scope.cacheNamespace)
             guard let previous = try db.queryOne("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? AND operation_id=?",
                                                  [.text(scope.cacheNamespace), .text(operation.id.uuidString)], map: Self.decodePhotoBackupAlbumSyncOperation),
                 previous.localAlbumID == operation.localAlbumID, previous.targetID == operation.targetID, previous.source == operation.source, previous.assets == operation.assets

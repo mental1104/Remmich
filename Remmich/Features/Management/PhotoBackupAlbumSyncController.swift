@@ -87,6 +87,9 @@ import Photos
             for index in saved.operations.indices where saved.operations[index].phase == .sending {
                 saved.operations[index].phase = .unknown; saved.operations[index].failure = .unconfirmed
             }
+            for index in saved.creations.indices where saved.creations[index].phase == .sending {
+                saved.creations[index].phase = .unknown
+            }
             let localNames = try names(Set(journal.selectedAlbumIDs).union(journal.excludedAlbumIDs ?? []))
             state = saved; targets = values; titles = localNames; loadedScope = scope; prepared = false; previewIDs = []
             status = "已读取当前账户目标。名称相同也须明确选择；缺失或无权限目标不会自动创建或替换。"
@@ -112,6 +115,9 @@ import Photos
             saved.mappings.removeAll { $0.localAlbumID == localID }
             if let targetID, let target {
                 saved.mappings.append(.init(localAlbumID: localID, targetID: targetID, targetName: target.albumName))
+                for index in saved.creations.indices where saved.creations[index].localAlbumID == localID && saved.creations[index].unresolved {
+                    saved.creations[index].phase = .mapped; saved.creations[index].mappedTargetID = targetID
+                }
             }
             for index in saved.operations.indices where saved.operations[index].localAlbumID == localID && saved.operations[index].phase != .confirmed {
                 saved.operations[index].phase = .cancelled
@@ -296,6 +302,114 @@ import Photos
         collections.enumerateObjects { value, _, _ in values[value.localIdentifier] = value.localizedTitle ?? "未命名相簿" }
         guard Set(values.keys) == ids else { throw PhotoBackupAlbumSelectionError.unavailableAlbum }
         return values
+    }
+}
+
+extension PhotoBackupAlbumSyncController {
+    /// localID/name来自明确输入；先fresh检查保存规则和目标列表，只保存待确认意图，不发POST或同名认领。
+    @discardableResult func prepareCreation(localID: String, name: String, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard journal.selectedAlbumIDs.contains(localID), !saved.creations.contains(where: { $0.localAlbumID == localID && $0.unresolved }) else { throw LibraryWriteError.busy }
+            _ = try sourcesByAlbum(Selection(journal)); try check()
+            let intent = PhotoBackupAlbumCreation(localAlbumID: localID, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+            try intent.validate()
+            let values = try await client.albumSyncTargets(); try check()
+            saved.version = 2; saved.creations.append(intent)
+            try await saveCreationState(saved, scope: scope, check: check)
+            targets = values
+            status = "创建预览已保存：‘\(intent.name)’。当前有 \(values.count { $0.albumName == intent.name }) 本同名相簿；确认会另建空相簿，不会按名称认领。原目标及成员保留。"
+        }
+    }
+
+    /// id只能是尚未发送的已保存意图；sending在POST前落盘，取消/坏回执/未知网络结果都禁止重发。
+    @discardableResult func createAndMap(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared,
+                  journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
+            _ = try sourcesByAlbum(Selection(journal)); try check()
+            saved.creations[index].phase = .sending
+            try await saveCreationState(saved, scope: scope, check: check)
+            let receipt: ManagedAlbum
+            do { receipt = try await client.albumSyncCreate(name: saved.creations[index].name) }
+            catch {
+                try check()
+                if case let LibraryWriteError.http(status) = error, [400, 401, 403].contains(status) {
+                    saved.creations[index].phase = .rejected
+                } else {
+                    saved.creations[index].phase = .unknown
+                }
+                try await saveCreationState(saved, scope: scope, check: check)
+                status = saved.creations[index].phase == .rejected ? "创建请求被拒绝。原映射保留；修正权限/输入后可重新预览明确创建。" : "创建结果未知，未重发。请只读重核并明确选择现有目标；同名或新增列表项不能证明是本次创建。"
+                return
+            }
+            try check()
+            guard let targetID = UUID(uuidString: receipt.id) else { throw LibraryWriteError.malformedResponse }
+            saved.creations[index].receiptID = targetID; saved.creations[index].phase = .received
+            try await saveCreationState(saved, scope: scope, check: check)
+            try await confirmCreatedMapping(&saved, index: index, client: client, scope: scope, check: check)
+        }
+    }
+
+    /// 恢复只GET；有持久201 UUID才核同一对象并自动完成映射，无UUID只刷新目标供明确选择，绝不POST。
+    @discardableResult func recoverCreation(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].unresolved, saved.creations[index].phase != .prepared,
+                  journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
+            _ = try sourcesByAlbum(Selection(journal)); try check()
+            if saved.creations[index].receiptID != nil {
+                try await confirmCreatedMapping(&saved, index: index, client: client, scope: scope, check: check)
+            } else {
+                let values = try await client.albumSyncTargets(); try check()
+                saved.creations[index].phase = .unknown
+                try await saveCreationState(saved, scope: scope, check: check)
+                targets = values
+                status = "已刷新现有目标；无法唯一核实本次创建。请在相簿选择器明确选目标，未按名称认领，也未再次POST。"
+            }
+        }
+    }
+
+    /// 仅未发送预览可撤销，保留终态历史；未知/已发送意图须只读核查或明确映射，不能以撤销绕过防重放。
+    @discardableResult func abandonPreparedCreation(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] _, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared else { throw LibraryWriteError.unavailable }
+            saved.creations[index].phase = .abandoned
+            try await saveCreationState(saved, scope: scope, check: check)
+            status = "未发送的创建预览已取消；没有创建或删除远端相簿。"
+        }
+    }
+
+    /// index必须持有本次201的精确UUID；fresh相同owner/name才原子保存映射，不能用列表同名填补丢失回执。
+    private func confirmCreatedMapping(_ saved: inout PhotoBackupAlbumSyncState, index: Int, client: LibraryMutationClient,
+                                       scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws
+    {
+        guard let id = saved.creations[index].receiptID else { throw LibraryWriteError.unavailable }
+        let fresh = try await client.albumSyncTarget(id); try check()
+        guard fresh.albumName == saved.creations[index].name else { throw LibraryWriteError.malformedResponse }
+        let localID = saved.creations[index].localAlbumID
+        saved.mappings.removeAll { $0.localAlbumID == localID }
+        saved.mappings.append(.init(localAlbumID: localID, targetID: id, targetName: fresh.albumName))
+        saved.creations[index].phase = .mapped; saved.creations[index].mappedTargetID = id
+        for offset in saved.operations.indices where saved.operations[offset].localAlbumID == localID && saved.operations[offset].phase != .confirmed {
+            saved.operations[offset].phase = .cancelled
+        }
+        try await saveCreationState(saved, scope: scope, check: check)
+        if !targets.contains(where: { UUID(uuidString: $0.id) == id }) {
+            targets.append(fresh)
+        }
+        status = "新空相簿已fresh核实并保存映射；原相簿与成员保留。照片仍须另行预览并确认增量补入。"
+    }
+
+    /// 保存同一账本的创建状态；写前后核上下文，失败上抛，不发POST或覆盖上传任务。
+    private func saveCreationState(_ saved: PhotoBackupAlbumSyncState, scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws {
+        try check(); try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
+        state = saved; prepared = false; previewIDs = []
     }
 }
 

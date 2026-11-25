@@ -479,6 +479,16 @@ final nonisolated class LibraryMutationClient: Sendable {
         return values.filter { UUID(uuidString: $0.ownerId) == owner }
     }
 
+    /// 仅明确创建空相簿；精确201和本次owner/name/UUID回执才返回，网络/坏回执不得重试或同名认领。
+    func albumSyncCreate(name: String) async throws -> ManagedAlbum {
+        // 不附加用户、成员或伪幂等键；POST身份仅来自官方201响应。
+        struct Body: Encodable { let albumName: String; let assetIds: [UUID] = [] }
+        let data = try await send("POST", ["albums"], body: JSONEncoder().encode(Body(albumName: name)), expectedStatus: 201)
+        let value = try JSONDecoder().decode(ManagedAlbum.self, from: data)
+        guard UUID(uuidString: value.id) != nil, let owner = UUID(uuidString: userID), UUID(uuidString: value.ownerId) == owner, value.albumName == name else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
     /// 开始/恢复与成员写入后均fresh验证同一目标及owner；编辑者目标留后续，不以缓存角色推测许可。
     func albumSyncTarget(_ id: UUID) async throws -> ManagedAlbum {
         let data = try await send("GET", ["albums", id.uuidString], expectedStatus: 200)
