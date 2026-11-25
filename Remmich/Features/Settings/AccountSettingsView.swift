@@ -283,7 +283,8 @@ struct AccountSettingsView: View {
         .accessibilityIdentifier("account-settings")
         .sheet(isPresented: $showsBackup) {
             if let sessionController {
-                PhotoBackupView(controller: sessionController.media.management, backup: sessionController.media.photoBackups, matching: sessionController.media.localMediaMatches)
+                PhotoBackupView(controller: sessionController.media.management, backup: sessionController.media.photoBackups,
+                                albumSync: sessionController.media.photoBackupAlbumSync, albumAutomation: sessionController.media.photoBackupAlbumAutomation)
             }
         }
         .sheet(isPresented: $showsLocalMediaMatching) {

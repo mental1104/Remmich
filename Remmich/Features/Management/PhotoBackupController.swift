@@ -456,6 +456,13 @@ import Photos
         }
     }
 
+    /// 自动组织只等待当前上传/扫描真正退役，不取消它；await后的调用方仍须重新核账号/权限和新工作门禁。
+    func waitForCurrentWork() async {
+        let automatic = automaticTask, manual = task
+        await automatic?.value
+        await manual?.value
+    }
+
     /// 已读取账户配置后的包含/排除/iCloud改动都属于未保存草稿；直到成功扫描才解除恢复/重试门禁。
     /// 初始构造不创建草稿；apply恢复配置时会在全部字段赋值后统一清除标记。
     private func markSelectionDraftChanged() {

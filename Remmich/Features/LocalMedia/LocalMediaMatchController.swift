@@ -212,6 +212,25 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         task = operation; return operation
     }
 
+    /// headless组织专用冷恢复：只读取同账号已保存关联，不启动全库扫描/hash、Photos授权或iCloud媒体访问。
+    /// manager/scope是当前processing租约身份；应使用独立Controller，所有关联随后仍由组织路径逐项fresh核证。
+    func restoreForAlbumOrganization(using manager: LibraryManagementController, scope: MediaAccountScope) async throws {
+        configure(using: manager, scope: scope)
+        guard !running else { throw LibraryWriteError.busy }
+        let run = generation, owner = manager.generation
+        let document = try await persistence.load(scope: scope)
+        try validate(manager, owner: owner, scope: scope, run: run)
+        enabled = document?.enabled ?? false
+        access = document?.access
+        if enabled, document?.access == inventory.authorization {
+            associations = Dictionary(uniqueKeysWithValues: (document?.associations ?? []).map { ($0.remoteID, $0) })
+        } else {
+            associations = [:]
+        }
+        restoredNamespace = scope.cacheNamespace
+        publishCounts(); revision += 1
+    }
+
     /// 仅用户操作改变启用配置；关闭立即失效关联并保存，启用后显式扫描可请求初次Photos授权。
     @discardableResult func setEnabled(_ value: Bool, using manager: LibraryManagementController) -> Task<Void, Never>? {
         guard self.manager === manager, let scope else { return nil }

@@ -738,6 +738,348 @@ struct PhotoBackupAlbumSyncTests {
             #expect(await fixture.server.creationCount() == 1)
         }
     }
+
+    /// 默认off无成员写；明确开后多次事件只补一条关系，冷开关和driver自己的publish均不触发重复循环。
+    @Test(.timeLimit(.minutes(1))) @MainActor func foregroundAlbumAutomationNeedsSavedConsentAndCoalescesEvents() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            try await withAlbumAutomation(fixture) { driver in
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
+                #expect(driver.enabled == false)
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+                await driver.setEnabled(true, using: fixture.manager)
+                for _ in 0 ..< 8 {
+                    driver.contentsChanged()
+                }
+                await fixture.run(driver.contentsChanged())
+                #expect(driver.enabled && !driver.running)
+                #expect(try await fixture.coldState().automaticEnabled)
+                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+                #expect(driver.managementChanged(fixture.manager.revision) == nil)
+                await fixture.run(driver.contentsChanged())
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+                #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            }
+        }
+    }
+
+    /// 自动prepare不能重排失败/未知/用户取消/已完成/已有部分确认历史，且每次冷读都保留原相位和关系证明。
+    @Test(.timeLimit(.minutes(1)), arguments: [PhotoBackupAlbumSyncOperation.Phase.failed, .unknown, .cancelled, .confirmed, .queued])
+    @MainActor func automaticAlbumEventsDoNotReviveUnsafeHistory(_ phase: PhotoBackupAlbumSyncOperation.Phase) async throws {
+        try await withAlbumSyncFixture { fixture in
+            try await fixture.mapAndPrepare()
+            fixture.sync.cancel()
+            var saved = try await fixture.coldState()
+            saved.operations[0].phase = phase
+            if phase == .confirmed || phase == .queued {
+                saved.operations[0].confirmedAssetIDs = [albumSyncPrimary]
+            }
+            try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope)
+            try await withAlbumAutomation(fixture) { driver in
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
+                await driver.setEnabled(true, using: fixture.manager)
+                await fixture.run(driver.contentsChanged())
+                let cold = try await fixture.coldState()
+                #expect(cold.operations.count == 1 && cold.operations.first?.phase == phase)
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+            }
+        }
+    }
+
+    /// 开关仅改原子metadata，不取得Coordinator抢占其他队列；真实Coordinator门内任务必须保持未取消。
+    @Test(.timeLimit(.minutes(1))) @MainActor func disablingAlbumAutomationDoesNotPreemptAnotherCoordinatorOwner() async throws {
+        try await withAlbumSyncFixture { fixture in
+            try await withAlbumAutomation(fixture) { driver in
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: false))
+                await driver.setEnabled(true, using: fixture.manager)
+                let gate = AlbumAutomationGate()
+                let held = Task { try await PhotoBackupRunCoordinator.perform(scope: fixture.scope) { await gate.hold(); return Task.isCancelled } }
+                do {
+                    try await withTaskCancellationHandler {
+                        try #require(await gate.waitUntilEntered())
+                        await driver.setEnabled(false, using: fixture.manager)
+                        #expect(!driver.enabled)
+                        #expect(try await fixture.coldState().automaticEnabled == false)
+                        gate.release()
+                        #expect(try await held.value == false)
+                    } onCancel: { Task { @MainActor in gate.release() } }
+                } catch {
+                    gate.release(); held.cancel(); _ = await held.result; throw error
+                }
+            }
+        }
+    }
+
+    /// 实际PUT提交后转后台/换B只退役不改意愿；回A继续前台仍跳过旧sending，不能因事件重放未知写入。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func automaticAlbumRetirementPreservesUnknownAndAccountIsolation(_ account: Bool) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            try await withAlbumAutomation(fixture) { driver in
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
+                await fixture.server.setMode(.heldAfterCommit); await fixture.server.beginObservedWork()
+                await driver.setEnabled(true, using: fixture.manager)
+                let work = try #require(fixture.track(driver.contentsChanged()))
+                try #require(await fixture.server.waitUntilHeld())
+                let other = AccountSession(apiURL: fixture.endpoint, accessToken: "album-sync-fixture", userID: albumSyncTarget1.uuidString,
+                                           userEmail: "other@example.invalid", name: "Other", isAdmin: false, serverVersion: fixture.session.serverVersion)
+                let otherScope = MediaAccountScope(session: other)
+                if account {
+                    try await fixture.store.prepare(scope: otherScope)
+                    try await fixture.store.savePhotoBackups(.init(namespace: otherScope.cacheNamespace), scope: otherScope)
+                    fixture.manager.configure(session: other, endpoint: fixture.endpoint)
+                    fixture.matching.configure(using: fixture.manager, scope: otherScope)
+                }
+                let retired = driver.conditionsChanged(using: fixture.manager, scope: account ? otherScope : fixture.scope, active: false)
+                await fixture.server.release(); await work.value; await retired?.value
+                #expect(try await fixture.coldState().operations.first?.phase == .sending)
+                #expect(try await fixture.coldState().automaticEnabled)
+                if account {
+                    #expect(try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).operations.isEmpty)
+                }
+                await fixture.restoreAccount(); await fixture.server.setMode(.normal)
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+                #expect(try await fixture.coldState().operations.first?.phase == .sending)
+            }
+        }
+    }
+
+    /// 草稿与权限撤销阻断自动补入；未保存配置不被冷读覆盖，撤权时不主动弹授权或读原片。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func automaticAlbumEventsRespectDraftAndCurrentPermission(_ denied: Bool) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            try await withAlbumAutomation(fixture) { driver in
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: false))
+                await driver.setEnabled(true, using: fixture.manager)
+                if denied {
+                    fixture.photos.authorization = .denied
+                } else {
+                    fixture.backup.excluded = ["draft"]
+                }
+                await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+                if !denied {
+                    #expect(fixture.backup.excluded == ["draft"])
+                }
+                #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).excludedAlbumIDs == ["exclude"])
+                #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            }
+        }
+    }
+
+    /// processing实例入口不启用foreground；保存同意关闭时零写，开启后同一lease内实际完成成员组织。
+    @Test(.timeLimit(.minutes(1))) @MainActor func headlessAlbumCycleUsesSavedConsentWithoutForegroundMode() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            try await withAlbumAutomation(fixture) { driver in
+                let lease = AlbumAutomationLease()
+                let disabled = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() })
+                #expect(disabled && driver.contentsChanged() == nil)
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+                _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+                let completed = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() })
+                #expect(completed && driver.contentsChanged() == nil)
+                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+                #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            }
+        }
+    }
+
+    /// 系统expiration取消真实await入口时必须传给实际PUT Task；服务已提交也保留sending，不落迟到成功。
+    @Test(.timeLimit(.minutes(1))) @MainActor func expiringHeadlessLeaseCancelsTheOwnedMemberTask() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+            try await withAlbumAutomation(fixture) { driver in
+                let lease = AlbumAutomationLease()
+                await fixture.server.setMode(.heldAfterCommit); await fixture.server.beginObservedWork()
+                let work = Task { try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() }) }
+                let observed = Task { _ = await work.result; await fixture.server.workFinished() }
+                do {
+                    try await withTaskCancellationHandler {
+                        try #require(await fixture.server.waitUntilHeld())
+                        lease.current = false; work.cancel(); await fixture.server.release()
+                        switch await work.result {
+                        case .success: Issue.record("Expired album lease must not report successful completion.")
+                        case .failure: break
+                        }
+                        #expect(try await fixture.coldState().operations.first?.phase == .sending)
+                        #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+                    } onCancel: { work.cancel(); Task { await fixture.server.abort() } }
+                } catch {
+                    work.cancel(); await fixture.server.release(); _ = await work.result; await observed.value; throw error
+                }
+                await observed.value
+            }
+        }
+    }
+
+    /// headless实例真实GET/PUT等待中，另一个driver仅持久关规则；不取消原waiter，也必须停止后续PUT/检查点。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func anotherDriverClosingConsentStopsHeadlessBeforeLaterWrites(_ afterPUT: Bool) async throws {
+        try await withAlbumSyncFixture(kind: .rawJPEG) { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+            try await withAlbumAutomation(fixture) { foreground in
+                await fixture.run(foreground.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: false))
+                let other = fixture.makeController()
+                let headless = PhotoBackupAlbumAutomation(sync: other, backup: fixture.backup, matching: fixture.matching,
+                                                          store: SQLiteLibraryIndexStore(databaseURL: fixture.database), authorization: { .authorized }, observePhotos: false)
+                let lease = AlbumAutomationLease()
+                await fixture.server.setMode(afterPUT ? .heldAfterCommit : .heldPrimaryRead)
+                await fixture.server.beginObservedWork()
+                let work = Task { try await headless.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() }) }
+                let observed = Task { _ = await work.result; await fixture.server.workFinished() }
+                do {
+                    try await withTaskCancellationHandler {
+                        try #require(await fixture.server.waitUntilHeld())
+                        await foreground.setEnabled(false, using: fixture.manager)
+                        #expect(lease.current && !foreground.enabled)
+                        await fixture.server.release()
+                        #expect(try await work.value == false)
+                        let cold = try await fixture.coldState()
+                        #expect(cold.automaticEnabled == false && cold.operations.first?.phase == (afterPUT ? .sending : .queued))
+                        #expect(cold.operations.first?.confirmedAssetIDs.isEmpty == true)
+                        #expect(await fixture.server.putCount(albumSyncPrimary) == (afterPUT ? 1 : 0))
+                        #expect(await fixture.server.putCount(albumSyncJPEG) == 0)
+                    } onCancel: { work.cancel(); Task { await fixture.server.abort() } }
+                } catch {
+                    work.cancel(); await fixture.server.release(); _ = await work.result; await observed.value; throw error
+                }
+                await observed.value
+            }
+        }
+    }
+
+    /// 真Worker/client对ABC原片判重→实际SQLite摘要→关闭匹配的headless自动组织，组织不再调用export或上传。
+    @Test(.timeLimit(.minutes(1))) @MainActor func completedWorkerReceiptFeedsHeadlessAlbumOrganizationWithoutOriginalReads() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            await fixture.matching.setEnabled(false, using: fixture.manager)?.value
+            await fixture.server.setPrimaryDigest("qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
+            var journal = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            try journal.enqueue([fixture.photos.source])
+            try await fixture.store.savePhotoBackups(journal, scope: fixture.scope)
+            let exporter = AlbumAutomationExporter(directory: fixture.root.appending(path: "worker-original"), expected: fixture.photos.source)
+            let worker = PhotoBackupWorker(store: fixture.store, exporter: exporter)
+            let client = try #require(fixture.manager.client)
+            let result = try await worker.run(scope: fixture.scope, userID: fixture.scope.userID, allowCloud: journal.allowCloud, client: client, validateContext: {}, progress: { _, _ in })
+            #expect(result.completed == 1 && result.failed == 0 && result.duplicates == 1)
+            let completed = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            #expect(completed.jobs.first?.primaryChecksum == "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
+            #expect(exporter.calls == 1 && exporter.cloudChoices == [true])
+            #expect(!FileManager.default.fileExists(atPath: exporter.directory.path))
+            _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+            try await withAlbumAutomation(fixture) { driver in
+                let lease = AlbumAutomationLease()
+                let organized = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() })
+                #expect(organized)
+                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
+                #expect(await fixture.server.bulkCheckCount() == 1)
+                #expect(exporter.calls == 1 && fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            }
+        }
+    }
+
+    /// 在线headless冷读关联不触发原有restoreAndRefresh自动hash/stream，只在组织请求时重新GET当前metadata/asset。
+    @Test(.timeLimit(.minutes(1))) @MainActor func headlessMatchingRestoreDoesNotStartAFullLibraryScan() async throws {
+        try await withAlbumSyncFixture { fixture in
+            let persistence = LocalMediaAssociationStore(directory: fixture.root.appending(path: "matches"))
+            let matching = LocalMediaMatchController(inventory: fixture.photos, metadata: fixture.photos, checksum: fixture.photos, persistence: persistence, observeChanges: false)
+            try await matching.restoreForAlbumOrganization(using: fixture.manager, scope: fixture.scope)
+            #expect(matching.enabled && !matching.running)
+            let values = try await matching.albumOrganizationAssociations(localIDs: [fixture.photos.source.localID], using: fixture.manager)
+            #expect(values.count == 1 && values.first?.remoteID == albumSyncPrimary)
+            #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            #expect(await fixture.server.onlyMetadataAndMembershipRoutes())
+        }
+    }
+}
+
+/// 仅为真实Worker生产一次已知ABC临时原片；自动组织无该依赖，calls不应再次增加。
+@MainActor private final class AlbumAutomationExporter: PhotoBackupResourceExporting {
+    let directory: URL
+    let expected: PhotoBackupSource
+    private(set) var calls = 0
+    private(set) var cloudChoices: [Bool] = []
+    /// directory是本例私有临时目录，expected固定该Photos合成源，不与其他测试或真实媒体共用。
+    init(directory: URL, expected: PhotoBackupSource) {
+        self.directory = directory; self.expected = expected
+    }
+
+    /// source必须同版本，allowCloud只记录保存意愿；本端口从不访问网络/iCloud，实际Worker负责检查点及清理。
+    func export(_ source: PhotoBackupSource, allowCloud: Bool) async throws -> PhotoBackupResources {
+        guard source == expected else { throw LocalMediaMetadataError.sourceChanged }
+        calls += 1; cloudChoices.append(allowCloud)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appending(path: "abc.jpg")
+        try Data("abc".utf8).write(to: file)
+        return .init(directory: directory, primary: .init(file: file, name: "abc.jpg"), motion: nil,
+                     created: Date(timeIntervalSince1970: 50), modified: source.modifiedAt ?? .distantPast, favorite: false)
+    }
+}
+
+/// 最小processing租约替身只撤销调用权，不伪造Controller完成或写入结果；真实scope/Task检查仍在生产入口。
+@MainActor private final class AlbumAutomationLease {
+    var current = true
+    /// 租约退役即抛取消，调用方在实际Task/HTTP等待中仍必须传播该事实。
+    func check() throws {
+        if !current {
+            throw CancellationError()
+        }
+    }
+}
+
+/// 同一fixture注入真实驱动，结束时先撤销前台epoch再解除HTTP门并等待真正退役；系统观察仅在测试禁用。
+@MainActor private func withAlbumAutomation(_ fixture: AlbumSyncFixture, operation: @MainActor (PhotoBackupAlbumAutomation) async throws -> Void) async throws {
+    let driver = PhotoBackupAlbumAutomation(sync: fixture.sync, backup: fixture.backup, matching: fixture.matching, store: fixture.store,
+                                            authorization: { fixture.photos.authorization == .full ? .authorized : .denied }, observePhotos: false)
+    do {
+        try await withTaskCancellationHandler { try await operation(driver) } onCancel: {
+            Task { @MainActor in driver.conditionsChanged(using: fixture.manager, scope: fixture.manager.backupScope, active: false); await fixture.server.abort() }
+        }
+    } catch {
+        let retiring = driver.conditionsChanged(using: fixture.manager, scope: fixture.manager.backupScope, active: false)
+        await fixture.server.release(); await retiring?.value; throw error
+    }
+    let retiring = driver.conditionsChanged(using: fixture.manager, scope: fixture.manager.backupScope, active: false)
+    await fixture.server.release(); await retiring?.value
+}
+
+/// 真实Coordinator操作的进入/释放门；测试不靠sleep猜测已获得队列所有权。
+@MainActor private final class AlbumAutomationGate {
+    private var entered = false
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var observers: [CheckedContinuation<Bool, Never>] = []
+    /// 只在实际Coordinator闭包执行后挂起，返回前不改变上传/组织状态。
+    func hold() async {
+        entered = true; let values = observers; observers = []; values.forEach { $0.resume(returning: true) }
+        if !released {
+            await withCheckedContinuation { waiter = $0 }
+        }
+    }
+
+    /// true仅表示真实进入；取消前未进入则由release返回false，不能把测试超时当成功。
+    func waitUntilEntered() async -> Bool {
+        if entered {
+            return true
+        }; if released {
+            return false
+        }
+        return await withCheckedContinuation { observers.append($0) }
+    }
+
+    /// 正常/失败/取消均可重复释放，所有等待者都会结束。
+    func release() {
+        released = true; waiter?.resume(); waiter = nil
+        let values = observers; observers = []; values.forEach { $0.resume(returning: false) }
+    }
 }
 
 /// 本例独占SQLite观察连接；真实SQL触发器/原始payload用于检查header-only写入及坏格式保全，不访问生产库。
@@ -824,7 +1166,7 @@ private actor AlbumSyncHTTPServer {
     /// 模拟逐项回执、提交后失联以及真实读取/写入等待门，不改变客户端控制流。
     enum Mode: String, Sendable { case normal, duplicate, errorAfterCommit, missingAfterSuccess, denyJPEG, heldAfterCommit, heldJPEGRead
         case createErrorAfterCommit, createWrongStatus, createMalformed, createRejected, heldCreateAfterCommit, createReadFailure
-        case downgradeAfterMember, downgradeAfterContains
+        case downgradeAfterMember, downgradeAfterContains, heldPrimaryRead
     }
 
     /// 交付给真实URLProtocol的HTTP状态与JSON字节。
@@ -849,6 +1191,7 @@ private actor AlbumSyncHTTPServer {
     private var rawChecksum = albumSyncDigest
     private var jpegChecksum = albumSyncJPEGDigest
     private var lookups = 0
+    private var originalChecks = 0
 
     /// endpoint与kind固定本例公开请求/媒体类型；全部资产与身份都为合成值。
     init(endpoint: URL, kind: PhotoBackupSource.Kind) {
@@ -863,6 +1206,16 @@ private actor AlbumSyncHTTPServer {
     /// 仅改变外部fresh证据，用于检验旧关联不能授权当前关系写入。
     func setMismatch(_ value: String) {
         mismatch = value
+    }
+
+    /// 仅新Worker用例调整真实服务资产摘要；客户端必须从本次ABC字节计算，不能由服务替它构造上传证明。
+    func setPrimaryDigest(_ digest: String) {
+        rawChecksum = digest
+    }
+
+    /// 上传查重只应来自前置Worker，后续自动相簿不能再次触发原片流程。
+    func bulkCheckCount() -> Int {
+        originalChecks
     }
 
     /// 第二目标改为共享目标；本人刻意位于第三项，不让客户端依赖数组位置提升权限。
@@ -953,10 +1306,17 @@ private actor AlbumSyncHTTPServer {
         let path = request.url.path
         let targets = [albumSyncTarget1, albumSyncTarget2] + created.keys.sorted { $0.uuidString < $1.uuidString }
         if request.method == "POST", path == "/api/assets/bulk-upload-check" {
-            lookups += 1
             guard let body = request.body, let object = try JSONSerialization.jsonObject(with: body) as? [String: Any],
-                  Set(object.keys) == ["assets"], let queries = object["assets"] as? [[String: String]], queries.count == 2,
-                  let rawBytes = Data(base64Encoded: rawChecksum), let jpegBytes = Data(base64Encoded: jpegChecksum) else { throw URLError(.cannotDecodeRawData) }
+                  Set(object.keys) == ["assets"], let queries = object["assets"] as? [[String: String]] else { throw URLError(.cannotDecodeRawData) }
+            if queries.count == 1 {
+                // 真实Worker的单原片查重，与RAW两份独立查询分开计数，防自动组织偷偷重走上传。
+                guard let item = queries.first, Set(item.keys) == ["id", "checksum"], let nonce = item["id"], UUID(uuidString: nonce) != nil,
+                      item["checksum"] == "a9993e364706816aba3e25717850c26c9cd0d89d" else { throw URLError(.cannotDecodeContentData) }
+                originalChecks += 1
+                return try json(["results": [["id": nonce, "action": "reject", "assetId": albumSyncPrimary.uuidString, "isTrashed": false]]])
+            }
+            guard queries.count == 2, let rawBytes = Data(base64Encoded: rawChecksum), let jpegBytes = Data(base64Encoded: jpegChecksum) else { throw URLError(.cannotDecodeRawData) }
+            lookups += 1
             let rawHex = rawBytes.map { String(format: "%02x", $0) }.joined(), jpegHex = jpegBytes.map { String(format: "%02x", $0) }.joined()
             let results: [[String: Any]] = try queries.map { item in
                 guard Set(item.keys) == ["id", "checksum"], let nonce = item["id"], UUID(uuidString: nonce) != nil,
@@ -1012,7 +1372,7 @@ private actor AlbumSyncHTTPServer {
             return try json(["key": "mobile-app", "updatedAt": albumSyncRevision.ISO8601Format(), "value": ["iCloudId": "synthetic-cloud-id", "createdAt": Date(timeIntervalSince1970: mismatch == "metadata" ? 51 : 50).ISO8601Format()]])
         }
         if request.method == "GET", let asset = [albumSyncPrimary, albumSyncJPEG].first(where: { path == "/api/assets/" + $0.uuidString }) {
-            if mode == .heldJPEGRead, asset == albumSyncJPEG {
+            if mode == .heldJPEGRead && asset == albumSyncJPEG || mode == .heldPrimaryRead && asset == albumSyncPrimary {
                 await holdResponse()
             }
             let offline: Any = mismatch == "unknown-online" ? NSNull() : mismatch == "offline"

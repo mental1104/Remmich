@@ -216,13 +216,30 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         return result
     }
 
-    /// 热检查点仅更新已计划的同源/同目标/同证明组；不能插入新任务或重写全部历史。
-    func savePhotoBackupAlbumSyncOperation(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope) throws {
+    /// 自动实际发送前只读取当前头，不扫描全部操作；仍验证版本/namespace/创建/意愿字段并遵守账号删除门禁。
+    /// scope是当前已认证账号；缺少头/已删除返回false，损坏/未来格式/取消抛错，true才允许继续自动写。
+    func photoBackupAlbumSyncAutomaticEnabled(scope: MediaAccountScope) throws -> Bool {
+        try Task.checkCancellation()
+        guard try canRead(scope) else { return false }
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { return false }
+        let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
+        guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
+        try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version,
+                                      creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false).validate(namespace: scope.cacheNamespace)
+        try Task.checkCancellation()
+        return header.automaticEnabled ?? false
+    }
+
+    /// 热检查点只更新同身份行；requiresAutomaticConsent为自动路径事务内再核意愿，避免关闭恰在fresh读和落盘之间被越过。
+    /// operation/scope仍绑定原计划；默认false保留手动确认，true在已关闭时抛错且不修改行。
+    func savePhotoBackupAlbumSyncOperation(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope, requiresAutomaticConsent: Bool = false) throws {
         try Task.checkCancellation(); try operation.validate()
         let db = try photoBackupAlbumSyncDatabase(scope: scope)
         try db.transaction {
             guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { throw PhotoBackupStateError.invalidJournal }
             let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
+            guard !requiresAutomaticConsent || header.automaticEnabled == true else { throw PhotoBackupStateError.invalidTransition }
             guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
             try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: [operation], version: header.version,
                                           creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false).validate(namespace: scope.cacheNamespace)
