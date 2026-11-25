@@ -81,10 +81,47 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 }
 
+/// 相簿管理使用的最小身份投影；当前官方响应从albumUsers首个owner取得兼容ownerId，不推断其他成员的写权限。
 nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+
+    /// id/albumName/ownerId为已有调用方的显式快照构造；不增加网络请求或改变原管理权限判断。
+    init(id: String, albumName: String, ownerId: String) {
+        self.id = id; self.albumName = albumName; self.ownerId = ownerId
+    }
+
+    /// 保留原ownerId响应读取；该字段缺失/null时才按当前官方有序albumUsers核对首个owner。
+    /// decoder仅提供本次HTTP响应，不从登录用户、任意成员或界面缓存猜测所有者；不完整的新投影直接失败。
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        albumName = try values.decode(String.self, forKey: .albumName)
+        // 已有ownerId合同原样保留，包括旧响应中不同形状的albumUsers附加信息。
+        if let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId) {
+            ownerId = legacyOwner
+            return
+        }
+        let members = try values.decode([OwnerMember].self, forKey: .albumUsers)
+        guard let first = members.first, first.role == "owner", !first.user.id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .albumUsers, in: values,
+                                                   debugDescription: "Album users must begin with the owner.")
+        }
+        ownerId = first.user.id
+    }
+
+    /// 只读取实际管理投影字段；未知响应字段保持原Decodable兼容行为。
+    private enum CodingKeys: String, CodingKey { case id, albumName, ownerId, albumUsers }
+
+    /// 当前AlbumUserResponse的公开嵌套形状；保留原顺序，只用首项确认兼容所有者身份。
+    private nonisolated struct OwnerMember: Decodable, Sendable {
+        let user: OwnerUser
+        let role: String
+    }
+
+    /// 只需要当前公开用户的ID，不要求姓名、邮箱、头像等与所有权无关的字段。
+    private nonisolated struct OwnerUser: Decodable, Sendable { let id: String }
 }
 
 nonisolated struct AssetEditList: Codable, Sendable {
