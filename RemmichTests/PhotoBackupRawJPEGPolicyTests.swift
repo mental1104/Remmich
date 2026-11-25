@@ -81,6 +81,24 @@ struct PhotoBackupRawJPEGPolicyTests {
         }
     }
 
+    /// 损坏恢复JSON不能比完成入口更宽松：双UUID不同但摘要相同的completed仍须拒绝。
+    @Test func rejectsCompletedRecoveryWithIdenticalChecksums() throws {
+        let pair = try PhotoBackupRawJPEGSource(originals: [original(kind: .photo, uti: "com.adobe.raw-image", filename: "synthetic.dng"),
+                                                            original(kind: .alternatePhoto, uti: "public.jpeg", filename: "synthetic.jpg")], hasAdjustments: false, adjustmentTime: nil)
+        var job = PhotoBackupJob(source: .init(localID: "synthetic", modifiedAt: Date(timeIntervalSince1970: 1), kind: .rawJPEG, rawJPEG: pair))
+        try job.begin(); try job.exported()
+        let rawChecksum = Data(repeating: 1, count: 20).base64EncodedString()
+        try job.recordImage(.init(assetID: UUID(), checksum: rawChecksum, duplicate: false), role: .raw)
+        try job.recordImage(.init(assetID: UUID(), checksum: Data(repeating: 2, count: 20).base64EncodedString(), duplicate: false), role: .jpeg)
+        try job.imagesUploaded(); try job.confirmVerifiedImages()
+        let encoded = try JSONEncoder().encode(job)
+        let value = try JSONSerialization.jsonObject(with: encoded)
+        var object = try #require(value as? [String: Any])
+        var jpeg = try #require(object["jpegReceipt"] as? [String: Any]); jpeg["checksum"] = rawChecksum; object["jpegReceipt"] = jpeg
+        let corrupted = try JSONDecoder().decode(PhotoBackupJob.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(throws: PhotoBackupStateError.self) { try corrupted.validate() }
+    }
+
     /// 参数构成纯合成公开资源描述；像素固定正值，filename不指向实际文件。
     private func original(kind: PhotoBackupOriginalImage.Kind, uti: String, filename: String) -> PhotoBackupOriginalImage {
         .init(kind: kind, uniformTypeIdentifier: uti, originalFilename: filename, pixelWidth: 3, pixelHeight: 2)

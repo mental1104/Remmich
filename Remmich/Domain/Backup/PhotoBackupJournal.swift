@@ -41,7 +41,7 @@ nonisolated enum PhotoBackupStateError: Error, Equatable, Sendable {
     case invalidTransition, invalidJournal
 }
 
-/// 单个原片/视频/Live Photo逻辑任务；只有全部资源和配对已确认才可完成。
+/// 单个原片/视频/Live Photo/RAW+JPEG逻辑任务；只有全部所需原始资源和必要配对已确认才可完成。
 nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     enum Stage: String, Codable, Sendable {
         case queued, exporting, uploadingMotion, uploadingPrimary, verifying, paused, failed, cancelled, completed
@@ -81,7 +81,7 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
             guard let pair = source.rawJPEG, let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
                   primaryAssetID == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
             try pair.validate(); try rawReceipt?.validate(); try jpegReceipt?.validate()
-            guard stage != .completed || (rawReceipt != nil && jpegReceipt != nil && rawReceipt?.assetID != jpegReceipt?.assetID)
+            guard stage != .completed || (rawReceipt != nil && jpegReceipt != nil && rawReceipt?.assetID != jpegReceipt?.assetID && rawReceipt?.checksum != jpegReceipt?.checksum)
             else { throw PhotoBackupStateError.invalidJournal }
         } else {
             guard source.rawJPEG == nil, rawReceipt == nil, jpegReceipt == nil else { throw PhotoBackupStateError.invalidJournal }
@@ -206,6 +206,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let rawJPEGVersion: Int?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
+        /// rawJPEGVersion仅格式3允许且必须为1；其他格式不得偷偷携带双图资料。
         init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil) {
             self.version = version
             self.namespace = namespace
@@ -297,6 +298,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// sources为一次明确扫描的去重源快照；同版本完成项也重新查重，不能假定服务器永远保留旧备份。
     /// 返回本次新建/重排任务数；旧版本未完成任务取消，避免把不同版本资源拼成Live Photo。
     @discardableResult mutating func enqueue(_ sources: [PhotoBackupSource]) throws -> Int {
+        try validate(namespace: namespace)
         let groups = Dictionary(grouping: sources, by: \.localID)
         guard groups.allSatisfy({ !$0.key.isEmpty && Set($0.value).count == 1 }) else { throw PhotoBackupStateError.invalidJournal }
         // 包含双原图的明确扫描原子升级格式；旧读取器必须先拒绝header，不能漏掉JPEG后继续上传。

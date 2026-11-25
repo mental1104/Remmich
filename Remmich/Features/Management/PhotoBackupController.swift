@@ -222,8 +222,7 @@ import Photos
             for index in 0 ..< assets.count {
                 let asset = assets.object(at: index)
                 guard asset.mediaType == .image || asset.mediaType == .video else { continue }
-                let source = PhotoBackupSource(localID: asset.localIdentifier, modifiedAt: asset.modificationDate,
-                                               kind: asset.mediaType == .video ? .video : asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .photo)
+                let source = PhotoKitBackupResourceExporter.source(for: asset)
                 values.append(.init(source: source, capturedAt: asset.creationDate))
             }
             return .init(id: id, assets: values)

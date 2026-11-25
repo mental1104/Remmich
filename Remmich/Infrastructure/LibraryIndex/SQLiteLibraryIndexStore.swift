@@ -60,6 +60,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             if let previous = try photoBackupHeader(scope: scope, database: db) {
+                // 双图恢复格式不能退回忽略JPEG的旧结构；拒绝覆盖而非把旧读取器的空快照当成用户删除。
                 guard previous.version < 3 || journal.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
                 // 整体替换仅用于扫描/冷快照；先验证已有恢复资料，不能用新空快照覆盖损坏任务行。
                 let saved = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? ORDER BY position",

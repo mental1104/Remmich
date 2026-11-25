@@ -40,6 +40,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let projectionType: String?
     let updatedAt: String?
     let checksum: String?
+    let isOffline: Bool?
 
     /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
@@ -58,10 +59,11 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 
     /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
-    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum/isOffline缺省nil兼容旧构造，存在时仍真实解码。
+    /// isOffline缺失保持未知，新的双原图完整确认不能把nil推断为在线。
     init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
          originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
-         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil, isOffline: Bool? = nil)
     {
         self.id = id
         self.ownerId = ownerId
@@ -75,6 +77,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
         self.projectionType = projectionType
         self.updatedAt = updatedAt
         self.checksum = checksum
+        self.isOffline = isOffline
     }
 }
 

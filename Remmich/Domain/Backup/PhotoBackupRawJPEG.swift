@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 
 /// 单份PhotoKit原始静态图的公开描述；不含文件路径、字节或私有resource身份，顺序不能表示RAW/JPEG角色。
 nonisolated struct PhotoBackupOriginalImage: Codable, Hashable, Sendable {
-    enum Kind: String, Codable, Sendable { case photo, alternatePhoto, unsupported }
+    enum Kind: String, Codable, Hashable, Sendable { case photo, alternatePhoto, unsupported }
     let kind: Kind
     let uniformTypeIdentifier: String
     let originalFilename: String
@@ -21,7 +21,7 @@ nonisolated struct PhotoBackupOriginalImage: Codable, Hashable, Sendable {
 }
 
 /// 同一逻辑照片的两个原始图像角色；固定RAW先行仅决定上传次序，不假定PhotoKit枚举顺序或photo角色就是RAW。
-nonisolated enum PhotoBackupImageRole: String, Codable, Sendable { case raw, jpeg }
+nonisolated enum PhotoBackupImageRole: String, Codable, Hashable, Sendable { case raw, jpeg }
 
 /// 扫描冻结的一RAW一JPEG原始组合；完整描述参与source版本比较，不能只用PHAsset的可空修改时间证明资源一致。
 nonisolated struct PhotoBackupRawJPEGSource: Codable, Hashable, Sendable {
