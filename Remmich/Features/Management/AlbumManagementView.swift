@@ -14,6 +14,8 @@ struct AlbumManagementView: View {
     @State private var showsRename = false
     @State private var managingPhotos: ManagedAlbum?
     @State private var showsDirectory = false
+    @State private var showsSharing = false
+    @State private var showsPublicLinks = false
 
     /// controller维护写入账号代际；source/media由真实Albums页传入，默认nil保留既有基础管理入口。
     init(controller: LibraryManagementController, source: (any TimelineReading)? = nil,
@@ -37,6 +39,12 @@ struct AlbumManagementView: View {
                 }
                 Section("Album directory") {
                     Button("Manage categories and groups") { showsDirectory = true }
+                        .disabled(controller.client == nil)
+                }
+                Section("共享相簿") {
+                    Button("成员与共享权限") { showsSharing = true }
+                        .disabled(controller.client == nil)
+                    Button("相簿公开链接") { showsPublicLinks = true }
                         .disabled(controller.client == nil)
                 }
                 Section("创建相簿") {
@@ -67,6 +75,8 @@ struct AlbumManagementView: View {
             .sheet(isPresented: $showsDirectory, onDismiss: { Task { await load() } }) {
                 AlbumDirectoryManagementView(controller: controller)
             }
+            .sheet(isPresented: $showsSharing, onDismiss: { Task { await load() } }) { AlbumSharingView(controller: controller) }
+            .sheet(isPresented: $showsPublicLinks, onDismiss: { Task { await load() } }) { AlbumPublicLinkView(controller: controller) }
             .sheet(item: $managingPhotos, onDismiss: { Task { await load() } }) { album in
                 if let managementSource, let media {
                     BatchAssetManagementView(album: .init(id: album.id, name: album.albumName),

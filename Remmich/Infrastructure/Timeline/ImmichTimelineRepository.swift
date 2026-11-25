@@ -6,7 +6,7 @@ import OSLog
 #endif
 
 /// 真实Immich读取适配器；持有当前账号/端点代际，拒绝把旧上下文响应发布给Feature。
-actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReading, AlbumReading {
+actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReading, AlbumReading, PartnerTimelinePolicyReading {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
         category: "TimelineRepository"
@@ -772,6 +772,41 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         let (_, owner) = try requestContext()
         try Task.checkCancellation()
         return ManagementTimelineReader(repository: self, owner: owner)
+    }
+
+    /// 同步前后直接读取当前incoming伙伴策略，绕过索引GET；后台同样依赖原repo会话而不是尚未配置的Media管理器。
+    /// scope限定原账号；readLoader沿用既有隔离HTTP字节边界，真实生产使用禁止重定向/缓存的受限客户端。
+    func partnerTimelinePolicy(scope: MediaAccountScope) async throws -> PartnerTimelinePolicy {
+        let (_, owner) = try requestContext()
+        guard let session, let activeEndpoint, MediaAccountScope(session: session) == scope else { throw CancellationError() }
+        let incoming: [ManagedPartner]
+        do {
+            if let readLoader {
+                var components = URLComponents(url: activeEndpoint.appending(path: "partners"), resolvingAgainstBaseURL: false)
+                components?.queryItems = [.init(name: "direction", value: "shared-with")]
+                guard let url = components?.url else { throw TimelineReadError.invalidResponse }
+                var request = URLRequest(url: url); request.httpMethod = "GET"; request.timeoutInterval = 15
+                request.cachePolicy = .reloadIgnoringLocalCacheData; request.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+                let (data, response) = try await readLoader(request, "getPartners")
+                guard response.statusCode == 200, response.url == url else { throw TimelineReadError.invalidResponse }
+                incoming = try JSONDecoder().decode([ManagedPartner].self, from: data)
+            } else {
+                let client = LibraryMutationClient(apiURL: activeEndpoint, token: session.accessToken, userID: session.userID)
+                defer { client.cancel() }
+                incoming = try await client.partnerSharing(.incoming)
+            }
+            try Task.checkCancellation(); try requireCurrent(owner)
+            return try .init(scope: scope, incoming: incoming)
+        } catch { try requireCurrent(owner); throw error }
+    }
+
+    /// 旧policy的持久GET不能在新证书accept后的冷恢复中复活；仅复用原index lane退役，媒体/导出和相簿不动。
+    func retirePartnerTimelineIndexReads(scope: MediaAccountScope) async throws {
+        let (_, owner) = try requestContext()
+        guard let session, MediaAccountScope(session: session) == scope else { throw CancellationError() }
+        try Task.checkCancellation()
+        try await transfers?.retirePartnerTimelineIndexPass(namespace: scope.cacheNamespace)
+        try Task.checkCancellation(); try requireCurrent(owner)
     }
 
     /// 每次读取先验证原代际，随后使用同一真实凭据的前台通道；测试loader也不经过持久队列。

@@ -8,7 +8,11 @@ swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
   Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
+  Remmich/Domain/Management/AssetMetadata.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
+  Remmich/Domain/Management/AlbumSharing.swift \
+  Remmich/Domain/Management/AlbumPublicLink.swift \
+  Remmich/Domain/Management/PartnerSharing.swift \
   Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
   Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
   Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \

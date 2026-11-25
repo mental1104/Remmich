@@ -518,6 +518,14 @@ actor LibraryTransferQueue {
         try? persist()
     }
 
+    /// 伙伴查询作用域证书之前必须持久退休旧index GET；原finishIndexPass的best-effort写盘不能充当崩溃恢复证明。
+    /// 只动当前namespace的index lane，I/O失败抛错阻止新证书/accept，不影响cache、导出或相簿任务。
+    func retirePartnerTimelineIndexPass(namespace: String) throws {
+        guard journal.owner?.namespace == namespace else { throw CancellationError() }
+        discard(journal.remove(lane: "index"), committed: true)
+        try persist()
+    }
+
     func finishAlbumIndexPass(namespace: String) {
         guard journal.owner?.namespace == namespace else { return }
         discard(journal.removeFinishedAlbums(), committed: true)

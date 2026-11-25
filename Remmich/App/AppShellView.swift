@@ -352,8 +352,10 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
+        // 同一管理观察器交付日期/伙伴索引核对，并通知原备份Controller；两条消费路径共用原账号上下文。
         .onChange(of: media.management.revision) { _, _ in
-            sessionController?.libraryIndex.syncNow()
+            sessionController?.libraryIndex.syncNow(metadataDates: media.management.takeMetadataDateProjections(),
+                                                    partnerTimelineRefresh: media.management.takePartnerTimelineRefreshRequest(), manager: media.management)
             media.photoBackups.automaticLibraryChanged()
         }
         .onAppear { media.logShellPresented() }

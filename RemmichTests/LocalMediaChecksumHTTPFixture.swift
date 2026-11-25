@@ -13,6 +13,8 @@ nonisolated struct ChecksumLookupExchange: Sendable {
     var authorization = "Bearer checksum-owner"
     var responseJSON: (@Sendable (ChecksumLookupRequest) throws -> String)?
     var contentType = "application/json"
+    /// 明确查询参数与路径分开核对；默认空数组保留所有既有无query场景。
+    var query: [URLQueryItem] = []
 }
 
 /// 有限JSON请求快照；不把Foundation输入流跨actor共享。
@@ -77,7 +79,16 @@ actor ChecksumLookupHTTPScript {
         let index = captured.count; captured.append(request)
         guard exchanges.indices.contains(index) else { throw URLError(.badServerResponse) }
         let exchange = exchanges[index]
-        guard request.method == exchange.method, request.url == endpoint.appending(path: exchange.path),
+        let expectedURL: URL?
+        if exchange.query.isEmpty {
+            // 原无query调用保留同一URL构造表达式，不经过新增的组件重写分支。
+            expectedURL = endpoint.appending(path: exchange.path)
+        } else {
+            var expected = URLComponents(url: endpoint.appending(path: exchange.path), resolvingAgainstBaseURL: false)
+            expected?.queryItems = exchange.query
+            expectedURL = expected?.url
+        }
+        guard request.method == exchange.method, request.url == expectedURL,
               request.authorization == exchange.authorization, request.cookie == nil,
               request.contentType == (request.body == nil ? nil : "application/json") else { throw URLError(.badServerResponse) }
         if exchange.held {
