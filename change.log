@@ -4,6 +4,13 @@
 - Original backup domain/Controller/View/Worker/Info equal ead7 byte-for-byte; SDK, Photos/Library/Editing/native fixture/UI equal e531. AppSession retains sceneSource and date-refresh availability alongside the cold management/background path. Whole workflow-range NAS lint passes0/451 with1 existing skip and diff passes. No Swift/current-service/device acceptance or new CI/push/dev/parent-pin/production change.
 - Development gaps remain: full member-role management entry fix, RAW+JPEG existing overlap proof, automatic album organization and network recovery are separate active slices. Do not mark their unmerged code or final unified acceptance complete. Revert code without deleting recovery journals or asserting remote assets/sharing were undone.
 
+## 2026-11-25: Use complete album roles in actual management entries
+
+- Source: codex/fix-management-album-roles frome531aab, no upstream sync; upstream672f02e retained. Close the documented first-owner restriction using explicit member-role authority separate from the legacy display projection. Any owner/editor can edit properties and members; only an owner can delete an album. Missing/unknown/malformed explicit roles remain read-only and cannot fall back to legacy ownerId.
+- Wire AlbumManagementView, directory View/Store and single-asset album targets, plus batch album actions, through one role policy and fresh management-only GET/preflight. Keep personal viewer category mapping and all existing backup/upload/raw API methods unchanged. Add the required pure-domain source to the offline compiler list only. See docs/management-album-roles.md.
+- Six functions/32 declared focused cases cover actual private-URLSession/manager/Store sequences and retirement, with affected existing sequences updated. NAS scoped format and full lint pass0/454,1 existing skip; bash/diff pass. Source audit parses23 actual JSON templates and preserves19 backup sources, all original client methods, shared fixture and40 old decoding cases. Swift/HTTP/device execution remains UNVERIFIED, deferred to unified acceptance.
+- No CI/push/dev merge/parent gitlink/server/API/official-mobile/generated-SDK/production change. Revert this narrow entry/policy patch without undoing existing server membership or deleting journals.
+
 ## 2026-11-25: Integrate completed management and browsing development slices
 
 - Source: codex/integrate-asset-tags-management fromc3cafb6; traceable tag/color picksce09fe2/2aa483f and normal merges4f5c25d(51ccb1b),455ab5f(7dfffd3). Upstream672f02e unchanged, no sync. Retain current backup/date/shared/public075/partner/editor/iPad behavior; no old metadata ancestor or background WIP included.

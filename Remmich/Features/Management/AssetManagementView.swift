@@ -80,9 +80,9 @@ struct AssetManagementView: View {
                     Section("加入相簿") {
                         ForEach(albums) { album in
                             if membership.contains(album.id) {
-                                Button("从 \(album.albumName) 移除") { run { try await $0.remove(assetID, from: album.id) } }
+                                Button("从 \(album.albumName) 移除") { run { try await $0.performAlbumManagement(.remove(id: album.id, assetID: assetID)) } }
                             } else {
-                                Button("加入 \(album.albumName)") { run { try await $0.add(assetID, to: album.id) } }
+                                Button("加入 \(album.albumName)") { run { try await $0.performAlbumManagement(.add(id: album.id, assetID: assetID)) } }
                             }
                         }
                         TextField("新相簿名称", text: $albumName)
@@ -142,7 +142,7 @@ struct AssetManagementView: View {
             guard owner == controller.generation, !Task.isCancelled else { return }
             asset = fresh
             caption = fresh.exifInfo?.description ?? ""
-            albums = availableAlbums.filter { $0.ownerId == client.userID }
+            albums = availableAlbums.filter { $0.access.allows(.assets, userID: client.userID) }
             membership = Set(containing.map(\.id))
             error = nil
         } catch {
