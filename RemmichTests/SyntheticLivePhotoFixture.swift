@@ -41,6 +41,24 @@ nonisolated enum LocalLivePhotoFixtureError: Error, LocalizedError {
     }
 }
 
+/// 仅合成fixture使用的单轨供给端口；ready只表示本轮能前进，不能阻止其他轨获得供给机会。
+@MainActor struct SyntheticLivePhotoWriterTrack {
+    enum Kind: String, Hashable, Sendable { case audio, metadata, video }
+    let kind: Kind
+    let sampleCount: Int
+    let isReady: @MainActor () -> Bool
+    let append: @MainActor (Int) throws -> Void
+    let finish: @MainActor () -> Void
+
+    /// kind用于诊断，sampleCount为实际样本数；append接收当前零基样本下标，finish在本轨全部写入后只调用一次。
+    /// 所有闭包留在同一MainActor，真实AVFoundation对象不跨Sendable/队列边界。
+    init(kind: Kind, sampleCount: Int, isReady: @escaping @MainActor () -> Bool,
+         append: @escaping @MainActor (Int) throws -> Void, finish: @escaping @MainActor () -> Void)
+    {
+        self.kind = kind; self.sampleCount = sampleCount; self.isReady = isReady; self.append = append; self.finish = finish
+    }
+}
+
 /// 公开PhotoKit实际验证过的native对象及其临时资源lease；只供Tests，close后不得继续使用对象/文件。
 /// JPEG17映射和合成pair被Simulator接受属于实验推断，make的真实返回才证明本次对象有效。
 @MainActor final class SyntheticLivePhotoFixture {
@@ -179,41 +197,81 @@ nonisolated enum LocalLivePhotoFixtureError: Error, LocalizedError {
         guard writer.startWriting() else { throw LocalLivePhotoFixtureError.failed("Writer start") }
         writer.startSession(atSourceTime: .zero)
         let deadline = ContinuousClock.now.advanced(by: .seconds(30))
-        // 先完成音频/单样本metadata，避免video因另一轨没有输入而一直背压；所有等待共用本轮30s预算。
-        try await ready(audio, writer: writer, deadline: deadline)
-        guard audio.append(audioSample) else { throw LocalLivePhotoFixtureError.failed("Audio append") }; audio.markAsFinished()
-        try await ready(metadata, writer: writer, deadline: deadline)
         let marker = AVMutableMetadataItem(); marker.identifier = markerIdentifier
         marker.dataType = kCMMetadataBaseDataType_SInt8 as String; marker.value = NSNumber(value: Int8(-1))
         let time = CMTime(value: Int64(stillFrame), timescale: fps)
-        guard timed.append(.init(items: [marker], timeRange: .init(start: time, duration: CMTime(value: 1, timescale: fps)))) else {
-            throw LocalLivePhotoFixtureError.failed("Marker append")
-        }
-        metadata.markAsFinished()
-        guard let pool = pixels.pixelBufferPool else { throw LocalLivePhotoFixtureError.failed("Pixel buffer pool") }
-        for frame in 0 ..< Int(fps) * seconds {
-            try await ready(video, writer: writer, deadline: deadline)
-            var buffer: CVPixelBuffer?
-            guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess, let buffer else {
-                throw LocalLivePhotoFixtureError.failed("Pixel allocation")
-            }
-            try drawPixel(buffer, frame: frame)
-            guard pixels.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps)) else {
-                throw LocalLivePhotoFixtureError.failed("Video append")
-            }
-        }
-        video.markAsFinished(); writer.endSession(atSourceTime: CMTime(value: Int64(seconds), timescale: 1))
+        // 各轨独立询问真实ready；一轨等其他轨先输入时，不能在它上面await而饿死已ready的轨。
+        let tracks: [SyntheticLivePhotoWriterTrack] = [
+            .init(kind: .audio, sampleCount: 1, isReady: { audio.isReadyForMoreMediaData }, append: { _ in
+                guard audio.append(audioSample) else { throw LocalLivePhotoFixtureError.failed("Audio append") }
+            }, finish: { audio.markAsFinished() }),
+            .init(kind: .metadata, sampleCount: 1, isReady: { metadata.isReadyForMoreMediaData }, append: { _ in
+                guard timed.append(.init(items: [marker], timeRange: .init(start: time, duration: CMTime(value: 1, timescale: fps)))) else {
+                    throw LocalLivePhotoFixtureError.failed("Marker append")
+                }
+            }, finish: { metadata.markAsFinished() }),
+            .init(kind: .video, sampleCount: Int(fps) * seconds, isReady: { video.isReadyForMoreMediaData }, append: { frame in
+                guard let pool = pixels.pixelBufferPool else { throw LocalLivePhotoFixtureError.failed("Pixel buffer pool") }
+                var buffer: CVPixelBuffer?
+                guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) == kCVReturnSuccess, let buffer else {
+                    throw LocalLivePhotoFixtureError.failed("Pixel allocation")
+                }
+                try drawPixel(buffer, frame: frame)
+                guard pixels.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: fps)) else {
+                    throw LocalLivePhotoFixtureError.failed("Video append")
+                }
+            }, finish: { video.markAsFinished() }),
+        ]
+        try await feedMovieTracks(tracks, deadline: deadline, status: { writer.status }, failure: { writer.error })
+        writer.endSession(atSourceTime: CMTime(value: Int64(seconds), timescale: 1))
         try await finish(writer)
     }
 
-    /// input/writer必须仍在写入且Task有效；deadline是整个movie共享截止时间，不能无界等codec或背压。
-    private static func ready(_ input: AVAssetWriterInput, writer: AVAssetWriter, deadline: ContinuousClock.Instant) async throws {
-        while !input.isReadyForMoreMediaData {
+    /// tracks每轮各获得一次前进机会，只有全部没有进展才让出执行器；不按轨顺序阻塞等待。
+    /// deadline沿用同一movie的30s预算；status/failure是实时writer状态，错误含每轨已提交数，取消仍抛CancellationError。
+    static func feedMovieTracks(_ tracks: [SyntheticLivePhotoWriterTrack], deadline: ContinuousClock.Instant,
+                                status: @MainActor () -> AVAssetWriter.Status, failure: @MainActor () -> (any Error)?) async throws
+    {
+        guard tracks.count == 3, Set(tracks.map(\.kind)) == [.audio, .metadata, .video], tracks.allSatisfy({ $0.sampleCount > 0 }) else {
+            throw LocalLivePhotoFixtureError.failed("Writer track configuration")
+        }
+        var submitted = Array(repeating: 0, count: tracks.count)
+        while tracks.indices.contains(where: { submitted[$0] < tracks[$0].sampleCount }) {
             try Task.checkCancellation()
-            guard writer.status == .writing, ContinuousClock.now < deadline else { throw LocalLivePhotoFixtureError.failed("Writer readiness timeout") }
-            try await Task.sleep(for: .milliseconds(5))
+            guard status() == .writing else { throw writerFeedError("Writer stopped", tracks: tracks, submitted: submitted, status: status(), failure: failure()) }
+            guard ContinuousClock.now < deadline else { throw writerFeedError("Writer readiness timeout", tracks: tracks, submitted: submitted, status: status(), failure: failure()) }
+            var progressed = false
+            for index in tracks.indices where submitted[index] < tracks[index].sampleCount {
+                let track = tracks[index]
+                guard track.isReady() else { continue }
+                try Task.checkCancellation()
+                guard status() == .writing else { throw writerFeedError("Writer stopped", tracks: tracks, submitted: submitted, status: status(), failure: failure()) }
+                do { try track.append(submitted[index]) }
+                catch {
+                    if error is CancellationError {
+                        throw error
+                    }
+                    throw writerFeedError("Writer append input=\(track.kind.rawValue)", tracks: tracks, submitted: submitted, status: status(), failure: failure() ?? error)
+                }
+                submitted[index] += 1; progressed = true
+                if submitted[index] == track.sampleCount {
+                    track.finish()
+                }
+            }
+            if !progressed {
+                try await Task.sleep(for: .milliseconds(5))
+            }
         }
         try Task.checkCancellation()
+    }
+
+    /// 只记录合成writer状态/轨道进度和NSError类别；非writing与真正超时分开，避免再把失败状态误报成等待超时。
+    private static func writerFeedError(_ reason: String, tracks: [SyntheticLivePhotoWriterTrack], submitted: [Int],
+                                        status: AVAssetWriter.Status, failure: (any Error)?) -> LocalLivePhotoFixtureError
+    {
+        let progress = tracks.indices.map { "\(tracks[$0].kind.rawValue)=\(submitted[$0])/\(tracks[$0].sampleCount)" }.joined(separator: ",")
+        let cause = failure.map { let value = $0 as NSError; return "\(value.domain):\(value.code)" } ?? "none"
+        return .failed("\(reason); status=\(status.rawValue); submitted=\(progress); error=\(cause)")
     }
 
     /// buffer由当前writer pool创建；BGRA与CG bitmap字节序一致，frame只决定几何位置。
