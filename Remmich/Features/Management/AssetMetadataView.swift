@@ -20,7 +20,7 @@ struct AssetMetadataView: View {
 
     /// 完整快照、所有权与管理通道空闲均满足才允许生成确认，最终权限仍由服务端裁决。
     private var canWrite: Bool {
-        store.hasFreshData && !store.isWorking && !store.isLoading && !controller.busy
+        store.hasFreshData && !store.isWorking && !store.isLoading && !store.isCheckingDateProjection && !controller.busy
             && store.snapshot?.ownerId.lowercased() == controller.client?.userID.lowercased()
             && store.snapshot?.isTrashed == false
     }
@@ -116,8 +116,19 @@ struct AssetMetadataView: View {
                 ProgressView("Checking and saving metadata")
                 Button("Stop waiting") { store.cancel() }
             }
+            if let notice = store.dateProjectionNotice {
+                Text(notice).foregroundStyle(.secondary)
+            }
+            if controller.metadataDateRefreshAvailable {
+                if store.isCheckingDateProjection {
+                    ProgressView("Checking timeline date")
+                    Button("Stop date checking") { store.cancel() }
+                }
+                Button("Refresh timeline date") { pending = nil; store.refreshTimelineDate(manager: controller) }
+                    .disabled(!store.hasFreshData || store.isWorking || store.isLoading || store.isCheckingDateProjection)
+            }
             Button("Reload server metadata") { pending = nil; store.reload(assetID: assetID, manager: controller) }
-                .disabled(store.isWorking || store.isLoading)
+                .disabled(store.isWorking || store.isLoading || store.isCheckingDateProjection)
         }
     }
 

@@ -12,10 +12,14 @@ final class AssetMetadataStore {
     private(set) var notice: String?
     private(set) var confirmedChanges = 0
     private(set) var savedAccountGeneration: UUID?
+    private(set) var isCheckingDateProjection = false
+    private(set) var dateProjectionNotice: String?
     private var generation = UUID()
     private var readAccountGeneration: UUID?
     private var readTask: Task<Void, Never>?
     private var writeTask: Task<Void, Never>?
+    private var dateCheckTask: Task<Void, Never>?
+    private var dateCheckID = UUID()
     private var writeWasSent = false
     private var writeWasConfirmed = false
 
@@ -25,12 +29,13 @@ final class AssetMetadataStore {
             manager.publishChanges(ifGeneration: owner)
         }
         generation = UUID()
-        readTask?.cancel(); writeTask?.cancel()
+        readTask?.cancel(); writeTask?.cancel(); dateCheckTask?.cancel()
         readTask = nil; writeTask = nil
         snapshot = nil; readAccountGeneration = nil; hasFreshData = false
         isLoading = false; isWorking = false; error = nil; notice = nil
         writeWasSent = false; writeWasConfirmed = false
         savedAccountGeneration = nil; confirmedChanges = 0
+        dateCheckTask = nil; dateCheckID = UUID(); isCheckingDateProjection = false; dateProjectionNotice = nil
     }
 
     /// assetID指定真实资源，manager指定账号；返回可等待读任务，失败不伪造空EXIF或恢复写权限。
@@ -43,6 +48,7 @@ final class AssetMetadataStore {
             return nil
         }
         readTask?.cancel()
+        dateCheckTask?.cancel(); dateCheckID = UUID(); isCheckingDateProjection = false; dateProjectionNotice = nil
         generation = UUID()
         let owner = generation
         let account = manager.generation
@@ -71,7 +77,7 @@ final class AssetMetadataStore {
 
     /// patch只包含用户明确修改项；返回绑定快照/双代际的确认，尚不发送HTTP。
     func prepare(_ patch: AssetMetadataPatch, manager: LibraryManagementController) throws -> AssetMetadataPlan {
-        guard hasFreshData, !isLoading, !isWorking, !manager.busy, readAccountGeneration == manager.generation,
+        guard hasFreshData, !isLoading, !isWorking, !isCheckingDateProjection, !manager.busy, readAccountGeneration == manager.generation,
               let snapshot, let client = manager.client else { throw AssetMetadataError.reloadRequired }
         try Self.requireWritable(snapshot, userID: client.userID)
         try patch.validate()
@@ -82,7 +88,7 @@ final class AssetMetadataStore {
     @discardableResult
     func start(_ plan: AssetMetadataPlan, manager: LibraryManagementController) -> Task<Void, Never>? {
         guard plan.readGeneration == generation, plan.accountGeneration == manager.generation,
-              hasFreshData, !isLoading, !isWorking, !manager.busy
+              hasFreshData, !isLoading, !isWorking, !isCheckingDateProjection, !manager.busy
         else {
             error = AssetMetadataError.reloadRequired.errorDescription
             return nil
@@ -102,8 +108,12 @@ final class AssetMetadataStore {
                     if writeWasConfirmed {
                         savedAccountGeneration = plan.accountGeneration; confirmedChanges += 1
                     }
+                    let dateToCheck = writeWasConfirmed ? plan.patch.date : nil
                     writeWasSent = false; writeWasConfirmed = false
                     isWorking = false; writeTask = nil
+                    if let dateToCheck, manager.metadataDateRefreshAvailable {
+                        checkDateProjection(baseline: plan.baseline, expectedInstant: dateToCheck.instant, manager: manager)
+                    }
                 }
             }
             do {
@@ -141,6 +151,79 @@ final class AssetMetadataStore {
     func cancel() {
         readTask?.cancel()
         writeTask?.cancel()
+        dateCheckTask?.cancel()
+    }
+
+    /// 用户显式重试当前服务器日期的时间线刷新；缺失日期/过期快照不猜值，也不重新PUT。
+    @discardableResult
+    func refreshTimelineDate(manager: LibraryManagementController) -> Task<Void, Never>? {
+        guard hasFreshData, !isLoading, !isWorking, !isCheckingDateProjection,
+              readAccountGeneration == manager.generation, let snapshot,
+              let instant = AssetMetadataDateValue.parse(snapshot.exifInfo?.dateTimeOriginal)
+        else {
+            dateProjectionNotice = "Reload a valid server capture date before requesting timeline refresh."
+            return nil
+        }
+        return checkDateProjection(baseline: snapshot, expectedInstant: instant, manager: manager)
+    }
+
+    /// 最多3次真实详情读取、间隔1秒；metadata/fileCreatedAt/localDateTime一致才发布当前投影，不声称后台队列完成。
+    @discardableResult
+    private func checkDateProjection(baseline: AssetMetadataSnapshot, expectedInstant: Date,
+                                     manager: LibraryManagementController) -> Task<Void, Never>?
+    {
+        guard manager.metadataDateRefreshAvailable, let client = manager.client,
+              readAccountGeneration == manager.generation else { return nil }
+        dateCheckTask?.cancel()
+        let token = UUID(); dateCheckID = token
+        let page = generation; let account = manager.generation
+        isCheckingDateProjection = true
+        dateProjectionNotice = "Checking the server's capture date before refreshing the timeline."
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if dateCheckID == token, isCurrent(page, account: account, manager: manager) {
+                    isCheckingDateProjection = false; dateCheckTask = nil
+                }
+            }
+            do {
+                for attempt in 0 ..< 3 {
+                    try Task.checkCancellation()
+                    guard dateCheckID == token, isCurrent(page, account: account, manager: manager) else { return }
+                    let fresh = try await client.assetMetadata(baseline.id)
+                    try Task.checkCancellation()
+                    guard dateCheckID == token, isCurrent(page, account: account, manager: manager) else { return }
+                    try Self.requireWritable(fresh, userID: client.userID)
+                    guard fresh.type == baseline.type, fresh.livePhotoVideoId == baseline.livePhotoVideoId else {
+                        throw AssetMetadataError.changedRemotely
+                    }
+                    snapshot = fresh; hasFreshData = true; readAccountGeneration = account
+                    if let projection = AssetMetadataDateProjection.confirmed(fresh, expectedInstant: expectedInstant,
+                                                                              accountGeneration: account)
+                    {
+                        if projection.visibility != "timeline" {
+                            dateProjectionNotice = "The current server date matches. This asset is outside the main timeline."
+                        } else if manager.requestMetadataDateRefresh(projection) {
+                            dateProjectionNotice = "The current server date matches. A timeline refresh was requested; processing can still change the date later."
+                        } else {
+                            dateProjectionNotice = "The server date matches, but timeline refresh is unavailable in this context."
+                        }
+                        return
+                    }
+                    if attempt < 2 {
+                        try await Task.sleep(for: .seconds(1))
+                    }
+                }
+                dateProjectionNotice = "The server date is not ready for timeline refresh. Retry after processing; no further change was sent."
+            } catch {
+                guard dateCheckID == token, isCurrent(page, account: account, manager: manager) else { return }
+                dateProjectionNotice = Task.isCancelled
+                    ? "Date checking stopped. Timeline refresh remains unconfirmed; retry when ready."
+                    : "The timeline date could not be checked. Reload server metadata and retry; no further change was sent."
+            }
+        }
+        dateCheckTask = task
+        return task
     }
 
     /// message仅为本地安全说明；例如用户输入不完整，不能传入服务端正文/私人路径。

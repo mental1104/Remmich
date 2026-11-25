@@ -11,6 +11,7 @@ nonisolated struct AssetMetadataSnapshot: Decodable, Equatable, Sendable {
     let livePhotoVideoId: String?
     let updatedAt: String?
     let localDateTime: String?
+    let fileCreatedAt: String?
     let exifInfo: Exif?
 
     /// 只读取本页需要的EXIF；presence标志区分“明确null”与“响应未返回字段”，防止假确认清空。

@@ -267,6 +267,87 @@ struct AssetMetadataStoreTests {
         }
     }
 
+    /// 真实详情200若只有EXIF更新不能发布日期意图；有限重读后需同时核metadata、真实瞬间和墙上时间。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func dateProjectionWaitsForActualAssetDates(_ becomesReady: Bool) async throws {
+        let waiting = metadataJSON(fileCreated: "2026-11-23T04:00:00.000Z", localDate: "2026-11-23T12:00:00.000Z")
+        let ready = metadataJSON(fileCreated: "2026-11-24T04:00:00.000Z", localDate: "2026-11-24T12:00:00.000Z")
+        let reads = becomesReady ? [metadataRead(waiting), metadataRead(waiting), metadataRead(ready)]
+            : [metadataRead(waiting), metadataRead(waiting), metadataRead(waiting), metadataRead(waiting)]
+        let fixture = MetadataHTTPFixture(exchanges: reads)
+        defer { fixture.close() }
+        let store = AssetMetadataStore()
+        try await loadMetadata(store, fixture: fixture)
+        fixture.manager.metadataDateRefreshAvailable = true
+        let check = try #require(store.refreshTimelineDate(manager: fixture.manager))
+        await check.value
+        let intents = fixture.manager.takeMetadataDateProjections()
+        #expect(!store.isCheckingDateProjection && store.dateProjectionNotice != nil)
+        #expect(intents.count == (becomesReady ? 1 : 0))
+        #expect(fixture.manager.revision == (becomesReady ? 1 : 0))
+        if becomesReady {
+            let intent = try #require(intents.first)
+            #expect(intent.assetID == metadataID && intent.accountGeneration == fixture.manager.generation)
+            #expect(intent.capturedAt == AssetMetadataDateValue.parse("2026-11-24T04:00:00.000Z"))
+            #expect(intent.localDateTime == AssetMetadataDateValue.parse("2026-11-24T12:00:00.000Z"))
+        }
+        #expect(await fixture.script.requests().map(\.method) == Array(repeating: "GET", count: reads.count))
+    }
+
+    /// 迟到的派生详情不可在取消、退页、换号或只换端点后发布旧日期意图；新页面状态保持不变。
+    @Test(.timeLimit(.minutes(1)), arguments: ["cancel", "page", "account", "endpoint"])
+    @MainActor func dateProjectionRetirementCannotPublishOldIntent(_ context: String) async throws {
+        let changesAccount = context == "account"
+        let changesEndpoint = context == "endpoint"
+        let replacesContext = changesAccount || changesEndpoint
+        let nextUser = changesAccount ? metadataOtherOwner : metadataOwner
+        let prefix = changesEndpoint ? "fallback/" : ""
+        var exchanges = [metadataRead(), MetadataExchange(method: "GET", path: metadataPath, status: 200,
+                                                          json: metadataJSON(fileCreated: "2026-11-24T04:00:00.000Z",
+                                                                             localDate: "2026-11-24T12:00:00.000Z"), held: true)]
+        if replacesContext {
+            exchanges.append(.init(method: "GET", path: prefix + "assets/\(metadataOtherID)", status: 200,
+                                   json: metadataJSON(id: metadataOtherID, owner: nextUser, rating: "3", version: "next"),
+                                   authorization: changesAccount ? "Bearer metadata-next" : "Bearer metadata-owner"))
+        }
+        let fixture = MetadataHTTPFixture(exchanges: exchanges)
+        defer { fixture.close() }
+        try await withTaskCancellationHandler {
+            let store = AssetMetadataStore()
+            try await loadMetadata(store, fixture: fixture)
+            fixture.manager.metadataDateRefreshAvailable = true
+            let check = try #require(store.refreshTimelineDate(manager: fixture.manager))
+            let completion = Task { await check.value; await fixture.script.operationFinished() }
+            #expect(await fixture.script.waitForHeld())
+            if context == "cancel" {
+                store.cancel()
+            } else {
+                if replacesContext {
+                    let endpoint = changesEndpoint ? fixture.endpoint.appending(path: "fallback") : fixture.endpoint
+                    fixture.manager.configure(session: metadataSession(endpoint: fixture.endpoint, user: nextUser,
+                                                                       token: changesAccount ? "metadata-next" : "metadata-owner"), endpoint: endpoint)
+                }
+                store.invalidate(manager: fixture.manager)
+            }
+            if replacesContext {
+                let replacement = try #require(store.reload(assetID: metadataOtherID, manager: fixture.manager))
+                await replacement.value
+            }
+            await fixture.script.release()
+            await completion.value
+            #expect(fixture.manager.takeMetadataDateProjections().isEmpty && fixture.manager.revision == 0)
+            if replacesContext {
+                #expect(store.snapshot?.id == metadataOtherID && store.snapshot?.ownerId == nextUser && store.hasFreshData)
+                #expect(store.dateProjectionNotice == nil && !store.isCheckingDateProjection)
+            } else {
+                #expect(!store.isCheckingDateProjection)
+            }
+            #expect(await fixture.script.requests().map(\.method) == Array(repeating: "GET", count: exchanges.count))
+        } onCancel: {
+            Task { @MainActor in fixture.close() }
+        }
+    }
+
     /// 单位/空值/非法评分必须在HTTP前拒绝；0/0仍按官方PUT范围编码，不据此断言异步处理后的持久位置。
     @Test @MainActor func rejectsInvalidInputsAndPreservesExplicitNull() async throws {
         let fixture = MetadataHTTPFixture(exchanges: [metadataRead()])
@@ -305,10 +386,13 @@ private nonisolated let metadataPath = "assets/\(metadataID)"
 /// 参数是独立声明的响应值，rating为JSON片段、nil明确省略该键；不调用生产模型的编码器。
 private nonisolated func metadataJSON(id: String = metadataID, owner: String = metadataOwner, trashed: Bool = false,
                                       date: String = "2026-11-24T04:00:00.000Z", zone: String = "UTC+8", latitude: Double = 30,
-                                      longitude: Double = 120, rating: String? = "0", version: String = "before") -> String
+                                      longitude: Double = 120, rating: String? = "0", version: String = "before",
+                                      fileCreated: String? = nil, localDate: String? = nil) -> String
 {
     let ratingField = rating.map { #", "rating":\#($0)"# } ?? ""
-    return #"{"id":"\#(id)","ownerId":"\#(owner)","type":"IMAGE","visibility":"timeline","isTrashed":\#(trashed),"originalFileName":"synthetic.jpg","livePhotoVideoId":"\#(metadataPartnerID)","updatedAt":"\#(version)","exifInfo":{"dateTimeOriginal":"\#(date)","timeZone":"\#(zone)","latitude":\#(latitude),"longitude":\#(longitude)\#(ratingField)}}"#
+    let fileField = fileCreated.map { #", "fileCreatedAt":"\#($0)""# } ?? ""
+    let localField = localDate.map { #", "localDateTime":"\#($0)""# } ?? ""
+    return #"{"id":"\#(id)","ownerId":"\#(owner)","type":"IMAGE","visibility":"timeline","isTrashed":\#(trashed),"originalFileName":"synthetic.jpg","livePhotoVideoId":"\#(metadataPartnerID)","updatedAt":"\#(version)"\#(fileField)\#(localField),"exifInfo":{"dateTimeOriginal":"\#(date)","timeZone":"\#(zone)","latitude":\#(latitude),"longitude":\#(longitude)\#(ratingField)}}"#
 }
 
 /// json为固定响应字节；返回一次真实单资源读取交换。

@@ -9,6 +9,9 @@ final class LibraryManagementController {
     private(set) var generation = UUID()
     private(set) var revision = 0
     private(set) var busy = false
+    /// 只有应用已接入接受索引的日期刷新链时启用；孤立管理宿主不能假称已通知时间线。
+    var metadataDateRefreshAvailable = false
+    private var metadataDateProjections: [String: AssetMetadataDateProjection] = [:]
     private var account: AccountSession?
     private let configurationFactory: (() -> URLSessionConfiguration)?
 
@@ -30,6 +33,7 @@ final class LibraryManagementController {
         client?.cancel()
         account = session
         generation = UUID()
+        metadataDateProjections.removeAll()
         busy = false
         client = if let session, let endpoint {
             if let configurationFactory {
@@ -67,5 +71,21 @@ final class LibraryManagementController {
         if owner == generation {
             revision += 1
         }
+    }
+
+    /// projection为fresh详情已核对的当前日期投影；同账号保存需求后复用既有revision通知，不建立通用事件队列。
+    func requestMetadataDateRefresh(_ projection: AssetMetadataDateProjection) -> Bool {
+        guard metadataDateRefreshAvailable, projection.accountGeneration == generation,
+              projection.ownerID.lowercased() == client?.userID.lowercased() else { return false }
+        metadataDateProjections[projection.assetID.lowercased()] = projection
+        revision += 1
+        return true
+    }
+
+    /// 仅既有App索引桥接消费本账号已验证需求；索引控制器接管后仍须保留活跃同步中的后续刷新。
+    func takeMetadataDateProjections() -> [AssetMetadataDateProjection] {
+        let values = Array(metadataDateProjections.values)
+        metadataDateProjections.removeAll()
+        return values
     }
 }
