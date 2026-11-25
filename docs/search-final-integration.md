@@ -1,5 +1,7 @@
 # 保存搜索面板的下一串行验证候选
 
+最新本地跟进：8d9b2e9已正常合入核心修复bda，只有两份记录冲突且双方原行保留。保存面板的精确label、错误及HTTP JSON等待也改为查询端一次匹配全部label条件，再以原10秒只等exists；保存条件同名替换不能只等名称，而要等新query/favorite/media。独立audit-remmich-saved-panel-waits-20261125.cjs验证3场景、31断言/解包语句和41用户动作保持；应用/SDK/脚本/原核心UI与genuine夹具源保持bda。全工作流范围376文件格式过、1skip，diff过；Swift和新增UI尚未运行。此跟进仅本地提交，PR10保持草稿，等待核心链收口再发布/就绪；以下是原f791集成快照。
+
 从手机准备修复73dda3df890057a754d7a0f6dfece379c48213a2正常合并保存面板418752c3deb05bf66c063e3aa5dd5c36efe2e02b，保留两父历史。仅change.log和fork-compatibility.md冲突，已独立验证双方全部原行按原序保留。没有混入备份、日期、共享、官方堆叠或Scene切片。
 
 Swift、Packages、project、schemes及workflow与418逐字节相同。相对73，脚本只追加面板UI类选择及断言；首次准备超时同UDID一次恢复、180秒默认、UI只执行一次及原退出码均保留。原五项SearchAcceptanceUITests完整不变，未来每设备选择八项。

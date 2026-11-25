@@ -88,8 +88,7 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         assertLabel("Existing", identifier: "saved-search-apply-88888888-8888-4888-8888-888888888888", in: app)
         replaceName("Existing", in: app)
         tap("saved-search-save", in: app)
-        let error = element("saved-search-error", in: app)
-        waitForLabel(error, containing: "already exists")
+        let error = waitForLabel("saved-search-error", matching: NSPredicate(format: "label CONTAINS %@", "already exists"), in: app)
         XCTAssertTrue(error.label.contains("draft was kept"))
         XCTAssertEqual(element("saved-search-name", in: app).value as? String, "Existing")
         let save = element("saved-search-save", in: app)
@@ -234,15 +233,15 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 0.75), .completed)
     }
 
-    /// query/favorite/media是独立业务预期；先等实际JSON最新条件，再按真实wire键type逐项核对，缺省字段必须确实不存在。
+    /// query/favorite/media是独立业务预期；同一远程查询匹配实际JSON各条件，再按真实wire键逐项核对。
+    /// 缺省字段仍须不存在；合并AX查询只避免重复快照耗尽原10秒，不放宽正文断言。
     @MainActor private func assertSearchBody(query: String, favorite: Bool, media: String? = nil, in app: XCUIApplication) throws {
-        let item = element("saved-search-test-last-search-body", in: app)
-        var predicates = [NSPredicate(format: "exists == true AND label CONTAINS %@", query),
+        var predicates = [NSPredicate(format: "label CONTAINS %@", query),
                           NSPredicate(format: favorite ? "label CONTAINS 'isFavorite'" : "NOT (label CONTAINS 'isFavorite')")]
         if let media {
             predicates.append(NSPredicate(format: "label CONTAINS %@", media))
         }
-        wait(for: [XCTNSPredicateExpectation(predicate: NSCompoundPredicate(andPredicateWithSubpredicates: predicates), object: item)], timeout: 10)
+        let item = waitForLabel("saved-search-test-last-search-body", matching: NSCompoundPredicate(andPredicateWithSubpredicates: predicates), in: app)
         let body = try jsonBody(item)
         let filter = try XCTUnwrap(body["filter"] as? [String: Any])
         XCTAssertEqual((filter["originalFileName"] as? [String: String])?["like"], query)
@@ -258,10 +257,15 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         }
     }
 
-    /// name/query/favorite/media独立核对真实POST/PATCH字节；登记使用mediaType小写，不能与搜索filter.type大写混用。
+    /// name/query/favorite/media独立核对真实POST/PATCH字节；等待包含完整新条件的同一AX快照，不能只等未改变的名称。
+    /// 登记使用mediaType小写，不能与搜索filter.type大写混用。
     @MainActor private func assertPresetBody(name: String, query: String, favorite: Bool, media: String? = nil, in app: XCUIApplication) throws {
-        let item = element("saved-search-test-last-preset-body", in: app)
-        waitForLabel(item, containing: name)
+        var predicates = [NSPredicate(format: "label CONTAINS %@", name), NSPredicate(format: "label CONTAINS %@", query),
+                          NSPredicate(format: favorite ? "label CONTAINS 'isFavorite'" : "NOT (label CONTAINS 'isFavorite')")]
+        if let media {
+            predicates.append(NSPredicate(format: "label CONTAINS %@", media))
+        }
+        let item = waitForLabel("saved-search-test-last-preset-body", matching: NSCompoundPredicate(andPredicateWithSubpredicates: predicates), in: app)
         let body = try jsonBody(item)
         XCTAssertEqual(body["name"] as? String, name)
         let conditions = try XCTUnwrap(body["conditions"] as? [String: Any])
@@ -309,15 +313,17 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         XCTAssertTrue(item.isHittable)
     }
 
-    /// label/identifier为明确HTTP阶段或UI文本，等待精确label，不以固定sleep推断请求完成。
+    /// label/identifier为明确HTTP阶段或UI文本，在单次远程查询内精确匹配，不以固定sleep推断完成。
     @MainActor private func assertLabel(_ label: String, identifier: String, in app: XCUIApplication) {
-        let item = element(identifier, in: app)
-        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label == %@", label), object: item)], timeout: 10)
+        _ = waitForLabel(identifier, matching: NSPredicate(format: "label == %@", label), in: app)
     }
 
-    /// item是异步请求诊断文本，text必须出现在真实label，不能通过本地expected直接生成诊断。
-    @MainActor private func waitForLabel(_ item: XCUIElement, containing text: String) {
-        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label CONTAINS %@", text), object: item)], timeout: 10)
+    /// identifier限定唯一AX身份，predicate仅匹配真实label条件，app为本场景应用；返回同快照匹配节点供独立JSON解析。
+    /// identity与label交给查询端一次核对，随后仅等待exists；保留原10秒，避免二次AX快照造成误报。
+    @MainActor private func waitForLabel(_ identifier: String, matching predicate: NSPredicate, in app: XCUIApplication) -> XCUIElement {
+        let item = app.descendants(matching: .any).matching(identifier: identifier).matching(predicate).firstMatch
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"), object: item)], timeout: 10)
+        return item
     }
 
     /// item为已经出现的名称框或保存按钮；只有可用后才继续操作，不跳过fresh-list门禁。

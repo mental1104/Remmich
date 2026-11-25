@@ -1,3 +1,10 @@
+## 2026-11-25: Keep saved-panel label waits in one remote AX query
+
+- Source: codex/test-search-final-candidate from8d9b2e9 after normal merge of current core repairbda834f. Upstream672f02e unchanged; no sync. Current core CI stays separate and this candidate remains draft.
+- Apply the already observed73 remote-AX timeout mechanism to saved-panel exact labels, errors and captured JSON waits. Identifier plus all label conditions execute in one XCUIElementQuery, then only existence is waited for under the same10-second limit. Saved-body waits also require the new query/favorite/media conditions, avoiding an unchanged name satisfying an old-body wait.
+- Preserve all3 scenarios,31 assertion/unwrap statements and41 user-action statements by independent source comparison. Normal request encoding, Store/fixtures, product/SDK/workflow/scripts and current core repair source are unchanged. Whole-workflow NAS SwiftFormat0.64.5 passes0/376 with1 existing skip; diff and source audit pass.
+- New Swift/UI runtime remains unverified; no extra test count, longer deadline or fixture-directed action is introduced. No push/ready/CI/dev merge/parent/prod action by this local follow-up. See docs/search-final-integration.md; rollback only changes test wait implementation.
+
 ## 2026-11-25: Integrate saved-search UI acceptance with bounded startup recovery
 
 - Source: codex/test-search-final-candidate normally merges418752c into73dda3d; upstream remains672f02e, no sync. Only two record files conflicted, and every original line from both parents is retained. No backup/metadata/sharing/Stack/Scene slice is included.
