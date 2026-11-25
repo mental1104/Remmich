@@ -28,3 +28,11 @@ NAS 已跑四个受影响 Swift 文件的 SwiftFormat 0.64.5 scoped lint 和 dif
 [GestureState](https://developer.apple.com/documentation/swiftui/gesturestate) 的非活动复位也退休捏合/拖动锚点，覆盖系统取消未正常触发 onEnded 的路径；离开 Canvas 同样清理，像素草稿不变。原一/十像素键盘、VoiceOver、原图对照、坐标算法、加载/账号/官方PUT保存与取消确认完整保留；不改变服务器参数或覆盖原片。
 
 新增4函数/7声明场景覆盖变视口、外部修改/取消、坏倍率/几何及来源尺寸变化，调用产品实际使用的 session。NAS实际4文件 SwiftFormat0.64.5 lint、diff及 Node 边界/6独立倍率算术检查通过；原保存生命周期、渲染、坐标与键盘/拖动源码逐字保留。脚本 `/volume2/codex-home/mental1104/tmp/remmich-editor-continuity-source-audit-20261125.cjs` 不执行 Swift/UIKit。Swift编译、7场景、实际硬件捏合/焦点/窗口取消仍留统一验收；没有新CI/push/实服务/生产操作。回退本后续无需数据迁移。
+
+## 后续：不依赖点击的键盘入口
+
+继续在 `132d931` 上补实际“用键盘调整裁剪”按钮及 Command-Option-K。开启裁剪后可直接把方向键焦点交给同一 Canvas，不必先用鼠标/触摸点选。其默认 focusRequest 为0且没有 initial 自动聚焦，旧调用保持可用；只有用户明确动作才递增请求。
+
+入口要求有效草稿/账号、当前前台及没有保存/放弃/重载确认；Canvas 的点选、键盘、手势与辅助动作共8个输入路径都核 enabled/active，不让背后控件抢焦点或变更草稿。原原图坐标、实时结果、保存/加载/官方参数均未改。按钮沿用原生边框/指针效果，快捷键可由系统发现，不添加全局键盘注册器。
+
+NAS实际两文件 SwiftFormat0.64.5 lint、diff和独立入口/8门/旧加载保存及像素渲染字节审计通过：`/volume2/codex-home/mental1104/tmp/remmich-editor-keyboard-source-audit-20261125.cjs`。没有为这一小入口追加纯容器测试；硬件键盘焦点/系统快捷键、指针、跨窗口/确认框事件留统一验收。本轮无新CI/push/生产操作。

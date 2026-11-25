@@ -22,6 +22,7 @@ struct AssetEditingView: View {
     @State private var validSource = false
     @State private var forceReset = false
     @State private var showsOriginal = false
+    @State private var cropFocusRequest = 0
     @State private var error: String?
     @State private var loadID = UUID()
     @State private var reloadID = 0
@@ -141,6 +142,11 @@ struct AssetEditingView: View {
         canEdit && sourceImage != nil && hasChanges
     }
 
+    /// 键盘入口只属于当前活跃、有效且没有确认弹层的裁剪页，不让背后控件接管其他页面输入。
+    private var canFocusCrop: Bool {
+        canEdit && draft?.crop != nil && scenePhase == .active && !confirmsSave && !confirmsDiscard && !confirmsReload
+    }
+
     /// image为同版本未编辑预览，draft为原图像素草稿；宽窗口并排取景和结果，小窗口上下排列。
     private func preview(_ image: UIImage, draft: AssetEditDraft, size: CGSize) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -173,8 +179,9 @@ struct AssetEditingView: View {
     /// 只在已开启裁剪时绑定区域；旧手势在账号失效后不能重新写入草稿。
     private func cropCanvas(_ image: UIImage, draft: AssetEditDraft) -> some View {
         AssetEditCropCanvas(image: image, sourceSize: draft.sourceSize,
-                            crop: Binding(get: { self.draft?.crop ?? .full(draft.sourceSize) }, set: { value in edit { $0.crop = value } }))
-            .clipShape(RoundedRectangle(cornerRadius: 12)).disabled(!canEdit)
+                            crop: Binding(get: { self.draft?.crop ?? .full(draft.sourceSize) }, set: { value in edit { $0.crop = value } }),
+                            focusRequest: cropFocusRequest)
+            .clipShape(RoundedRectangle(cornerRadius: 12)).disabled(!canFocusCrop)
     }
 
     /// 显示原图或当前结果；同一像素源用于对照，不请求另一份可能过期的已编辑缩略图。
@@ -198,6 +205,14 @@ struct AssetEditingView: View {
             Toggle("裁剪", isOn: Binding(get: { self.draft?.crop != nil }, set: { enabled in edit { $0.crop = enabled ? .full($0.sourceSize) : nil } }))
                 .accessibilityIdentifier("asset-editor-crop-toggle")
             if let crop = draft.crop {
+                Button("用键盘调整裁剪", systemImage: "keyboard") {
+                    guard canFocusCrop else { return }
+                    cropFocusRequest &+= 1
+                }
+                .keyboardShortcut("k", modifiers: [.command, .option])
+                .buttonStyle(.bordered).hoverEffect(.highlight)
+                .disabled(!canFocusCrop)
+                .accessibilityHint("Command-Option-K focuses the crop. Arrow keys move; Shift changes ten pixels; Option resizes.")
                 DisclosureGroup("精确像素调整") {
                     VStack(spacing: 10) {
                         Stepper("X：\(crop.x)", value: cropBinding(.x), in: 0 ... (draft.sourceSize.width - crop.width))

@@ -1,3 +1,8 @@
+## 2026-11-25: Add a direct keyboard focus entry to visual cropping
+
+- Source: codex/fix-editor-window-continuity after132d931; upstream remains672f02e, no sync. Add the real keyboard-adjust button and Command-Option-K, passing an explicit noninitial focus request to the existing Canvas. Only an enabled active current draft with no confirmation dialog may request focus; the eight Canvas input paths also guard active/enabled state.
+- Keep original pixels, rendering, load/save/account/official edits unchanged; old Canvas callers default to request0. No global command registry, network/media or persistence changes. Actual NAS2-file lint/diff and source-boundary/entry/8-guard audit pass; hardware keyboard/pointer/confirmation/window behavior and Swift remain UNVERIFIED for final acceptance. No new CI/push/production. Revert only this entry without data migration; see docs/ipad-editor-interaction.md.
+
 ## 2026-11-25: Preserve visual editor state and pinch continuity across window resizing
 
 - Source: independent codex/fix-editor-window-continuity from795fd39; upstream remains672f02e, no sync. Replace width/Dynamic-Type conditional Canvas trees with AnyLayout and identical child order/heights/spacing, preserving crop focus and interaction identity.
