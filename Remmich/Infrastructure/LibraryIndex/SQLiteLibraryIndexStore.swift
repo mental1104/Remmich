@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 import SQLite3
 
-actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
+actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, PartnerTimelineCertificateStoring {
     static let currentSchemaVersion = 2
     static let currentCacheSchemaVersion = 1
     private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "AccountStorage")
@@ -28,6 +28,35 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
 
     func prepare(scope: MediaAccountScope) async throws {
         _ = try preparedDatabase(scope: scope)
+    }
+
+    /// 只读取原账号目录中的查询凭据；缺失/损坏/未知格式返回未确认，绝不据此接受旧计数复用。
+    func loadPartnerTimelineCertificate(scope: MediaAccountScope) throws -> PartnerTimelineCertificate? {
+        guard try canRead(scope) else { return nil }
+        let file = layout.directory(namespace: scope.cacheNamespace).appending(path: "partner-timeline-policy.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let data = try Data(contentsOf: file)
+        guard data.count <= 1_048_576, let value = try? JSONDecoder().decode(PartnerTimelineCertificate.self, from: data),
+              value.validates(scope: scope) else { return nil }
+        return value
+    }
+
+    /// certificate绑定即将accept的新代际；原子写失败就阻止accept，崩溃后与旧accepted代际不符则强制重读。
+    /// 不改SQL表/旧迁移；账号已移除时preparedDatabase拒绝，不复活其目录或任何备份回执。
+    func stagePartnerTimelineCertificate(_ certificate: PartnerTimelineCertificate, scope: MediaAccountScope) throws {
+        try Task.checkCancellation()
+        guard certificate.validates(scope: scope) else { throw PartnerTimelinePolicyError.invalidPolicy }
+        let database = try preparedDatabase(scope: scope)
+        try requireBuildingGeneration(certificate.generation, scope: scope, database: database)
+        let file = layout.directory(namespace: scope.cacheNamespace).appending(path: "partner-timeline-policy.json")
+        let data = try JSONEncoder().encode(certificate)
+        guard data.count <= 1_048_576 else { throw PartnerTimelinePolicyError.invalidPolicy }
+        try Task.checkCancellation()
+        try data.write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #if os(iOS)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: file.path)
+        #endif
     }
 
     func loadMediaExports(scope: MediaAccountScope) throws -> MediaExportJournal {

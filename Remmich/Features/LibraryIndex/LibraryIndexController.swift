@@ -38,6 +38,8 @@ final class LibraryIndexController {
     }
 
     private(set) var status: Status = .idle
+    /// 仅完整accepted代际的持久伙伴作用域证明；与管理页fresh服务器偏好分别比较，不以sync请求当成功。
+    private(set) var acceptedPartnerTimelinePolicy: PartnerTimelinePolicy?
     private(set) var indexedAssetCount = 0
     private(set) var indexedPhotoCount = 0
     private(set) var indexedVideoCount = 0
@@ -136,6 +138,8 @@ final class LibraryIndexController {
     private var task: Task<Void, Never>?
     private var pendingMetadataDates: [String: AssetMetadataDateProjection] = [:]
     @ObservationIgnored private weak var metadataDateManager: LibraryManagementController?
+    private var pendingPartnerTimelineRefresh = false
+    private let verifiesPartnerTimelinePolicy: Bool
     private var bootstrapCatalogTask: Task<Void, Never>?
     private var localMaintenanceTask: Task<Void, Never>?
     private var warmingTask: Task<Void, Never>?
@@ -190,6 +194,7 @@ final class LibraryIndexController {
         self.media = media
         self.resourceConditions = resourceConditions
         self.preferences = preferences
+        verifiesPartnerTimelinePolicy = source is any PartnerTimelinePolicyReading
         albumIndex = AlbumIndexController(source: source as? any AlbumReading & TimelineReading,
                                           store: store, transfers: transfers, preferences: preferences)
         collections = LibraryCollectionIndexController(source: collectionSource, store: store, defaults: preferences)
@@ -639,8 +644,12 @@ final class LibraryIndexController {
     }
 
     /// metadataDates为当前管理账号已核对的日期投影；活跃同步只接管需求，完成后补一轮，不丢旧月同桶刷新。
+    /// partnerTimelineRefresh只调度有限的读取核对，默认false保留原调用；持久policy凭据承担重启恢复，不重发PUT。
     /// manager只验证账号/路由生命周期，索引仍由既有source/store与单一run写入，不建立第二个索引worker。
-    func syncNow(metadataDates: [AssetMetadataDateProjection], manager: LibraryManagementController) {
+    func syncNow(metadataDates: [AssetMetadataDateProjection], partnerTimelineRefresh: Bool = false, manager: LibraryManagementController) {
+        if partnerTimelineRefresh, manager.backupScope == scope, manager.client?.apiURL == endpoint {
+            pendingPartnerTimelineRefresh = true
+        }
         guard !metadataDates.isEmpty else { syncNow(); return }
         guard let scope, manager.backupScope == scope, manager.client?.apiURL == endpoint else { return }
         let current = metadataDates.filter {
@@ -653,6 +662,29 @@ final class LibraryIndexController {
             pendingMetadataDates[projection.assetID.lowercased()] = projection
         }
         requestIndexSync(fullReconciliation: false)
+    }
+
+    /// 只重新读取照片元数据，绝不重发伙伴PUT；已有run先退出，再消费这一份有限的待核对请求。
+    func retryPartnerTimelineRead() {
+        pendingPartnerTimelineRefresh = true; requestIndexSync(fullReconciliation: false)
+    }
+
+    /// 管理页冷打开只恢复同namespace/accepted代际凭据，不做网络写；数据缺失或损坏保持尚未确认。
+    func refreshPartnerTimelinePolicyStatus() async {
+        // 在途run由自身accept发布；旧冷读取不能在其完成后用较早snapshot覆盖新状态。
+        guard task == nil else { return }
+        guard let scope else { acceptedPartnerTimelinePolicy = nil; return }
+        let revision = sessionRevision; let expectedRun = runID
+        let state = try? await store.syncState(scope: scope)
+        let certificate = try? await store.loadPartnerTimelineCertificate(scope: scope)
+        guard self.scope == scope, sessionRevision == revision, runID == expectedRun, task == nil, !Task.isCancelled else { return }
+        acceptedPartnerTimelinePolicy = if let state, let certificate,
+                                           certificate.matches(generation: state.acceptedGeneration, policy: certificate.policy, scope: scope)
+        {
+            certificate.policy
+        } else {
+            nil
+        }
     }
 
     func fullSyncAndVerify() {
@@ -1027,6 +1059,7 @@ final class LibraryIndexController {
         runID &+= 1
         // 路由/账号/显式暂停网络工作退休旧日期意图；用户可从元数据页重新核对，不能移到新上下文。
         pendingMetadataDates.removeAll()
+        pendingPartnerTimelineRefresh = false
         metadataDateManager = nil
         task?.cancel()
         task = nil
@@ -1075,6 +1108,7 @@ final class LibraryIndexController {
     func clearSession() {
         sessionRevision &+= 1
         suspend()
+        acceptedPartnerTimelinePolicy = nil
         albumIndex.clear()
         collections.clear()
         backgroundRefreshOnly = false
@@ -1206,12 +1240,13 @@ final class LibraryIndexController {
         }
     }
 
-    /// 启动唯一索引run并接管本轮日期需求；fullReconciliation/restartTransferPass控制原重建/传输重启语义。
-    /// resumedElapsed沿用暂停前计时；在途到达的日期仅补下一轮，已消费失败需求必须由用户重新核对。
+    /// 启动唯一run并接管本轮日期/伙伴核对；fullReconciliation/restartTransferPass保留原重建/传输重启语义。
+    /// resumedElapsed沿用暂停前计时；在途新增需求仅补一轮，已消费失败不自动循环，伙伴持久凭据供下次重读恢复。
     private func run(fullReconciliation: Bool, restartTransferPass: Bool = false, resumedElapsed: TimeInterval? = nil) {
         guard let scope, task == nil, !indexPaused else { return }
         let metadataDates = Array(pendingMetadataDates.values)
         pendingMetadataDates.removeAll()
+        pendingPartnerTimelineRefresh = false
         let dateManager = metadataDateManager
         let dateEndpoint = endpoint
         let resetTransfers = restartTransferPass || fullReconciliation
@@ -1225,7 +1260,14 @@ final class LibraryIndexController {
         runID &+= 1
         let currentRunID = runID
         let validateDateContext: (@Sendable () async throws -> Void)? = if metadataDates.isEmpty {
-            nil
+            if verifiesPartnerTimelinePolicy {
+                { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    try await requirePartnerTimelineContext(scope: scope, endpoint: dateEndpoint, run: currentRunID)
+                }
+            } else {
+                nil
+            }
         } else {
             { [weak self, weak dateManager] in
                 guard let self else { throw CancellationError() }
@@ -1381,8 +1423,8 @@ final class LibraryIndexController {
             }
             if currentRunID == runID {
                 task = nil
-                // 活跃run期间到达的日期需求从未被消费，完成/失败后只补这一轮；失败的已消费需求不自动重试。
-                if !pendingMetadataDates.isEmpty, !indexPaused {
+                // 活跃run期间的新日期/伙伴需求尚未消费，完成/失败后只补这一轮；失败的已消费需求不自动重试。
+                if !pendingMetadataDates.isEmpty || pendingPartnerTimelineRefresh, !indexPaused {
                     run(fullReconciliation: false, restartTransferPass: true)
                 }
             }
@@ -1397,6 +1439,12 @@ final class LibraryIndexController {
         guard runID == expectedRun, scope == expectedScope, endpoint == expectedEndpoint,
               let manager, manager.backupScope == expectedScope, manager.client?.apiURL == expectedEndpoint,
               projections.allSatisfy({ $0.accountGeneration == manager.generation }) else { throw CancellationError() }
+    }
+
+    /// 后台也无需Media管理器；仅原唯一run/namespace/路由及Task有效时可暂存证书并accept目录。
+    private func requirePartnerTimelineContext(scope expectedScope: MediaAccountScope, endpoint expectedEndpoint: URL?, run expectedRun: UInt64) throws {
+        try Task.checkCancellation()
+        guard runID == expectedRun, scope == expectedScope, endpoint == expectedEndpoint else { throw CancellationError() }
     }
 
     private func publishAcceptedBootstrapIfNeeded(
@@ -1851,6 +1899,7 @@ final class LibraryIndexController {
     }
 
     private func publish(_ result: LibraryIndexSyncResult, force: Bool) {
+        acceptedPartnerTimelinePolicy = result.appliedPartnerPolicy
         if !force {
             let context = LibraryTransferQueue.diagnosticContext()
             Self.logger.info(

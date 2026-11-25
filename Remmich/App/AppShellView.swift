@@ -352,9 +352,10 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
-        // 沿用管理变更观察器，仅将已确认日期额外交给原索引run；没有日期时保持普通立即同步。
+        // 沿用管理观察器，把日期和伙伴时间线核对交给原唯一run；其他管理变更保留普通同步。
         .onChange(of: media.management.revision) { _, _ in
-            sessionController?.libraryIndex.syncNow(metadataDates: media.management.takeMetadataDateProjections(), manager: media.management)
+            sessionController?.libraryIndex.syncNow(metadataDates: media.management.takeMetadataDateProjections(),
+                                                    partnerTimelineRefresh: media.management.takePartnerTimelineRefreshRequest(), manager: media.management)
         }
         .onAppear { media.logShellPresented() }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }

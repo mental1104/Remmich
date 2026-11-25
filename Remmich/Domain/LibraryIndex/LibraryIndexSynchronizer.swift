@@ -19,6 +19,8 @@ nonisolated struct LibraryIndexSyncResult: Sendable {
     var hasPendingBucketChanges = false
     var removedBucketKeys: [String] = []
     var removedBucketAssetCount = 0
+    /// 只有完整默认时间线accept成功且持久证书与此代际一致时返回；不代表SwiftUI已经完成绘制。
+    var appliedPartnerPolicy: PartnerTimelinePolicy?
 
     var isComplete: Bool {
         !hasMoreHistory && !hasPendingBucketChanges
@@ -128,10 +130,33 @@ actor LibraryIndexSynchronizer {
         }
 
         do {
-            // 日期需求只使用原仓库代际绑定的前台读取器，不能重播持久GET或集合缓存。
+            // 日期和伙伴作用域变化使用原仓库代际绑定的前台读；原增量路径只有在持久scope证明匹配时复用GET。
             try await validateContext?()
+            let policyReader = source as? any PartnerTimelinePolicyReading
+            let certificateStore = store as? any PartnerTimelineCertificateStoring
+            let partnerPolicy: PartnerTimelinePolicy?
+            var forceFreshAllMonths = false
+            var needsFreshPartnerRead = false
+            if let policyReader {
+                guard let certificateStore else { throw PartnerTimelinePolicyError.unavailableStore }
+                let current = try await policyReader.partnerTimelinePolicy(scope: scope)
+                try current.validate(scope: scope); try await validateContext?()
+                let certificate = try await certificateStore.loadPartnerTimelineCertificate(scope: scope)
+                try await validateContext?()
+                needsFreshPartnerRead = certificate?.matches(generation: previous?.generation, policy: current, scope: scope) != true
+                // 首次空索引可保留原开屏短批；任何已有目录却无同代际作用域证明必须完整重读，不能靠月计数猜一致。
+                forceFreshAllMonths = !current.isKnown || (previous != nil && needsFreshPartnerRead)
+                if needsFreshPartnerRead {
+                    // 证书准备前先清退旧作用域的元数据GET；否则accept后崩溃可让旧队列在下次普通增量中重播。
+                    try await policyReader.retirePartnerTimelineIndexReads(scope: scope)
+                    try await validateContext?()
+                }
+                partnerPolicy = current
+            } else {
+                partnerPolicy = nil
+            }
             let reader: any TimelineReading
-            if dateProjections.isEmpty {
+            if dateProjections.isEmpty, !forceFreshAllMonths, !needsFreshPartnerRead {
                 reader = source
             } else {
                 guard let provider = source as? any ManagementTimelineProviding else {
@@ -157,7 +182,7 @@ actor LibraryIndexSynchronizer {
             let dateAssetIDs = Set(dateProjections.map { $0.assetID.lowercased() })
             let oldDateBuckets = Set(previous?.assets.filter { dateAssetIDs.contains($0.id.lowercased()) }.map(\.bucketKey) ?? [])
             let forced = summaries.filter { summary in
-                oldDateBuckets.contains(summary.id.rawValue) || dateProjections.contains { $0.occupiesMonth(summary.id) }
+                forceFreshAllMonths || oldDateBuckets.contains(summary.id.rawValue) || dateProjections.contains { $0.occupiesMonth(summary.id) }
             }
             let forcedKeys = Set(forced.map(\.id.rawValue))
             let selected = Self.deduplicate(ordinary + forced)
@@ -177,11 +202,14 @@ actor LibraryIndexSynchronizer {
                 try Task.checkCancellation()
                 let assets = try await reader.assets(in: summary.id, query: .init())
                 try await validateContext?()
-                if forcedKeys.contains(summary.id.rawValue) {
+                if forcedKeys.contains(summary.id.rawValue) || partnerPolicy != nil {
                     guard assets.count == summary.assetCount,
                           Set(assets.map { $0.id.lowercased() }).count == assets.count,
                           assets.allSatisfy({ Self.belongsToMonth($0.captureLocalDate, bucket: summary.id) })
                     else {
+                        if partnerPolicy != nil {
+                            throw PartnerTimelinePolicyError.incompleteMonths
+                        }
                         throw AssetMetadataError.dateProjectionChanged
                     }
                     dateMembers.append(contentsOf: assets)
@@ -202,12 +230,15 @@ actor LibraryIndexSynchronizer {
             }
 
             // 串行完整月仍可能在并发迁移中重复非目标资产；先核全局唯一，避免SQLite覆盖行而groups重复计数。
-            let verifiedDateAssets = dateProjections.isEmpty ? nil : mergedAssets(
+            let verifiedDateAssets = dateProjections.isEmpty && partnerPolicy == nil ? nil : mergedAssets(
                 previous: fullReconciliation ? nil : previous,
                 replacing: replacements
             )
             if let verifiedDateAssets {
                 guard Set(verifiedDateAssets.map { $0.id.lowercased() }).count == verifiedDateAssets.count else {
+                    if partnerPolicy != nil {
+                        throw PartnerTimelinePolicyError.incompleteMonths
+                    }
                     throw AssetMetadataError.dateProjectionChanged
                 }
             }
@@ -245,6 +276,22 @@ actor LibraryIndexSynchronizer {
             let nextCursor = fullReconciliation ? nil : summaries
                 .first { !Set(stagedAssets.map(\.bucketKey)).contains($0.id.rawValue) }?
                 .id.rawValue
+            // 伙伴偏好在月读取期间改变时，暂存数据也不能accept；完全索引的证书先绑定新generation原子保存。
+            // 崩溃若发生在accept前，证书与旧accepted代际不符，冷启动必强制重读，而不是丢失内存dirty标记。
+            var appliedPartnerPolicy: PartnerTimelinePolicy?
+            if let partnerPolicy, let policyReader, let certificateStore {
+                let after = try await policyReader.partnerTimelinePolicy(scope: scope)
+                try after.validate(scope: scope); try await validateContext?()
+                guard after == partnerPolicy else { throw PartnerTimelinePolicyError.changedPolicy }
+                if nextCursor == nil, !hasPendingBucketChanges {
+                    guard stagedAssets.count == expectedCount,
+                          summaries.allSatisfy({ stagedCounts[$0.id.rawValue, default: 0] == $0.assetCount }) else { throw PartnerTimelinePolicyError.incompleteMonths }
+                    try await certificateStore.stagePartnerTimelineCertificate(.init(generation: generation, policy: partnerPolicy), scope: scope)
+                    if partnerPolicy.isKnown {
+                        appliedPartnerPolicy = partnerPolicy
+                    }
+                }
+            }
             try Task.checkCancellation()
             try await validateContext?()
             try Task.checkCancellation()
@@ -267,7 +314,8 @@ actor LibraryIndexSynchronizer {
                 cleanup: cleanup,
                 hasPendingBucketChanges: hasPendingBucketChanges,
                 removedBucketKeys: removedBuckets.sorted(),
-                removedBucketAssetCount: removedAssetCount
+                removedBucketAssetCount: removedAssetCount,
+                appliedPartnerPolicy: appliedPartnerPolicy
             )
         } catch {
             if !(error is CancellationError) {

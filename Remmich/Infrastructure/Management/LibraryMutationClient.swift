@@ -488,6 +488,38 @@ final nonisolated class LibraryMutationClient: Sendable {
         return value
     }
 
+    /// direction明确官方单向关系；强制GET200和唯一用户UUID，未知inTimeline保持nil，不走Library索引缓存。
+    func partnerSharing(_ direction: PartnerSharingDirection) async throws -> [ManagedPartner] {
+        let data = try await send("GET", ["partners"], query: [.init(name: "direction", value: direction.rawValue)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([ManagedPartner].self, from: data)
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }),
+              Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.sorted { $0.id.lowercased() < $1.id.lowercased() }
+    }
+
+    /// 仅POST创建本人→目标账户，PUT设置对方→本人的时间线，DELETE撤销本人→对方；精确201/200/204，无重放。
+    func changePartnerSharing(_ command: PartnerSharingCommand) async throws -> ManagedPartner? {
+        let id = try validID(command.userID)
+        let data: Data
+        switch command {
+        case .add:
+            struct Body: Encodable { let sharedWithId: String }
+            data = try await send("POST", ["partners"], body: JSONEncoder().encode(Body(sharedWithId: id)), expectedStatus: 201)
+        case let .timeline(_, enabled):
+            struct Body: Encodable { let inTimeline: Bool }
+            data = try await send("PUT", ["partners", id], body: JSONEncoder().encode(Body(inTimeline: enabled)), expectedStatus: 200)
+        case .remove:
+            _ = try await send("DELETE", ["partners", id], expectedStatus: 204)
+            return nil
+        }
+        let value = try JSONDecoder().decode(ManagedPartner.self, from: data)
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        if case let .timeline(_, enabled) = command, value.inTimeline != enabled {
+            throw LibraryWriteError.malformedResponse
+        }
+        return value
+    }
+
     /// albumID为明确选择的相簿；官方过滤列表只返回当前创建者的链接，不能当作相簿所有公开链接清单。
     func albumPublicLinks(_ albumID: String) async throws -> [AlbumPublicLink] {
         let albumID = try validID(albumID)
