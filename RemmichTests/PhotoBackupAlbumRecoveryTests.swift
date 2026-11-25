@@ -329,6 +329,102 @@ import Testing
         #expect(exporter.calls == 0)
     }
 
+    /// switchAccount选择等待期间取消旧读取，或用同一manager切到B并先成功读取B；不靠sleep推测排队。
+    /// 前一A操作被取消的真实信号证明旧load已进入Coordinator并等待退役屏障，不冒充SQLite内部await。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func queuedReloadCannotPublishAfterCancellationOrAccountSwitch(_ switchAccount: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupQueuedReload-\(UUID())", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let endpoint = try #require(URL(string: "https://backup-queued-\(UUID().uuidString.lowercased()).example.invalid/api"))
+        let first = backupAlbumAccount(owner: "queued-first", endpoint: endpoint)
+        let second = backupAlbumAccount(owner: "queued-second", endpoint: endpoint)
+        let database = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: database)
+        try await store.prepare(scope: first.scope)
+        try await store.prepare(scope: second.scope)
+        let live = PhotoBackupSource(localID: "a-partial-live", modifiedAt: nil, kind: .livePhoto)
+        let photo = PhotoBackupSource(localID: "b-photo", modifiedAt: nil, kind: .photo)
+        var firstJournal = PhotoBackupJournal(namespace: first.scope.cacheNamespace)
+        let firstSelection = try PhotoBackupAlbumSelection(included: ["a-keep"], excluded: ["a-private"])
+        try firstJournal.applyAlbumScan(firstSelection.scan([.init(id: "a-keep", assets: [.init(source: live, capturedAt: nil)]),
+                                                             .init(id: "a-private", assets: [])]), allowCloud: false)
+        let liveID = try #require(firstJournal.jobs.first?.id)
+        let motionID = UUID()
+        try firstJournal.update(liveID) { job in try job.begin(); try job.exported(); try job.recordMotion(motionID); job.pause() }
+        var secondJournal = PhotoBackupJournal(namespace: second.scope.cacheNamespace)
+        let secondSelection = try PhotoBackupAlbumSelection(included: ["b-keep"], excluded: ["b-private"])
+        try secondJournal.applyAlbumScan(secondSelection.scan([.init(id: "b-keep", assets: [.init(source: photo, capturedAt: nil)]),
+                                                               .init(id: "b-private", assets: [])]), allowCloud: true)
+        try await store.savePhotoBackups(firstJournal, scope: first.scope)
+        try await store.savePhotoBackups(secondJournal, scope: second.scope)
+        let exporter = UnexpectedBackupAlbumExporter()
+        let controller = PhotoBackupController(store: store, exporter: exporter)
+        await controller.load(using: first.manager)
+        controller.selected.insert("a-unsaved")
+        let gate = BackupQueueReloadGate()
+        let blocker = Task {
+            try await PhotoBackupRunCoordinator.perform(scope: first.scope) { await gate.hold() }
+        }
+        do {
+            try await gate.waitForEntry()
+            let reload = Task { await controller.load(using: first.manager) }
+            do {
+                try await withTaskCancellationHandler {
+                    // 只有真实load对同scope调用perform，才会取消被hold的前一任务；MainActor在登记等待者前不yield。
+                    try await gate.waitForPredecessorCancellation()
+                    if switchAccount {
+                        first.manager.configure(session: second.session, endpoint: endpoint)
+                        await controller.load(using: first.manager)
+                        #expect(controller.jobs.map(\.id) == secondJournal.jobs.map(\.id) && !controller.requiresSelectionScan)
+                        controller.excluded.insert("b-unsaved")
+                    } else {
+                        reload.cancel()
+                    }
+                    let included = controller.selected, excluded = controller.excluded, cloud = controller.allowCloud
+                    let jobIDs = controller.jobs.map(\.id), status = controller.status
+                    #expect(controller.requiresSelectionScan)
+                    gate.release()
+                    await reload.value
+                    _ = await blocker.result
+                    #expect(controller.selected == included && controller.excluded == excluded && controller.allowCloud == cloud)
+                    #expect(controller.requiresSelectionScan && controller.jobs.map(\.id) == jobIDs && !controller.running)
+                    #expect(controller.total == jobIDs.count && exporter.calls == 0)
+                    if switchAccount {
+                        #expect(controller.status == status && controller.jobs.first?.source == photo)
+                    } else {
+                        #expect(controller.jobs.first?.motionAssetID == motionID && controller.jobs.first?.stage == .paused)
+                    }
+                } onCancel: {
+                    reload.cancel(); blocker.cancel()
+                    Task { @MainActor in gate.stop() }
+                }
+            } catch {
+                reload.cancel(); blocker.cancel(); gate.stop()
+                await reload.value; _ = await blocker.result
+                throw error
+            }
+        } catch {
+            blocker.cancel(); gate.stop(); _ = await blocker.result
+            throw error
+        }
+        gate.stop()
+
+        // 重新打开两账号文件，完整日志/部分回执都必须不变；页面草稿只属于对应当前账号，绝不偷偷保存。
+        let cold = SQLiteLibraryIndexStore(databaseURL: database)
+        let savedFirst = try await cold.loadPhotoBackups(scope: first.scope)
+        let savedSecond = try await cold.loadPhotoBackups(scope: second.scope)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(try encoder.encode(savedFirst) == encoder.encode(firstJournal))
+        #expect(try encoder.encode(savedSecond) == encoder.encode(secondJournal))
+        let restored = PhotoBackupController(store: cold, exporter: exporter)
+        await restored.load(using: first.manager)
+        let expectedIncluded: Set<String> = switchAccount ? ["b-keep"] : ["a-keep"]
+        let expectedExcluded: Set<String> = switchAccount ? ["b-private"] : ["a-private"]
+        #expect(restored.selected == expectedIncluded && restored.excluded == expectedExcluded)
+        #expect(restored.allowCloud == switchAccount && !restored.requiresSelectionScan && exporter.calls == 0)
+    }
+
     /// condition观察当前Controller任务是否退役；有界等待只保护回归卡死，不靠固定sleep推测业务顺序。
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0 ..< 150 {
@@ -338,6 +434,86 @@ import Testing
             try await Task.sleep(for: .milliseconds(20))
         }
         try #require(condition(), "Backup album recovery task did not retire")
+    }
+}
+
+/// 仅挂起真实Coordinator的前一操作并观察其实际取消；不读取/替换Controller或SQLite结果。
+/// 所有状态在MainActor，release/stop幂等；进入与取消观察均可被测试取消释放，避免遗留continuation。
+@MainActor private final class BackupQueueReloadGate {
+    private var entered = false
+    private var predecessorCancelled = false
+    private var released = false
+    private var pending: CheckedContinuation<Void, Never>?
+    private var entryObserver: CheckedContinuation<Void, Never>?
+    private var cancellationObserver: CheckedContinuation<Void, Never>?
+
+    /// 只在实际Coordinator执行到此处后报告进入；取消本身仍保持挂起，模拟必须等待的非协作退役。
+    func hold() async {
+        guard !released else { return }
+        entered = true; entryObserver?.resume(); entryObserver = nil
+        await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                if released {
+                    $0.resume()
+                } else {
+                    pending = $0
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.observeCancellation() }
+        }
+    }
+
+    /// 等待前一真实操作已挂起；返回前核Task取消与实际信号，清理释放不能假装已进入。
+    func waitForEntry() async throws {
+        try Task.checkCancellation()
+        if !entered {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation {
+                    if released {
+                        $0.resume()
+                    } else {
+                        entryObserver = $0
+                    }
+                }
+            } onCancel: { Task { @MainActor in self.stop() } }
+        }
+        try Task.checkCancellation()
+        try #require(entered, "The predecessor operation must enter the real coordinator")
+    }
+
+    /// 新load调用perform会取消前一操作；该信号证明其已进入同scope排队，而非依赖固定延时。
+    func waitForPredecessorCancellation() async throws {
+        try Task.checkCancellation()
+        if !predecessorCancelled {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation {
+                    if released {
+                        $0.resume()
+                    } else {
+                        cancellationObserver = $0
+                    }
+                }
+            } onCancel: { Task { @MainActor in self.stop() } }
+        }
+        try Task.checkCancellation()
+        try #require(predecessorCancelled, "The queued reload must cancel its real predecessor")
+    }
+
+    /// 记录实际取消处理器的事件，不释放旧操作，也不允许旧load提前读取SQLite。
+    private func observeCancellation() {
+        predecessorCancelled = true; cancellationObserver?.resume(); cancellationObserver = nil
+    }
+
+    /// 测试明确允许旧操作退役；重复调用无副作用，真实Coordinator决定后续load能否继续。
+    func release() {
+        released = true; pending?.resume(); pending = nil
+    }
+
+    /// 失败/超时先允许前一操作退役，再释放所有观察者；调用方随后等待实际Task结束后才删除临时文件。
+    func stop() {
+        release(); entryObserver?.resume(); entryObserver = nil
+        cancellationObserver?.resume(); cancellationObserver = nil
     }
 }
 
