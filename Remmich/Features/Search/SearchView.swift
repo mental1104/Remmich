@@ -10,6 +10,7 @@ struct SearchView: View {
     private let searchReader: (any NativeSearchReading)?
     #if DEBUG
         private var searchCompletion: ((NativeSearchQuery) -> Void)?
+        private var presetManagerOverride: LibraryManagementController?
     #endif
     @State private var query = NativeSearchQuery()
     /// 搜索展示与查询、请求分开持有；退出只恢复导航控件，不完成请求或切换账号。
@@ -43,6 +44,15 @@ struct SearchView: View {
     }
 
     #if DEBUG
+        /// 隔离UI宿主注入真实管理器；只替换会话配置，Panel/Store/写入客户端继续运行原实现。
+        /// 其他参数沿用正常页面；发布构建没有此入口，也不会选用测试管理器。
+        init(source: ImmichTimelineRepository, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+             showAccount: @escaping () -> Void, presetManager: LibraryManagementController)
+        {
+            self.init(source: source, media: media, assetDetails: assetDetails, showAccount: showAccount)
+            presetManagerOverride = presetManager
+        }
+
         /// 仅DEBUG的观察重载；source/media/details/account/reader语义同正常初始化。
         /// searchCompletion接收已结束store发布检查的条件，不改结果；Release没有此回调接口。
         init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
@@ -60,6 +70,16 @@ struct SearchView: View {
             return searchReader
         }
         return source
+    }
+
+    /// 正常/发布搜索始终使用当前媒体账号管理器，只有明确DEBUG宿主能注入隔离会话。
+    private var activePresetManager: LibraryManagementController {
+        #if DEBUG
+            if let presetManagerOverride {
+                return presetManagerOverride
+            }
+        #endif
+        return media.management
     }
 
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
@@ -82,7 +102,7 @@ struct SearchView: View {
                 if let reference = query.queryAssetID {
                     referenceCard(reference)
                 }
-                SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
+                SearchPresetsPanel(query: $query, manager: activePresetManager).padding(.horizontal)
                 DisclosureGroup {
                     VStack {
                         Picker("Search mode", selection: Binding(get: { query.mode }, set: { mode in

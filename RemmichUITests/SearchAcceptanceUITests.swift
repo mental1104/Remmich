@@ -115,10 +115,12 @@ final class SearchAcceptanceUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
-    /// 以谓词等待指定ID的精确label，避免用固定sleep推断异步请求已经完成。
+    /// identifier和精确label合成一次远程查询，再等待其存在，保留原10秒及完整成功条件。
+    /// 分别读取exists/label会请求两次AX快照：首快照已匹配也可能被第二次读取耗尽等待预算。
     @MainActor private func assertLabel(_ label: String, identifier: String, in app: XCUIApplication) {
-        let item = element(identifier, in: app)
-        let predicate = NSPredicate(format: "exists == true AND label == %@", label)
+        let item = app.descendants(matching: .any).matching(identifier: identifier)
+            .matching(NSPredicate(format: "label == %@", label)).firstMatch
+        let predicate = NSPredicate(format: "exists == true")
         expectation(for: predicate, evaluatedWith: item)
         waitForExpectations(timeout: 10)
     }
