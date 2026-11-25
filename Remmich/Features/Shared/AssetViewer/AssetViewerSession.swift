@@ -42,10 +42,17 @@ nonisolated struct AssetViewerMemoryContext: Hashable, Sendable {
     }
 }
 
+/// 默认沿用拍摄日期顺序；独立服务端抽样等固定结果可明确保留自身顺序，不改变照片拍摄时间。
+nonisolated enum AssetViewerOrdering: Hashable, Sendable {
+    case chronological
+    case sourceOrder
+}
+
 nonisolated struct AssetViewerRoute: Hashable, Identifiable, Sendable {
     let selectedAsset: TimelineAssetSummary
     let initialAssets: [TimelineAssetSummary]
     let origin: AssetViewerOrigin
+    var ordering: AssetViewerOrdering = .chronological
 
     var id: String {
         "\(origin.idComponent)|\(selectedAsset.id)"
@@ -77,6 +84,7 @@ final class AssetViewerSession {
     var selectedAssetID: String
 
     private(set) var origin: AssetViewerOrigin
+    private var ordering: AssetViewerOrdering
 
     private let bucketIDs: [TimelineBucketID]
     private let loadBucket: BucketLoader?
@@ -98,12 +106,14 @@ final class AssetViewerSession {
         loadBucket: BucketLoader? = nil
     ) {
         origin = route.origin
+        ordering = route.ordering
         selectedAssetID = route.selectedAsset.id
-        let sourceAssets = Self.orderedUnique(route.initialAssets + [route.selectedAsset])
+        let sourceAssets = Self.orderedUnique(route.initialAssets + [route.selectedAsset], ordering: route.ordering)
         self.sourceAssets = sourceAssets
         assets = Self.viewerProjection(
             sourceAssets: sourceAssets,
-            selectedAsset: route.selectedAsset
+            selectedAsset: route.selectedAsset,
+            ordering: route.ordering
         )
         self.bucketIDs = bucketIDs
         self.loadBucket = loadBucket
@@ -139,10 +149,12 @@ final class AssetViewerSession {
               case .memory = route.origin
         else { return }
         origin = route.origin
-        sourceAssets = Self.orderedUnique(route.initialAssets + [route.selectedAsset])
+        ordering = route.ordering
+        sourceAssets = Self.orderedUnique(route.initialAssets + [route.selectedAsset], ordering: ordering)
         assets = Self.viewerProjection(
             sourceAssets: sourceAssets,
-            selectedAsset: route.selectedAsset
+            selectedAsset: route.selectedAsset,
+            ordering: ordering
         )
         selectedAssetID = route.selectedAsset.id
         isLoadingNeighbor = false
@@ -218,36 +230,38 @@ final class AssetViewerSession {
             for asset in loaded {
                 bucketByAssetID[asset.id] = bucketID
             }
-            sourceAssets = Self.orderedUnique(sourceAssets + loaded)
+            sourceAssets = Self.orderedUnique(sourceAssets + loaded, ordering: ordering)
             guard let selectedAsset = sourceAssets.first(where: { $0.id == selectedAssetID }) else {
                 return
             }
             assets = Self.viewerProjection(
                 sourceAssets: sourceAssets,
-                selectedAsset: selectedAsset
+                selectedAsset: selectedAsset,
+                ordering: ordering
             )
         }
     }
 
+    /// sourceAssets是当前读取范围，selectedAsset保留单视频语义；ordering仅控制静态照片结果的排列。
     nonisolated static func viewerProjection(
         sourceAssets: [TimelineAssetSummary],
-        selectedAsset: TimelineAssetSummary
+        selectedAsset: TimelineAssetSummary,
+        ordering: AssetViewerOrdering = .chronological
     ) -> [TimelineAssetSummary] {
         if selectedAsset.mediaKind == .video {
             return [selectedAsset]
         }
-        return orderedUnique(sourceAssets + [selectedAsset])
+        return orderedUnique(sourceAssets + [selectedAsset], ordering: ordering)
             .filter { $0.mediaKind != .video }
     }
 
+    /// values为一次或接续读取的资产；默认日期排序完全不变，sourceOrder稳定去重且不篡改原始日期。
     nonisolated static func orderedUnique(
-        _ values: [TimelineAssetSummary]
+        _ values: [TimelineAssetSummary],
+        ordering: AssetViewerOrdering = .chronological
     ) -> [TimelineAssetSummary] {
         var seen = Set<String>()
-        return values
-            .sorted {
-                $1.isOrdered(before: $0)
-            }
-            .filter { seen.insert($0.id).inserted }
+        let ordered = ordering == .chronological ? values.sorted { $1.isOrdered(before: $0) } : values
+        return ordered.filter { seen.insert($0.id).inserted }
     }
 }
