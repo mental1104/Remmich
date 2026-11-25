@@ -1,6 +1,28 @@
 import Foundation
 import Observation
 
+/// 仅查看器消费直读DTO；领域读取模型仍保持Foundation-only，离线契约编译无需引入整个UI/时间线。
+nonisolated extension AssetViewerFreshAsset {
+    /// existing是同一静态照片；返回服务器真实显示版本，保留捕获排序/原片语义，拒绝身份/媒体/不可见状态不匹配。
+    func replacing(_ existing: TimelineAssetSummary) throws -> TimelineAssetSummary {
+        guard id == existing.id, ownerId == existing.ownerID, type == "IMAGE", existing.mediaKind == .image,
+              livePhotoVideoId == nil, existing.livePhotoVideoID == nil, !isTrashed, ["timeline", "archive"].contains(visibility)
+        else { throw AssetViewerFreshReadError.invalid }
+        let ratio: Double = if let width, let height, width > 0, height > 0 {
+            Double(width) / Double(height)
+        } else {
+            existing.aspectRatio
+        }
+        // 前置白名单只接受这两种可见性；索引文件的private初始化器不属于查看器可调用契约。
+        let freshVisibility: TimelineVisibility = visibility == "archive" ? .archive : .timeline
+        return try .init(id: existing.id, ownerID: existing.ownerID, capturedAt: existing.capturedAt, uploadedAt: existing.uploadedAt,
+                         localOffsetHours: existing.localOffsetHours, mediaKind: existing.mediaKind, durationMilliseconds: existing.durationMilliseconds,
+                         aspectRatio: ratio, isFavorite: isFavorite, visibility: freshVisibility, livePhotoVideoID: existing.livePhotoVideoID,
+                         stack: existing.stack, projectionType: existing.projectionType, thumbhash: thumbhash, thumbnailRevision: revision(),
+                         usesUploadDate: existing.usesUploadDate, place: existing.place)
+    }
+}
+
 nonisolated enum AssetViewerOrigin: Hashable, Sendable {
     case timeline(bucketID: TimelineBucketID, contentName: String)
     case scoped(route: PhotosRangeRoute, contentName: String)
@@ -60,6 +82,7 @@ final class AssetViewerSession {
     private let loadBucket: BucketLoader?
     private var loadedBucketIDs: Set<TimelineBucketID> = []
     private var bucketByAssetID: [String: TimelineBucketID] = [:]
+    private var refreshedAssets: [String: TimelineAssetSummary] = [:]
 
     var isVideoPlayback: Bool {
         selectedAsset?.mediaKind == .video
@@ -126,12 +149,27 @@ final class AssetViewerSession {
         unavailableMessage = nil
         loadedBucketIDs.removeAll()
         bucketByAssetID.removeAll()
+        refreshedAssets.removeAll()
     }
 
     @discardableResult
     func selectImmediately(_ assetID: String) -> Bool {
         guard allowsHorizontalPaging || assetID == selectedAssetID, assets.contains(where: { $0.id == assetID }) else { return false }
         selectedAssetID = assetID
+        return true
+    }
+
+    /// fresh为当前直读返回的真实summary；只替换同id/owner/媒体类型项，保持选中位置、原始排序与邻居加载状态。
+    /// 返回false表示选择或来源已改变，旧刷新不得插入新资源或切换视频/Live Photo模式。
+    @discardableResult
+    func replaceSelectedAsset(_ fresh: TimelineAssetSummary) -> Bool {
+        guard selectedAssetID == fresh.id, let existing = selectedAsset,
+              existing.ownerID == fresh.ownerID, existing.mediaKind == .image, fresh.mediaKind == .image,
+              existing.livePhotoVideoID == nil, fresh.livePhotoVideoID == nil,
+              fresh.thumbnailRevision >= existing.thumbnailRevision else { return false }
+        assets = assets.map { $0.id == fresh.id ? fresh : $0 }
+        sourceAssets = sourceAssets.map { $0.id == fresh.id ? fresh : $0 }
+        refreshedAssets[fresh.id] = fresh
         return true
     }
 
@@ -164,7 +202,10 @@ final class AssetViewerSession {
         loadedBucketIDs.insert(bucketID)
         isLoadingNeighbor = true
         defer { isLoadingNeighbor = false }
-        let loaded = await loadBucket(bucketID)
+        let loaded = await loadBucket(bucketID).map { candidate in
+            guard let fresh = refreshedAssets[candidate.id], fresh.thumbnailRevision >= candidate.thumbnailRevision else { return candidate }
+            return fresh
+        }
         guard !Task.isCancelled else {
             loadedBucketIDs.remove(bucketID)
             return

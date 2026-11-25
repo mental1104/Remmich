@@ -166,6 +166,8 @@ struct AssetViewerInfoView: View {
     let contentHeightChanged: (CGFloat) -> Void
     let retry: () -> Void
     let loadFullResolution: () -> Void
+    /// 当前展示资源的来源，不把Immich缓存命中称为网络传输。
+    var mediaReadOrigin: MediaReadOrigin?
     var place: PlaceLocation?
     var showsMap = false
     var bottomContentInset: CGFloat = 0
@@ -312,6 +314,12 @@ struct AssetViewerInfoView: View {
                             }
                         }
                         renderedImageMetadataRow
+                        if let mediaReadOrigin {
+                            Text("Source: \(mediaReadOrigin.rawValue)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("asset-viewer-media-origin")
+                        }
                         if case let .failed(message)? = fullResolutionState {
                             Text(message)
                                 .font(.caption2)

@@ -112,6 +112,53 @@ struct ForkContractChecks {
         print("PASS: saved-search CRUD, null preservation, exact statuses and capability/permission distinction")
     }
 
+    /// client为隔离HTTP通道；核对真实官方写路由、逐项ID、精确状态以及编辑版本快照解码。
+    static func checkManagementWrites(_ client: LibraryMutationClient) async throws {
+        let asset = #"{"id":"11111111-1111-4111-8111-111111111111","ownerId":"owner","isFavorite":false,"visibility":"timeline","isTrashed":false,"type":"IMAGE","originalFileName":"synthetic.jpg","livePhotoVideoId":null,"projectionType":"EQUIRECTANGULAR","updatedAt":"2026-11-24T00:00:00Z","checksum":"synthetic-checksum","exifInfo":{"description":null,"exifImageWidth":4000,"exifImageHeight":3000,"orientation":"6"}}"#
+        let snapshot = try JSONDecoder().decode(ManagedAsset.self, from: Data(asset.utf8))
+        precondition(snapshot.exifInfo?.orientation == "6" && snapshot.projectionType == "EQUIRECTANGULAR")
+        precondition(snapshot.updatedAt == "2026-11-24T00:00:00Z" && snapshot.checksum == "synthetic-checksum")
+        let album = #"{"id":"22222222-2222-4222-8222-222222222222","ownerId":"owner","albumName":"Synthetic"}"#
+        ContractProtocol.install { request in
+            precondition(request.httpMethod == "PATCH" && request.url!.path == "/api/albums/\(albumID)")
+            precondition(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token")
+            let payload = try body(request)
+            if payload["albumName"] != nil {
+                precondition(Set(payload.keys) == Set(["albumName"]) && payload["albumName"] as? String == "Synthetic")
+            } else {
+                precondition(Set(payload.keys) == Set(["albumThumbnailAssetId"]) && payload["albumThumbnailAssetId"] as? String == assetID)
+            }
+            return .init(status: 200, body: album)
+        }
+        try await client.renameAlbum(albumID, name: "Synthetic")
+        let confirmed = try await client.setAlbumCover(albumID, assetID: assetID)
+        precondition(confirmed.id == albumID)
+        ContractProtocol.install { _ in .init(status: 201, body: album) }
+        do { _ = try await client.setAlbumCover(albumID, assetID: assetID); preconditionFailure("Wrong album-cover status accepted") }
+        catch LibraryWriteError.malformedResponse {}
+
+        let membership = "[{\"id\":\"\(assetID)\",\"success\":true}]"
+        ContractProtocol.install { _ in .init(status: 200, body: membership) }
+        try await client.add(assetID, to: albumID)
+        try await client.remove(assetID, from: albumID)
+        for invalid in ["[{\"id\":\"\(albumID)\",\"success\":true}]", "[{\"success\":true}]", "[]", "[{\"id\":\"\(assetID)\",\"success\":false}]"] {
+            ContractProtocol.install { _ in .init(status: 200, body: invalid) }
+            do { try await client.add(assetID, to: albumID); preconditionFailure("Unconfirmed album membership accepted") }
+            catch LibraryWriteError.malformedResponse {}
+        }
+        ContractProtocol.install { _ in .init(status: 200, body: "{\"count\":1}") }
+        try await client.restore(assetID)
+        for count in [0, 2, -1] {
+            ContractProtocol.install { _ in .init(status: 200, body: "{\"count\":\(count)}") }
+            do { try await client.restore(assetID); preconditionFailure("Unconfirmed restore count accepted") }
+            catch LibraryWriteError.malformedResponse {}
+        }
+        ContractProtocol.install { _ in .init(status: 200, body: "") }
+        do { try await client.trash(assetID); preconditionFailure("Wrong trash status accepted") }
+        catch LibraryWriteError.malformedResponse {}
+        print("PASS: official album PATCH, cover identity, per-item membership, restore count and editable version fields")
+    }
+
     /// 创建纯内存传输客户端，逐项运行契约并在结束时取消会话。
     static func main() async throws {
         let config = URLSessionConfiguration.ephemeral
@@ -208,6 +255,7 @@ struct ForkContractChecks {
         precondition(directory.searchText(albumID: "a") == "Trips Paris")
         print("PASS: fork category intersection, whitespace and default category")
         try await checkSearchPresets(client)
+        try await checkManagementWrites(client)
         print("All offline contract checks passed; no production network requests were made.")
     }
 }

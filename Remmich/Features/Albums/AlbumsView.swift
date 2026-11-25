@@ -203,7 +203,7 @@ struct AlbumsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task(id: tabSelectionState.selection == .albums ? LoadRequest(endpoint: activeEndpoint) : nil) {
             guard tabSelectionState.selection == .albums else { return }
-            await store.load()
+            await store.load(fresh: media.management.revision > 0)
         }
         .navigationDestination(for: AlbumSummary.self) { album in
             AlbumDetailView(album: album, source: source, media: media, assetDetails: assetDetails,
@@ -214,10 +214,10 @@ struct AlbumsView: View {
                             tabSelectionState: tabSelectionState, tabBarTop: $tabBarTop, showAccount: showAccount)
                 .cardNavigationDestination(id: album.id, in: albumTransition)
         }
-        .sheet(isPresented: $showsAlbumManagement, onDismiss: { Task { await store.load() } }) {
-            AlbumManagementView(controller: media.management)
+        .sheet(isPresented: $showsAlbumManagement, onDismiss: { Task { await store.load(fresh: true) } }) {
+            AlbumManagementView(controller: media.management, source: source, media: media)
         }
-        .onChange(of: media.management.revision) { _, _ in Task { await store.load() } }
+        .onChange(of: media.management.revision) { _, _ in Task { await store.load(fresh: true) } }
         .accessibilityIdentifier("albums-root")
         .background { CardNavigationRootAnchor(root: navigationRoot).allowsHitTesting(false) }
         .onChange(of: tabSelectionState.selection) { _, current in
@@ -241,12 +241,12 @@ struct AlbumsView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     if let error = store.errorMessage, !store.albums.isEmpty {
-                        Button { Task { await store.load() } } label: {
+                        Button { Task { await store.load(fresh: true) } } label: {
                             Label(error, systemImage: "arrow.clockwise").font(.callout)
                         }.padding(.horizontal)
                     }
                     if store.errorMessage != nil, !store.hasLoaded {
-                        ErrorStateView(title: "Couldn’t Load Albums") { Task { await store.load() } }
+                        ErrorStateView(title: "Couldn’t Load Albums") { Task { await store.load(fresh: true) } }
                     } else if albums.isEmpty {
                         ContentUnavailableView(
                             query.isEmpty ? (contentScope == .shared ? "No Shared Albums" : "No Albums") : "No Results",
@@ -345,7 +345,7 @@ struct AlbumsView: View {
                 // header, even though the reserved space is now in the content.
                 reflowViewport.visibleHeight = max(0, new.viewportHeight - topClearance)
             }
-            .refreshable { await store.load() }
+            .refreshable { await store.load(fresh: true) }
             .onChange(of: contentScope) {
                 cancelAlbumReflow()
                 // A scope is a new collection. Sort/mode changes continue to

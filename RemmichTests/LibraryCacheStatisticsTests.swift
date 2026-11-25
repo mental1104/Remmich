@@ -18,12 +18,14 @@ struct LibraryCacheStatisticsTests {
             bucketKey: "2026-11-01", dayKey: "2026-11-01", weekKey: "2026-W44",
             monthKey: "2026-11", yearKey: "2026"
         )
-        let file = root.appending(path: "cache/\(scope.cacheNamespace)/thumbnail/asset.jpg")
+        // 图像已缓存、metadata迟到是本场景的起点；保留sourceRevision ISO契约及精确展示文件名。
+        let relativeKey = "thumbnail/" + LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt)
+        let file = root.appending(path: "cache/\(scope.cacheNamespace)/\(relativeKey)")
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data([1]).write(to: file)
         try await store.upsert(derivatives: [.init(
             assetID: asset.id, derivative: .thumbnail, pixelSize: nil, sourceRevision: asset.updatedAt.ISO8601Format(),
-            relativeFileKey: "thumbnail/asset.jpg", byteCount: 1, digest: "fixture", isVerified: true,
+            relativeFileKey: relativeKey, byteCount: 1, digest: "fixture", isVerified: true,
             lastAccessedAt: .now, completedAt: .now
         )], scope: scope)
         let details = LateCacheMetadata()

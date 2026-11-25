@@ -194,17 +194,25 @@ final class MediaExportController: NSObject {
         journal.receipts.contains { $0.assetID == asset.id && $0.revision == asset.thumbnailRevision && $0.tier == tier && verifiedReceiptKeys.contains($0.key) }
     }
 
-    func savedReceipt(assetID: String, revision: Date, tier: MediaExportTier) -> MediaPhotosReceipt? {
+    /// assetID/revision/tier定位现存Photos回执；requiredSourceMode为展示所需模式，nil保留显式原片/已保存库旧读取。
+    /// 缺失或不匹配模式返回nil，原记录和Photos文件不变；不把legacy unknown当成已编辑图。
+    func savedReceipt(assetID: String, revision: Date, tier: MediaExportTier,
+                      requiredSourceMode: MediaExportSourceMode? = nil) -> MediaPhotosReceipt?
+    {
         guard ready else { return nil }
         // A receipt locates the resource; PhotoKit verifies current readability.
         // Album membership governs the saved badge, not local-file reuse.
         return journal.receipts.first {
             $0.assetID == assetID && $0.revision == revision && $0.tier == tier
+                && (requiredSourceMode == nil || $0.sourceMode == requiredSourceMode)
         }
     }
 
-    func localImageData(assetID: String, revision: Date, tier: MediaExportTier) async throws -> Data? {
-        guard let receipt = savedReceipt(assetID: assetID, revision: revision, tier: tier) else { return nil }
+    /// assetID/revision/tier定位实际离线文件，requiredSourceMode可限定展示模式；返回nil表示不可安全复用，不联网。
+    func localImageData(assetID: String, revision: Date, tier: MediaExportTier,
+                        requiredSourceMode: MediaExportSourceMode? = nil) async throws -> Data?
+    {
+        guard let receipt = savedReceipt(assetID: assetID, revision: revision, tier: tier, requiredSourceMode: requiredSourceMode) else { return nil }
         let owner = generation
         let data = try await photos.localImageData(receipt: receipt)
         guard owner == generation else { throw CancellationError() }
@@ -219,6 +227,8 @@ final class MediaExportController: NSObject {
         return asset
     }
 
+    /// asset/tier固定显式保存范围，detail可补元数据，expectedNamespace拒绝旧账号操作；新任务记录真实请求模式。
+    /// 已有未知模式回执仍阻止自动重复导入，并提示到Saved Photos查看，不删除旧Photos或静默认领其编辑状态。
     func enqueue(asset: TimelineAssetSummary, tier: MediaExportTier, detail: AssetDetail? = nil, expectedNamespace: String? = nil) {
         if let expectedNamespace, scope?.cacheNamespace != expectedNamespace {
             return
@@ -227,18 +237,21 @@ final class MediaExportController: NSObject {
         guard MediaExportTier.choices(video: asset.mediaKind == .video, live: asset.livePhotoVideoID != nil).contains(tier) else { return }
         let job = MediaExportJob(id: UUID(), assetID: asset.id, revision: asset.thumbnailRevision, capturedAt: asset.capturedAt,
                                  localOffsetHours: asset.localOffsetHours, video: asset.mediaKind == .video,
-                                 motionID: asset.livePhotoVideoID, tier: tier, metadata: .init(assetID: asset.id, detail: detail))
+                                 motionID: asset.livePhotoVideoID, tier: tier, metadata: .init(assetID: asset.id, detail: detail),
+                                 sourceMode: tier.requestSourceMode)
         guard !journal.jobs.contains(where: { $0.key == job.key && ($0.stage.isActive || $0.stage == .paused || $0.stage == .uncertain) }) else {
             message = "This save is already tracked in Downloads."
             return
         }
         // An inaccessible Photos receipt is unknown, not a reason to reimport.
-        if journal.receipts.contains(where: { $0.key == job.key }) {
+        if let receipt = journal.receipts.first(where: { $0.key == job.key }) {
             if deletedReceiptKeys.contains(job.key) {
                 journal.receipts.removeAll { $0.key == job.key }
                 deletedReceiptKeys.remove(job.key)
             } else {
-                message = verifiedReceiptKeys.contains(job.key) ? nil : "This quality was saved before. Check Photos and full library access. If you removed it only from Remmich, add it back to that album in Photos."
+                message = tier.requiredDisplaySourceMode != nil && receipt.sourceMode != tier.requiredDisplaySourceMode
+                    ? "A saved copy already exists, but its editing state is unknown. Open Saved Photos to view it. No duplicate was created."
+                    : verifiedReceiptKeys.contains(job.key) ? nil : "This quality was saved before. Check Photos and full library access. If you removed it only from Remmich, add it back to that album in Photos."
                 return
             }
         }
@@ -264,6 +277,7 @@ final class MediaExportController: NSObject {
 
     /// Uses export preparation and transfer ownership without creating a Photos
     /// job, requesting authorization, or marking the asset as downloaded.
+    /// selection固定当前分享规格与资源，progress报告准备进度；只给新临时任务标记请求模式，原片分享沿用原路径。
     func prepareShare(_ selection: MediaShareSelection,
                       progress: @escaping @MainActor @Sendable (Int64, Int64) -> Void = { _, _ in }) async throws -> MediaShareFile
     {
@@ -286,7 +300,7 @@ final class MediaExportController: NSObject {
         let job = MediaExportJob(id: operation, assetID: asset.id, revision: asset.thumbnailRevision,
                                  capturedAt: asset.capturedAt, localOffsetHours: asset.localOffsetHours,
                                  video: selection.isVideo, motionID: nil, tier: selection.tier,
-                                 metadata: .init(assetID: asset.id, detail: detail))
+                                 metadata: .init(assetID: asset.id, detail: detail), sourceMode: selection.tier.requestSourceMode)
         let root = try await files.directory(namespace: scope.cacheNamespace, job: operation)
         do {
             try Task.checkCancellation()
@@ -774,7 +788,10 @@ final class MediaExportController: NSObject {
             try Task.checkCancellation()
             guard generation == owner else { throw CancellationError() }
             committing = true
-            let receipt = try await photos.save(job: job, file: file, motion: motion, albumID: album)
+            var savedReceipt = try await photos.save(job: job, file: file, motion: motion, albumID: album)
+            // 只有任务创建时已知的来源可进入回执；恢复的旧nil保持nil，不能因新代码执行便声称已编辑。
+            savedReceipt.sourceMode = job.sourceMode
+            let receipt = savedReceipt
             savedInPhotos = true
             // Even if the user signed out while Photos was committing, finish
             // the receipt for the old scope without publishing into the new UI.

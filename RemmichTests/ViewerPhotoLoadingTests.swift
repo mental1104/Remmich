@@ -8,15 +8,17 @@ import UIKit
 @Suite("Viewer photo loading", .serialized)
 @MainActor
 struct ViewerPhotoLoadingTests {
+    /// selected覆盖当前页和相邻预载页；普通查看只读取明确edited=true的预览，不能隐式拉原片。
     @Test(arguments: [true, false])
     func ordinaryViewingRequestsPreviewOnly(selected: Bool) async throws {
         let fixture = try await makeFixture(selected: selected)
         defer { fixture.close() }
         try await waitUntil { fixture.state.metadata.last?.source == .preview }
-        #expect(fixture.loader.urls.map(\.query) == ["size=preview"])
+        #expect(fixture.loader.urls.map(\.query) == ["size=preview&edited=true"])
         #expect(fixture.loader.urls.allSatisfy { $0.lastPathComponent == "thumbnail" })
     }
 
+    /// 原片由显式requestID触发，后续页面任务重启不会重新降级或改变原片查询语义。
     @Test func originalRequiresExplicitRequestAndSurvivesTaskRestart() async throws {
         let fixture = try await makeFixture()
         defer { fixture.close() }
@@ -24,6 +26,8 @@ struct ViewerPhotoLoadingTests {
         fixture.state.requestID = 1
         try await waitUntil { fixture.state.metadata.last?.source == .original }
         #expect(fixture.loader.urls.map(\.lastPathComponent) == ["thumbnail", "original"])
+        // 原图仍需显式操作，且不继承展示预览的edited查询。
+        #expect(fixture.loader.urls.last?.query == nil)
         #expect(fixture.state.metadata.last?.pixelSize == .init(width: 64, height: 48))
 
         let previousCount = fixture.state.metadata.count
@@ -33,16 +37,31 @@ struct ViewerPhotoLoadingTests {
         #expect(fixture.loader.urls.count == 2)
     }
 
+    /// 展示预览失败仍保留已有缩略图；edited查询变化不能绕过失败fixture或引入自动原片回退。
     @Test func unavailablePreviewKeepsTheThumbnailWithoutFetchingOriginal() async throws {
         let fixture = try await makeFixture(failsPreview: true)
         defer { fixture.close() }
         try await waitUntil { fixture.loader.completedCount == 1 }
-        #expect(fixture.loader.urls.map(\.query) == ["size=preview"])
+        #expect(fixture.loader.urls.map(\.query) == ["size=preview&edited=true"])
         #expect(fixture.state.metadata.last?.source == .thumbnail)
         func containsThumbnail(_ view: UIView) -> Bool {
             (view as? UIImageView)?.image === fixture.thumbnail || view.subviews.contains(where: containsThumbnail)
         }
         #expect(try containsThumbnail(#require(fixture.window.rootViewController?.view)))
+    }
+
+    /// 实际产品View收到同秒的新summary时必须重新请求预览，不因loadedTargetPixels相同继续使用旧图。
+    @Test func sameSecondServerRevisionReloadsTheActualPreviewView() async throws {
+        let fixture = try await makeFixture(revision: Date(timeIntervalSince1970: 100.1))
+        defer { fixture.close() }
+        try await waitUntil { fixture.state.metadata.last?.source == .preview }
+        let initial = fixture.asset
+        let bytes = Data(#"{"id":"\#(initial.id)","ownerId":"\#(initial.ownerID)","type":"IMAGE","updatedAt":"1970-01-01T00:01:40.200Z","width":24,"height":18,"thumbhash":null,"isFavorite":false,"visibility":"timeline","isTrashed":false}"#.utf8)
+        let fresh = try JSONDecoder().decode(AssetViewerFreshAsset.self, from: bytes)
+        fixture.state.revisedAsset = try fresh.replacing(initial)
+        try await waitUntil { fixture.loader.urls.count == 2 && fixture.loader.completedCount == 2 }
+        #expect(fixture.loader.urls.allSatisfy { $0.lastPathComponent == "thumbnail" && $0.query == "size=preview&edited=true" })
+        #expect(fixture.state.metadata.last?.source == .preview)
     }
 
     private func waitUntil(_ condition: () -> Bool) async throws {
@@ -55,7 +74,8 @@ struct ViewerPhotoLoadingTests {
         try #require(condition(), "Viewer did not reach the expected loading state")
     }
 
-    private func makeFixture(selected: Bool = true, failsPreview: Bool = false) async throws -> PhotoFixture {
+    /// selected控制预载角色，failsPreview模拟失败，revision固定源版本；返回真实UIKit宿主及局部媒体loader。
+    private func makeFixture(selected: Bool = true, failsPreview: Bool = false, revision: Date = .distantPast) async throws -> PhotoFixture {
         try await waitUntil { UIApplication.shared.connectedScenes.contains { $0 is UIWindowScene } }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         func image(width: CGFloat, height: CGFloat) -> UIImage {
@@ -79,7 +99,7 @@ struct ViewerPhotoLoadingTests {
                                          capturedAt: .distantPast, uploadedAt: .distantPast, localOffsetHours: 0,
                                          mediaKind: .image, durationMilliseconds: nil, aspectRatio: 4.0 / 3,
                                          isFavorite: false, visibility: .timeline, livePhotoVideoID: nil, stack: nil,
-                                         projectionType: nil, thumbhash: nil, thumbnailRevision: .distantPast)
+                                         projectionType: nil, thumbhash: nil, thumbnailRevision: revision)
         let state = PhotoLoadingState(selected: selected)
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 200, height: 200)
@@ -88,7 +108,7 @@ struct ViewerPhotoLoadingTests {
         ))
         window.isHidden = false
         window.rootViewController?.view.layoutIfNeeded()
-        return PhotoFixture(window: window, media: media, loader: loader, state: state, thumbnail: thumbnail)
+        return PhotoFixture(window: window, media: media, loader: loader, state: state, thumbnail: thumbnail, asset: asset)
     }
 }
 
@@ -99,6 +119,7 @@ private struct PhotoFixture {
     let loader: PhotoDataLoader
     let state: PhotoLoadingState
     let thumbnail: UIImage
+    let asset: TimelineAssetSummary
 
     func close() {
         window.isHidden = true
@@ -111,6 +132,7 @@ private struct PhotoFixture {
 private final class PhotoLoadingState: ObservableObject {
     @Published var selected: Bool
     @Published var requestID: Int?
+    @Published var revisedAsset: TimelineAssetSummary?
     var metadata: [AssetViewerRenderedImageMetadata] = []
 
     init(selected: Bool) {
@@ -126,7 +148,7 @@ private struct PhotoLoadingView: View {
 
     var body: some View {
         ZoomableStillImageView(
-            asset: asset, media: media, isSelected: state.selected, sourceImage: thumbnail,
+            asset: state.revisedAsset ?? asset, media: media, isSelected: state.selected, sourceImage: thumbnail,
             targetPixels: .init(width: 20, height: 20), fitRect: CGRect(x: 0, y: 0, width: 200, height: 150),
             animatesFitChanges: false, showsBackground: false, reportsRenderedImageMetadata: true,
             fullResolutionRequestID: state.requestID, renderedImageMetadataChanged: { state.metadata.append($0) },
@@ -157,6 +179,7 @@ private final class PhotoDataLoader: DataLoading, @unchecked Sendable {
         lock.withLock { completed }
     }
 
+    /// request为真实查看器读取；按size查询模拟预览失败，其余返回合成字节，不执行HTTP。
     func loadData(with request: URLRequest,
                   didReceiveData: @escaping @Sendable (Data, URLResponse) -> Void,
                   completion: @escaping @Sendable (Error?) -> Void) -> any Nuke.Cancellable
@@ -166,7 +189,7 @@ private final class PhotoDataLoader: DataLoading, @unchecked Sendable {
         let work = Task {
             await Task.yield()
             guard !Task.isCancelled else { return }
-            if failsPreview, url.query == "size=preview" {
+            if failsPreview, URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.contains(.init(name: "size", value: "preview")) == true {
                 completion(URLError(.notConnectedToInternet))
             } else {
                 let data = url.lastPathComponent == "original" ? original : preview

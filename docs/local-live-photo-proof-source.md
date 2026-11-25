@@ -1,0 +1,9 @@
+# Live Photo proof-to-render source binding
+
+The independent follow-up from7518506 closes the gap between two stable reads: motionProof and native livePhoto each checked their own before/after source, but only local ID/modification date linked the phases. Those fields did not directly establish equality of the complete resource/metadata observations.
+
+LocalLivePhotoMediaReading.livePhoto now requires the matching: LocalPhotoSnapshot? argument. PhotoKitLocalLivePhotoMediaReader alone defaults it to nil for independent local reads. MediaLibraryController always passes the verified motion proof's source. Before starting a native request, the reader requires its current snapshot, with cloudIdentity normalized to unavailable, to equal that exact expected source; the existing complete before/after native comparison remains. A mismatch returns nil with no native request. Cancellation/account checks and remote final-pair verification are unchanged. No server/API, persistence format, host view or CI change is involved.
+
+Two new real-reader test functions/four cases first obtain an actual motion proof using the synthetic byte stream, then keep the same local identity/modification date while changing the movie descriptor, creation date or location. All three reject before the native request. Exact complete source reaches one native request. The real Media helper routing test also records/asserts that proof.source reaches the protocol boundary. Native results remain nil: this proves source/request gates, not a successfully prepared or played PHLivePhoto.
+
+Four scoped Swift files pass SwiftFormat0.64.5 lint and diff checks on NAS; Swift compilation/runtime and real Photos/native success remain unverified. No production, media mutation, push or CI action occurred. Revert protocol, concrete reader, helper call and fake signatures together; no data migration is needed.

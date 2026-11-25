@@ -1,12 +1,16 @@
 # Immich OpenAPI snapshot
 
+2026-11-24 organization follow-up: enable the existing official `searchRandom` operation in the generator filter. Its pinned RandomSearchDto already contains structured filter/size/withExif, and its success response is an unpaged AssetResponseDto array. No raw/prepared schema or generated Swift is edited; prepared SHA remains0e9eb423c0ad7781803312d24aff0574b050f3a7028ef8cb2a6f5d6fad703db3. Native random browsing sends explicit IMAGE/timeline/non-trash scope and does not invent cursor pagination. New Swift wire tests await macOS CI.
+
 - Source: sibling checkout `../immich/open-api/immich-openapi-specs.json`
 - Upstream commit: `520a70891b0e0fdb3f7d3fbca18232bfee322916`
 - Upstream describe: `v3.1.0-447-g520a70891`
 - OpenAPI document version: `3.2.0`
 - Upstream SHA-256: `4e15b58113426d59ffb991a82875308b3eeb64e6c916395e5c923a0632fcc67f`
-- Prepared SHA-256: `15ca29352b3cbe04993c6ba7767e960c0cf7f76d89345354f74d850435533833`
+- Prepared SHA-256: `0e9eb423c0ad7781803312d24aff0574b050f3a7028ef8cb2a6f5d6fad703db3`
 - Copied: 2026-09-27
+
+2026-11-24 media follow-up: extend the same pinned Fork input with isPanorama, isPhoneVideo, isScreenshot, isNintendo3dsScreenshot, isSwitchScreenshot, isSteamScreenshot, isDeltaScreenshot and resolution in both search filter nodes, plus MediaResolutionFilter/MediaResolution. Each selected definition exactly matches owning commit941aa1ca and source document SHA3d89c71f…. The extension input SHA is now09490baf08f44369653ec310635270eec4d57aa2e5f254f9e702ffa0e240853d. Whole-document comparison after removing only these additions exactly matches the previous prepared document; raw upstream SHA is unchanged and repeated preparation is byte-identical. Generated Swift remains build-plugin output. New Swift compilation/wire tests await CI; this adds no server API or production change. Earlier hashes below describe their historical preparation steps.
 
 2026-11-24 nullable-date follow-up: the existing DateFilterNullable schema is also mapped to a handwritten Codable type so trashedAt.eq:null survives encoding. All six date operators remain available, with Date values handled by the SDK's ISO8601 strategy. This adds no schema transformation; the prepared hash above remains unchanged. Generated-SDK wire tests are included and await CI.
 
@@ -18,6 +22,8 @@
 2026-11-24 EXIF follow-up: the preparation script additionally consumes committed `search-extensions.json` (SHA-256 `d3ec71dba687fb67cebe520f05c9d0672b78b915a00d43010b10cc6dbd85a43a`). That input records the owning Fork commit and complete source-schema hash. Only iso/fNumber/focalLength/exposureTime/orientation are added to SearchFilter and SearchFilterBranch, with MediaOrientationFilter/SearchOrientation dependencies. A whole-document comparison proves all other values match the prior prepared snapshot; the selected definitions exactly match the parent Fork source. This does not refresh other API schemas or claim these fields work on every official server. Actual API errors remain visible. Regeneration and idempotence were checked on Python3.8; generated Swift is still produced by the build plugin.
 
 The generator configuration includes only operations used by the wrapper and their dependencies. This avoids generating unused legacy search DTOs and operations whose initializers reference deprecated properties. The preparation step removes the equivalent unused aliases from the search DTO that Remmich does use; it does not suppress compiler diagnostics or edit generated Swift files.
+
+2026-11-24 tag-search follow-up: enable the existing `getAllTags` operation (`GET /tags`) from this same pinned snapshot. `TagResponseDto`, `SearchFilter.hasTags` and `SearchFilter.tagIds` are already present; no schema refresh, hash change or generated Swift edit is needed. No tag mutation operation is enabled. Synthetic wire tests cover candidates, errors and two-page metadata/Fork-smart tag combinations; Swift execution remains pending CI.
 
 Album reads were enabled on 2026-11-11 using the same pinned snapshot: `getAllAlbums` and `getAlbumInfo` are in the operation filter, and the wrapper forwards `albumId` to `getTimeBuckets`/`getTimeBucket`. Album-scoped queries include stacked members and omit the root timeline visibility filter so archived album members remain readable. No album create/edit/delete or membership mutation operation is enabled. This expands the generated read surface; it does not refresh the schema snapshot or change the provenance hashes above. Regression coverage is in [AlbumReadTests](Tests/ImmichAPITests/AlbumReadTests.swift).
 

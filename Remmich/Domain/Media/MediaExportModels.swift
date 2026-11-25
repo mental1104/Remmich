@@ -21,6 +21,23 @@ nonisolated enum MediaExportTier: String, Codable, CaseIterable, Identifiable, S
         }
     }
 
+    /// 新任务的实际请求模式；editedDisplay表示明确请求edited=true，不声称异步派生图已生成。
+    var requestSourceMode: MediaExportSourceMode {
+        switch self {
+        case .thumbnail, .preview, .full: .editedDisplay
+        case .original: .original
+        case .playback: .playback
+        }
+    }
+
+    /// 普通图片展示只复用同模式派生图；显式原片/视频沿用旧离线规则，不猜旧记录的模式。
+    var requiredDisplaySourceMode: MediaExportSourceMode? {
+        switch self {
+        case .thumbnail, .preview, .full: .editedDisplay
+        case .original, .playback: nil
+        }
+    }
+
     static func choices(video: Bool, live: Bool) -> [Self] {
         if live {
             return [.original]
@@ -90,6 +107,7 @@ nonisolated struct MediaExportMetadata: Codable, Sendable {
     }
 }
 
+/// 持久导出任务；sourceMode只记录创建时已知的请求语义，旧任务缺失保持未知，不能在恢复时臆造已编辑来源。
 nonisolated struct MediaExportJob: Codable, Identifiable, Sendable {
     let id: UUID
     let assetID: String
@@ -122,6 +140,7 @@ nonisolated struct MediaExportJob: Codable, Identifiable, Sendable {
     var inactiveDuration: TimeInterval?
     var error: String?
     var exportedFilename: String?
+    var sourceMode: MediaExportSourceMode? = nil
 
     var key: String {
         "\(assetID)|\(revision.timeIntervalSince1970)|\(tier.rawValue)"
@@ -150,6 +169,12 @@ nonisolated struct MediaExportJob: Codable, Identifiable, Sendable {
     }
 }
 
+/// 导出请求来源，与画面是否已经异步生成分开；未知旧来源以optional nil表示并保留原记录。
+nonisolated enum MediaExportSourceMode: String, Codable, Equatable, Sendable {
+    case original, editedDisplay, playback
+}
+
+/// 同账号Photos资源回执；sourceMode只从实际任务继承，旧JSON仍可解码且保持unknown，不作静默升级。
 nonisolated struct MediaPhotosReceipt: Codable, Identifiable, Sendable {
     var id: String {
         key
@@ -162,6 +187,7 @@ nonisolated struct MediaPhotosReceipt: Codable, Identifiable, Sendable {
     let photosID: String
     let albumID: String
     let savedAt: Date
+    var sourceMode: MediaExportSourceMode? = nil
 }
 
 nonisolated struct MediaExportJournal: Codable, Sendable {

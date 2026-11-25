@@ -2,6 +2,7 @@ import Foundation
 import ImmichAPI
 import OSLog
 
+/// 真实Immich读取适配器；持有当前账号/端点代际，拒绝把旧上下文响应发布给Feature。
 actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReading, AlbumReading {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -19,12 +20,22 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     private var client: ImmichClient?
     private var generation: UInt64 = 0
     private let transfers: LibraryTransferQueue?
+    private let readLoader: ImmichQueuedReadTransport.Loader?
+    private let peopleConfigurationFactory: (@Sendable () -> URLSessionConfiguration)?
+    private var peopleMutations: PeopleMutationClient?
     private var collectionStore: SQLiteLibraryIndexStore?
     private var collectionReads: [TimelineQuery: LibraryOpeningBuckets] = [:]
     private var collectionRequests: [String: Task<any Sendable, Error>] = [:]
 
-    init(transfers: LibraryTransferQueue? = nil) {
+    /// transfers为原持久读取队列；readLoader仅替换HTTP字节来源，仍经过SDK只读策略、认证和本层代际检查。
+    /// peopleConfigurationFactory仅为人物专用前台会话提供隔离配置；生产nil沿用标准禁缓存/重定向规则。
+    /// 不在生产构造点注入替身，也不改变搜索POST的受限前台传输。
+    init(transfers: LibraryTransferQueue? = nil, readLoader: ImmichQueuedReadTransport.Loader? = nil,
+         peopleConfigurationFactory: (@Sendable () -> URLSessionConfiguration)? = nil)
+    {
         self.transfers = transfers
+        self.readLoader = readLoader
+        self.peopleConfigurationFactory = peopleConfigurationFactory
     }
 
     @discardableResult
@@ -35,6 +46,8 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         let nextIdentity = AccountIdentity(server: session.apiURL, userID: session.userID)
         let credentialChanged = self.session?.accessToken != session.accessToken
         if identity != nextIdentity || credentialChanged {
+            peopleMutations?.cancel()
+            peopleMutations = nil
             generation &+= 1
             cancelCollectionRequests()
             identity = nextIdentity
@@ -48,6 +61,8 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     @discardableResult
     func updateRoute(_ endpoint: URL?) -> Bool {
         guard activeEndpoint != endpoint else { return false }
+        peopleMutations?.cancel()
+        peopleMutations = nil
         generation &+= 1
         cancelCollectionRequests()
         activeEndpoint = endpoint
@@ -55,7 +70,10 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             client = nil
             return true
         }
-        if let transfers {
+        if let readLoader {
+            client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
+                                  transport: ImmichQueuedReadTransport(loader: readLoader))
+        } else if let transfers {
             let owner = LibraryTransferOwner(session: session, endpoint: endpoint)
             client = ImmichClient(apiURL: endpoint, credential: .bearer(session.accessToken),
                                   transport: ImmichQueuedReadTransport { request, operation in
@@ -72,6 +90,8 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     }
 
     func clear() {
+        peopleMutations?.cancel()
+        peopleMutations = nil
         generation &+= 1
         cancelCollectionRequests()
         collectionReads.removeAll()
@@ -285,6 +305,101 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         }
     }
 
+    /// 管理页按官方分页全量读取含隐藏人物；绕过已完成GET/collection缓存，成功后更新同账号浏览摘要。
+    func managementPeople() async throws -> [ManagedPerson] {
+        let (_, owner) = try requestContext()
+        let client = try managementClient(owner: owner)
+        do {
+            var people: [String: ManagedPerson] = [:]
+            var page = 1
+            while true {
+                let result = try await client.managementPeople(page: page, size: 250)
+                try requirePeopleOwner(owner)
+                let before = people.count
+                for person in result.people {
+                    guard let id = UUID(uuidString: person.id) else { throw TimelineReadError.invalidResponse }
+                    people[id.uuidString.lowercased()] = .init(id: id.uuidString.lowercased(), name: person.name,
+                                                               isHidden: person.isHidden, updatedAt: person.updatedAt)
+                }
+                guard result.hasNextPage else { break }
+                guard people.count > before, page < Int.max else { throw TimelineReadError.invalidResponse }
+                page += 1
+            }
+            let fresh = people.values.sorted {
+                let order = $0.displayName.localizedStandardCompare($1.displayName)
+                return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+            if let collectionStore, let session {
+                let visible = fresh.filter { !$0.isHidden }.map { LibraryPerson(id: $0.id, name: $0.name, updatedAt: $0.updatedAt ?? .distantPast) }
+                try await collectionStore.saveCollectionPayload(visible, key: LibraryIndexCard.people.rawValue, scope: .init(session: session))
+                try requirePeopleOwner(owner)
+            }
+            return fresh
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// expected来自用户确认的fresh记录；预检成功后只改本人姓名，任何await后都重新核对原代际。
+    func renamePerson(_ expected: ManagedPerson, name: String) async throws {
+        let (client, owner) = try peopleMutationContext()
+        do {
+            let fresh = try await client.person(expected.id)
+            try requirePeopleOwner(owner)
+            guard expected.matchesEditableFields(fresh) else { throw PeopleManagementError.changedPerson }
+            try await client.rename(expected.id, name: name)
+            try requirePeopleOwner(owner)
+        } catch { try requireCurrent(owner); throw Self.map(error) }
+    }
+
+    /// 隐藏仅更新本人显示设置；预检发现卡片过时就停止，不盲目覆盖另一操作的结果。
+    func setPersonHidden(_ expected: ManagedPerson, hidden: Bool) async throws {
+        let (client, owner) = try peopleMutationContext()
+        do {
+            let fresh = try await client.person(expected.id)
+            try requirePeopleOwner(owner)
+            guard expected.matchesEditableFields(fresh) else { throw PeopleManagementError.changedPerson }
+            try await client.setHidden(expected.id, hidden: hidden)
+            try requirePeopleOwner(owner)
+        } catch { try requireCurrent(owner); throw Self.map(error) }
+    }
+
+    /// target/source均重新读取确认后才发送一次有向合并；部分或未知响应保留失败，不自动重放POST。
+    func mergePeople(target: ManagedPerson, source: ManagedPerson) async throws {
+        guard target.id.lowercased() != source.id.lowercased() else { throw LibraryWriteError.invalidID }
+        let (client, owner) = try peopleMutationContext()
+        do {
+            async let freshTarget = client.person(target.id)
+            async let freshSource = client.person(source.id)
+            let (first, second) = try await (freshTarget, freshSource)
+            try requirePeopleOwner(owner)
+            guard target.matchesEditableFields(first), source.matchesEditableFields(second) else { throw PeopleManagementError.changedPerson }
+            try await client.merge(targetID: target.id, sourceID: source.id)
+            try requirePeopleOwner(owner)
+        } catch { try requireCurrent(owner); throw Self.map(error) }
+    }
+
+    /// 专用人物会话复用当前已认证身份；只由原仓库持有，并在configure/route/clear中撤销。
+    private func peopleMutationContext() throws -> (PeopleMutationClient, UInt64) {
+        let (_, owner) = try requestContext()
+        try requirePeopleOwner(owner)
+        if let peopleMutations {
+            return (peopleMutations, owner)
+        }
+        guard let activeEndpoint, let session else { throw TimelineReadError.routeUnavailable }
+        let client = PeopleMutationClient(apiURL: activeEndpoint, token: session.accessToken, userID: session.userID,
+                                          configuration: peopleConfigurationFactory?() ?? .ephemeral)
+        peopleMutations = client
+        return (client, owner)
+    }
+
+    /// 前后台读取与人物写入都使用同一原repo代际；取消不能因为已解码回执而变成成功。
+    private func requirePeopleOwner(_ owner: UInt64) throws {
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+    }
+
     func libraryMemories(page: Int, size: Int, includeTimelineAssets: Bool = true, refresh: Bool = false) async throws -> [TimelineMemorySummary] {
         let owner = generation
         let key = includeTimelineAssets ? LibraryIndexCard.memories.rawValue : "memoryCovers"
@@ -439,6 +554,7 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         // SDK类型仅存在于基础设施层；界面和领域不导入ImmichAPI。
         var dto = ImmichMetadataSearch()
         dto.text = query.text
+        dto.queryAssetID = query.queryAssetID
         dto.mode = switch query.mode {
         case .fileName: .fileName
         case .description: .description
@@ -455,8 +571,19 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         dto.rating = switch query.rating { case .any: .any; case .unrated: .unrated; case let .stars(value): .stars(value) }
         dto.cameraMake = query.cameraMake
         dto.cameraModel = query.cameraModel
+        dto.deviceModels = query.deviceModels
         dto.lensModel = query.lensModel
+        dto.tags = switch query.tags { case .any: .any; case .untagged: .untagged; case let .anyOf(ids): .anyOf(ids) }
         dto.orientation = query.orientation.map { $0 == .landscape ? .landscape : .portrait }
+        dto.mediaCategory = try query.mediaCategory.map { category in
+            guard let mapped = ImmichSearchMediaCategory(rawValue: category.rawValue) else { throw NativeSearchError.invalidQuery }
+            return mapped
+        }
+        dto.resolution = try query.resolution.map { resolution in
+            guard let mapped = ImmichSearchResolution(rawValue: resolution.rawValue) else { throw NativeSearchError.invalidQuery }
+            return mapped
+        }
+        dto.panoramasOnly = query.panoramasOnly
         dto.hasAlbums = query.hasAlbums
         dto.exifConditions = try query.exifConditions.map { condition in
             guard let field = ImmichSearchNumericCondition.Field(rawValue: condition.field.rawValue),
@@ -505,6 +632,16 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             }
             throw NativeSearchError.unavailable
         }
+    }
+
+    /// 当前账号标签候选不写入持久索引；身份/端点变化后的迟到响应必须丢弃。
+    func searchTags() async throws -> [NativeSearchTag] {
+        let (client, owner) = try requestContext()
+        let values = try await client.searchTags()
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        return values.map { NativeSearchTag(id: $0.id, value: $0.value) }
+            .sorted { $0.value.localizedStandardCompare($1.value) == .orderedAscending }
     }
 
     /// kind指定候选字段，query提供厂商/型号约束；拒绝账号/路由变化后的迟到响应。
@@ -580,6 +717,129 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
             )
         } catch {
             try requireCurrent(requestGeneration)
+            throw Self.map(error)
+        }
+    }
+
+    /// 当前账号读取一批服务器随机照片；无分页位置，迟到响应在账号/端点变更后拒绝发布。
+    func randomPhotos() async throws -> [TimelineAssetSummary] {
+        let (client, owner) = try requestContext()
+        do {
+            let values = try await client.randomPhotos(size: 60)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 本人待整理使用真实前台相簿列表与Fork目录，不复用索引已完成GET；ownerID来自当前界面会话。
+    /// 缺扩展返回nil，错误原样抛出，两条读取都必须仍属于同一原repo代际。
+    func pendingAlbums(ownerID: String) async throws -> [AlbumSummary]? {
+        let (_, owner) = try requestContext()
+        let client = try managementClient(owner: owner)
+        do {
+            async let values = client.albums()
+            async let directory = forkAlbumDirectory()
+            let (albums, groups) = try await (values, directory)
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            guard let groups else { return nil }
+            return PendingAlbumSelection.select(albums.map(Self.map), directory: groups, ownerID: ownerID)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 为当前管理动作创建绑定原仓库代际的前台读取器；它不复制会话生命周期，也不走索引GET缓存。
+    func managementTimelineReader() async throws -> any TimelineReading {
+        let (_, owner) = try requestContext()
+        try Task.checkCancellation()
+        return ManagementTimelineReader(repository: self, owner: owner)
+    }
+
+    /// 每次读取先验证原代际，随后使用同一真实凭据的前台通道；测试loader也不经过持久队列。
+    private func managementClient(owner: UInt64) throws -> ImmichClient {
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        guard let activeEndpoint, let session else { throw TimelineReadError.routeUnavailable }
+        if let readLoader {
+            return ImmichClient(apiURL: activeEndpoint, credential: .bearer(session.accessToken),
+                                transport: ImmichQueuedReadTransport(loader: readLoader))
+        }
+        return ImmichClient.foregroundReadClient(apiURL: activeEndpoint, credential: .bearer(session.accessToken))
+    }
+
+    /// query为管理需要的准确相簿范围；owner固定创建时原repo代际，返回本次实际HTTP桶列表。
+    private func managementBuckets(query: TimelineQuery, owner: UInt64) async throws -> [TimelineBucketSummary] {
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.timelineBuckets(query: Self.map(query))
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map { .init(id: .init(rawValue: $0.id), assetCount: $0.assetCount) }
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// bucket/query决定本次真实前台GET；owner使旧读取器在换账号或端点后失效，响应也必须再次检查。
+    private func managementAssets(bucket: TimelineBucketID, query: TimelineQuery, owner: UInt64) async throws -> [TimelineAssetSummary] {
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.timelineAssets(in: bucket.rawValue, query: Self.map(query))
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
+            throw Self.map(error)
+        }
+    }
+
+    /// 管理相簿不产生全局回忆，沿用AlbumTimelineReader的空回忆语义；空结果同样受原代际和取消保护。
+    private func managementMemories(owner: UInt64) throws -> [TimelineMemorySummary] {
+        try Task.checkCancellation()
+        try requireCurrent(owner)
+        return []
+    }
+
+    /// 只保留原repo与固定发布代际；所有网络读取回到原actor验证，不能脱离原生命周期继续读取旧账户。
+    private nonisolated struct ManagementTimelineReader: TimelineReading {
+        let repository: ImmichTimelineRepository
+        let owner: UInt64
+
+        /// query原样交给原仓库前台读取，返回当前响应而非共享collection缓存。
+        func bucketSummaries(query: TimelineQuery) async throws -> [TimelineBucketSummary] {
+            try await repository.managementBuckets(query: query, owner: owner)
+        }
+
+        /// bucketID/query定义管理成员读取范围，owner检查覆盖请求前后。
+        func assets(in bucketID: TimelineBucketID, query: TimelineQuery) async throws -> [TimelineAssetSummary] {
+            try await repository.managementAssets(bucket: bucketID, query: query, owner: owner)
+        }
+
+        /// 管理相簿不返回回忆；仍通过原repo拒绝失效代际与取消任务。
+        func memories() async throws -> [TimelineMemorySummary] {
+            try await repository.managementMemories(owner: owner)
+        }
+    }
+
+    /// 写入后的相簿列表必须绕过已完成索引GET；每次响应前后仍核对原仓库账号/端点代际。
+    func foregroundAlbums() async throws -> [AlbumSummary] {
+        let (_, owner) = try requestContext()
+        let client = try managementClient(owner: owner)
+        do {
+            let values = try await client.albums()
+            try Task.checkCancellation()
+            try requireCurrent(owner)
+            return values.map(Self.map)
+        } catch {
+            try requireCurrent(owner)
             throw Self.map(error)
         }
     }

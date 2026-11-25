@@ -1,0 +1,17 @@
+# 本机Live Photo动态配对与宿主整合
+
+这是从本地优先候选44dbafd继续的工作，已保留a7138e0原始提交历史。a7138e0的CI45418380493已终态failure：应用和测试包编译成功，API93项/23suite、App925项/118suite通过；phone5项中2过3失败，tablet准备180秒超时，未执行测试。该轮不含本文native动态整合，不能复用其收据宣称新代码通过。
+
+远端配对领域/详情DTO、专用PhotoKit proof与native reader、PHLivePhotoView组件、音频请求controller、严格Live still SHA1政策及实际查看器/MediaLibraryController桥接现已整合。宿主在任何原有远端motion准备之前等待已验证本机结果；账号/版本/来源失效或退后台取消准备，只有当前合法miss才回退。
+
+每次长按轮换播放token并为native建立新view身份；松手/页面退出立即退休旧回调。音频请求有独立UUID所有权，旧成功/失败不改变或停用新轮声音。native读取必须匹配完整motion proof快照，前后重读远端pair；无CloudID的严格未编辑Live可仅对still SHA1建立静态关联，不能由此推断motion相同。
+
+44dbafd的Live Photo静态帧可以本机命中，但既有LivePhotoPlaybackView打开时会预备远端motion；因此还需在任何远端预备之前选择已验证本机动态。不能因为still匹配就推断配对视频相同，也不能把photoLive PHAsset传给仅承诺video的requestPlayerItem。
+
+远端配对先验证fresh still仍等于当前精确版本关联，且livePhotoVideoId明确等于界面motion UUID；fresh motion必须同owner、VIDEO、明确非trash/offline/edited、已知有限版本与canonical20字节Base64 SHA1。LocalLivePhotoRemotePair只表达这些已验证身份/版本，尚不证明本机motion字节。新LocalMediaRemoteAsset字段可缺失/null，但错误UUID解码失败。
+
+宿主已将独立本机pairedVideo字节证明与motion checksum比较，一致后才请求PhotoKit current PHLivePhoto（network=false）；本机源/权限、账号/端点代际、关联及远端pair版本均需前后复核。首版仅支持可证明未调整的唯一photo+pairedVideo；已编辑/复合/资源不明走原有安全回退。目标是避免Immich媒体下载，允许必要fresh元数据，不导出原片或写设备照片。
+
+领域、reader、真实Media路由、native组件命令、音频非合作取消及Live still流式SHA1均有对应新增测试；NAS全仓375个Swift文件格式、脚本语法与diff检查通过。另新增真实JPEG/MOV合成工厂，要求公开PhotoKit重建返回非degraded、非nil对象；三条路由依次检查同对象成功、最终motion版本变化及摘要变化，并断言四次fresh读取和来源标签。工厂失败必须硬失败，不能skip或伪造对象。NAS无Swift/Xcode，这些新增代码仍未编译/运行，Photos授权及系统动画/音频也未验，下一轮统一macOS CI须实际执行。
+
+一并整合a713已暴露的搜索测试宿主媒体管线、手机账号入口与可访问性修复；tablet脚本仅在CI首次准备计时超时后重启同一选定设备一次，不重试UI测试。无服务端/API/SDK/数据库/生产或workflow变更；现有CLI契约编译输入新增两个纯Foundation领域文件。回退源码/宿主桥接不删除媒体或恢复资料。旧CI已确认终态，本文候选整合进PR8后只跑一条新的验证链；完整通过前不更新子dev或父gitlink。

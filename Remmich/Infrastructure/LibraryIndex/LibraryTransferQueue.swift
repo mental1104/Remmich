@@ -333,8 +333,8 @@ actor LibraryTransferQueue {
                              errorCode: components.first { $0.state == .failed }?.errorCode))
     }
 
-    /// Import complete pairs first, rather than occupying import workers with
-    /// earlier requests that the native session has not delivered yet.
+    /// assets/owner限定当前资产及验证通道，两个ID集合为已存的图/元数据；返回可导入配对及交付游标。
+    /// 只接受明确edited=true的缩略图完成体，旧同revision响应不能阻塞或冒充当前配对。
     func readyCacheAssets(_ assets: [LibraryIndexAssetRecord], owner: LibraryTransferOwner,
                           thumbnailIDs: Set<String>, metadataIDs: Set<String>) throws -> (ids: Set<String>, revision: UInt64)
     {
@@ -343,7 +343,10 @@ actor LibraryTransferQueue {
         let ready = assets.filter { asset in
             let responses = jobs[asset.id, default: []].filter { $0.sourceRevision == asset.updatedAt.ISO8601Format() }
             func available(_ kind: LibraryTransferKind) -> Bool {
-                responses.contains { $0.kind == kind && ($0.state == .completed || $0.state == .failed) }
+                responses.contains { $0.kind == kind && ($0.state == .completed || $0.state == .failed)
+                    && (kind != .thumbnail || ($0.url == LibraryThumbnailCache.displayThumbnailURL(assetID: asset.id, endpoint: owner.endpoint)
+                            && $0.thumbnailVersion == LibraryThumbnailCache.displayThumbnailVersion(updatedAt: asset.updatedAt)))
+                }
             }
             return (thumbnailIDs.contains(asset.id) || available(.thumbnail))
                 && (metadataIDs.contains(asset.id) || available(.metadata))
@@ -539,7 +542,8 @@ actor LibraryTransferQueue {
         try? persist()
     }
 
-    /// Only a bounded look-ahead is submitted to the OS, not the whole library.
+    /// assets只取有界窗口，scope/endpoint为验证通道，两个ID集合避免重复预取已完成的图/元数据。
+    /// 持久化明确edited展示请求，必要时取消旧语义cache对；不改原片导出或账号/队列生命周期。
     func prefetchCache(
         _ assets: [LibraryIndexAssetRecord], scope: MediaAccountScope, endpoint: URL,
         thumbnailIDs: Set<String>, metadataIDs: Set<String>
@@ -548,14 +552,17 @@ actor LibraryTransferQueue {
               !journal.disabledLanes.contains("cache"), authorization != nil else { return }
         for asset in assets.prefix(Self.cacheLookAheadAssets) {
             let revision = asset.updatedAt.ISO8601Format()
+            let thumbnailVersion = LibraryThumbnailCache.displayThumbnailVersion(updatedAt: asset.updatedAt)
             discard(journal.discardStaleCacheAsset(asset.id, revision: revision))
-            if !thumbnailIDs.contains(asset.id),
-               var components = URLComponents(url: endpoint.appending(path: "assets/\(asset.id)/thumbnail"), resolvingAgainstBaseURL: false)
-            {
-                components.queryItems = [.init(name: "size", value: "thumbnail")]
-                if let url = components.url {
-                    _ = try? journal.job(url: url, kind: .thumbnail, owner: owner, sourceRevision: revision)
-                }
+            let thumbnailURL = LibraryThumbnailCache.displayThumbnailURL(assetID: asset.id, endpoint: endpoint)
+            // 冷启动旧队列可能包含同源版本的未编辑缩略图；丢弃该资产旧cache对，防止旧完成体被当作已准备展示。
+            if journal.jobs.contains(where: { $0.kind == .thumbnail && $0.assetID == asset.id
+                    && ($0.url != thumbnailURL || $0.thumbnailVersion != thumbnailVersion)
+            }) {
+                discard(journal.remove(lane: "cache", assetID: asset.id))
+            }
+            if !thumbnailIDs.contains(asset.id), let url = thumbnailURL {
+                _ = try? journal.job(url: url, kind: .thumbnail, owner: owner, sourceRevision: revision, thumbnailVersion: thumbnailVersion)
             }
             if !metadataIDs.contains(asset.id) {
                 _ = try? journal.job(url: endpoint.appending(path: "assets/\(asset.id)"), kind: .metadata, owner: owner, sourceRevision: revision)
@@ -671,10 +678,31 @@ actor LibraryTransferQueue {
         }
     }
 
-    func thumbnailData(for request: URLRequest, scope: MediaAccountScope, endpoint: URL, accessToken: String) async throws -> Response {
+    /// request/scope/endpoint/accessToken必须属于当前只读GET通道，updatedAt固定本次下载的精确展示版本。
+    /// 返回同版本持久响应；先淘汰未知或旧版本cache对，不把旧body写到新版本文件名。
+    func thumbnailData(for request: URLRequest, scope: MediaAccountScope, endpoint: URL, accessToken: String,
+                       updatedAt: Date) async throws -> Response
+    {
+        try Task.checkCancellation()
         guard let owner = journal.owner, owner.namespace == scope.cacheNamespace, owner.endpoint == endpoint,
-              owner.credentialRevision == LibraryTransferOwner.digest(accessToken) else { throw CancellationError() }
-        return try await data(for: request, kind: .thumbnail, owner: owner)
+              owner.credentialRevision == LibraryTransferOwner.digest(accessToken),
+              request.httpMethod == nil || request.httpMethod == "GET", request.httpBody == nil,
+              let url = request.url, Self.sameOrigin(url, endpoint) else { throw CancellationError() }
+        let components = url.pathComponents
+        guard let index = components.firstIndex(of: "assets"), components.indices.contains(index + 1) else { throw CancellationError() }
+        let assetID = components[index + 1]
+        guard url == LibraryThumbnailCache.displayThumbnailURL(assetID: assetID, endpoint: endpoint) else { throw CancellationError() }
+        let version = LibraryThumbnailCache.displayThumbnailVersion(updatedAt: updatedAt)
+        if journal.jobs.contains(where: { $0.kind == .thumbnail && $0.assetID == assetID
+                && ($0.url != url || $0.thumbnailVersion != version)
+        }) {
+            discard(journal.remove(lane: "cache", assetID: assetID))
+        }
+        journal.requeueFailures()
+        let job = try journal.job(url: url, kind: .thumbnail, owner: owner,
+                                  sourceRevision: updatedAt.ISO8601Format(), thumbnailVersion: version)
+        try persist()
+        return try await waitForResponse(job)
     }
 
     private func pump() {

@@ -349,11 +349,13 @@ struct AssetLocationTests {
         try await fixture.store.upsert(assets: [asset], generation: generation, scope: actualScope)
         _ = try await fixture.store.acceptGeneration(generation, watermark: nil, historicalCursor: nil, expectedAssetCount: 1, scope: actualScope)
         if assetsComplete {
-            let image = fixture.directory.appending(path: "images/\(actualScope.cacheNamespace)/thumbnail/asset.jpg")
+            // assetsComplete表示当前edited展示版本已缓存，不能种旧文件名后误测成图片下载失败。
+            let relativeKey = "thumbnail/" + LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt)
+            let image = fixture.directory.appending(path: "images/\(actualScope.cacheNamespace)/\(relativeKey)")
             try FileManager.default.createDirectory(at: image.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data([1]).write(to: image)
             try await fixture.store.upsert(derivatives: [.init(assetID: "asset", derivative: .thumbnail, pixelSize: nil,
-                                                               sourceRevision: asset.updatedAt.ISO8601Format(), relativeFileKey: "thumbnail/asset.jpg", byteCount: 1,
+                                                               sourceRevision: asset.updatedAt.ISO8601Format(), relativeFileKey: relativeKey, byteCount: 1,
                                                                digest: "fixture", isVerified: true, lastAccessedAt: .now, completedAt: .now)], scope: actualScope)
         }
         let defaults = try #require(UserDefaults(suiteName: UUID().uuidString))
@@ -454,9 +456,11 @@ struct AssetLocationTests {
                                                 visibility: "timeline", isTrashed: false, isOffline: false, bucketKey: "2026-11-01", dayKey: "2026-11-01",
                                                 weekKey: "2026-W44", monthKey: "2026-11", yearKey: "2026")
             try await fixture.store.upsert(assets: [asset], generation: generation, scope: account)
-            try Data([1]).write(to: directory.appending(path: "\(id).jpg"))
+            // 此用例只观察metadata/place调度，图片先按当前展示契约完整落盘，避免意外联网。
+            let filename = LibraryThumbnailCache.displayThumbnailFilename(assetID: id, updatedAt: asset.updatedAt)
+            try Data([1]).write(to: directory.appending(path: filename))
             try await fixture.store.upsert(derivatives: [.init(assetID: id, derivative: .thumbnail, pixelSize: nil,
-                                                               sourceRevision: asset.updatedAt.ISO8601Format(), relativeFileKey: "thumbnail/\(id).jpg", byteCount: 1,
+                                                               sourceRevision: asset.updatedAt.ISO8601Format(), relativeFileKey: "thumbnail/\(filename)", byteCount: 1,
                                                                digest: "fixture", isVerified: true, lastAccessedAt: .now, completedAt: .now)], scope: account)
         }
         _ = try await fixture.store.acceptGeneration(generation, watermark: nil, historicalCursor: nil, expectedAssetCount: 2, scope: account)

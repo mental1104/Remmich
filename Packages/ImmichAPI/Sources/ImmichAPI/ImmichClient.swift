@@ -4,7 +4,7 @@ import OpenAPIRuntime
 import OpenAPIURLSession
 import OSLog
 
-/// 账号API封装，保留可更新凭据与固定传输边界；Fork高级搜索使用独立可取消读取协议。
+/// 账号API封装，保留可更新凭据与固定传输边界；随机与Fork高级搜索使用受限可取消前台读取。
 public actor ImmichClient {
     private nonisolated static let logger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -61,6 +61,12 @@ public actor ImmichClient {
             transport: ImmichNetworkSession.routeCheckTransport,
             routeCheckSession: ImmichNetworkSession.routeCheck
         )
+    }
+
+    /// 为交互管理读取创建不缓存、禁cookie/重定向的前台SDK客户端；apiURL/credential须来自已验证会话。
+    /// 仍使用相同只读策略、鉴权和日期编码；不配置持久GET传输或后台索引缓存。
+    public static func foregroundReadClient(apiURL: URL, credential: ImmichCredential) -> ImmichClient {
+        ImmichClient(apiURL: apiURL, credential: credential, transport: ImmichSearchNetwork.transport)
     }
 
     public func setCredential(_ credential: ImmichCredential?) {
@@ -226,6 +232,33 @@ public actor ImmichClient {
         }
     }
 
+    /// 从官方随机入口读取一批可见照片；size为1–1000，默认60，不返回或伪造分页游标。
+    /// 每次调用重新由服务器随机抽样；排除视频、归档、锁定和回收站，取消与HTTP错误不转为空批次。
+    public func randomPhotos(size: Int = 60) async throws -> [ImmichTimelineAsset] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            // 交互随机抽样复用受限前台传输，不将POST条件放入只记录URL的持久GET日志。
+            let client = Client(serverURL: apiURL, configuration: .init(dateTranscoder: Self.dateTranscoder),
+                                transport: forkSmartTransport, middlewares: [AuthenticationMiddleware(credential: credential)])
+            let output = try await client.searchRandom(.init(body: .json(.init(
+                filter: .init(trashedAt: .init(eq: .null), _type: .init(eq: .IMAGE), visibility: .init(eq: .timeline)),
+                size: size, withExif: true
+            ))))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let values = try response.body.json
+                guard values.count <= size,
+                      values.allSatisfy({ $0._type == .IMAGE && $0.visibility == .timeline && !$0.isTrashed })
+                else { throw ImmichAPIError.invalidResponse }
+                return values.map(Self.timelineAsset)
+            case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
+    }
+
     public func albums() async throws -> [ImmichAlbum] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         do {
@@ -307,12 +340,12 @@ public actor ImmichClient {
     }
 
     /// 按文件名和已选字段读取非回收站资源；query不变，cursor为上页原始令牌，size为1–1000。
-    /// 返回可见时间线资源及下一游标；鉴权、网络或响应异常沿用 ImmichAPIError。
+    /// 返回可见时间线资源及下一游标；参考图须调用search，鉴权、条件、网络或响应错误沿用ImmichAPIError。
     public func metadataSearch(_ query: ImmichMetadataSearch, cursor: String? = nil, size: Int = 60) async throws -> ImmichMetadataSearchPage {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
+        guard query.queryAssetID == nil, query.mode != .smart || text.isEmpty else { throw ImmichAPIError.invalidResponse }
         let output = try await makeClient().searchAssets(.init(body: .json(.init(
             cursor: cursor,
             filter: structuredSearchFilter(query),
@@ -329,9 +362,10 @@ public actor ImmichClient {
         }
     }
 
-    /// query为完整原生条件；metadata/Fork智能路径共用同一映射，非法日期或原子条件在网络前拒绝。
+    /// query为完整原生条件；metadata/Fork智能共用同一映射，非法日期、设备型号组或原子条件在网络前拒绝。
     private func structuredSearchFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.SearchFilter {
         guard query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
+        let tagIDs = try selectedSearchTagIDs(query.tags)
         let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
         let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
         if let after, let before, after > before {
@@ -343,16 +377,18 @@ public actor ImmichClient {
             country: query.country.isEmpty ? nil : .init(eq: query.country),
             description: query.mode == .description && !text.isEmpty ? .init(like: text) : nil,
             hasAlbums: query.hasAlbums.map { .init(eq: $0) },
+            hasTags: query.tags == .untagged ? .init(eq: false) : nil,
             isFavorite: query.favoritesOnly ? .init(eq: true) : nil,
             lensModel: query.lensModel.isEmpty ? nil : .init(eq: query.lensModel),
             make: query.cameraMake.isEmpty ? nil : .init(eq: query.cameraMake),
-            model: query.cameraModel.isEmpty ? nil : .init(eq: query.cameraModel),
+            model: deviceModelFilter(query),
             ocr: query.mode == .ocr && !text.isEmpty ? .init(matches: text) : nil,
             originalFileName: query.mode == .fileName && !text.isEmpty ? .init(like: text) : nil,
             originalPath: query.mode == .fullPath && !text.isEmpty ? .init(like: text) : nil,
             personIds: query.personIDs.isEmpty ? nil : .init(any: query.personIDs),
             rating: ratingFilter(query.rating),
             state: query.state.isEmpty ? nil : .init(eq: query.state),
+            tagIds: tagIDs.map { .init(any: $0) },
             takenAt: after == nil && before == nil ? nil : .init(gte: after, lte: before),
             trashedAt: .init(eq: .null),
             _type: query.media == .all ? nil : .init(eq: query.media == .image ? .IMAGE : .VIDEO),
@@ -361,15 +397,73 @@ public actor ImmichClient {
             fNumber: numericFilter(.fNumber, conditions: query.exifConditions),
             focalLength: numericFilter(.focalLength, conditions: query.exifConditions),
             exposureTime: numericFilter(.exposureTime, conditions: query.exifConditions),
-            orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) }
+            orientation: query.orientation.map { .init(eq: $0 == .landscape ? .landscape : .portrait) },
+            isPanorama: query.panoramasOnly ? .init(eq: true) : nil,
+            isPhoneVideo: query.mediaCategory == .phoneVideo ? .init(eq: true) : nil,
+            isScreenshot: query.mediaCategory == .screenshot ? .init(eq: true) : nil,
+            isNintendo3dsScreenshot: query.mediaCategory == .nintendo3dsScreenshot ? .init(eq: true) : nil,
+            isSwitchScreenshot: query.mediaCategory == .switchScreenshot ? .init(eq: true) : nil,
+            isSteamScreenshot: query.mediaCategory == .steamScreenshot ? .init(eq: true) : nil,
+            isDeltaScreenshot: query.mediaCategory == .deltaScreenshot ? .init(eq: true) : nil,
+            resolution: resolutionFilter(query.resolution)
         )
     }
 
+    /// resolution为可选服务端档位；返回生成Schema条件，未知映射明确拒绝而不丢弃筛选。
+    private func resolutionFilter(_ resolution: ImmichSearchResolution?) throws -> Components.Schemas.MediaResolutionFilter? {
+        guard let resolution else { return nil }
+        guard let value = Components.Schemas.MediaResolution(rawValue: resolution.rawValue) else { throw ImmichAPIError.invalidResponse }
+        return .init(eq: value)
+    }
+
+    /// tags为三态过滤；返回任一匹配的ID数组或nil，空/重复/非UUID v4在请求前拒绝。
+    private func selectedSearchTagIDs(_ tags: ImmichSearchTagFilter) throws -> [String]? {
+        guard case let .anyOf(ids) = tags else { return nil }
+        guard (1 ... 100).contains(ids.count), ids.allSatisfy(ImmichSearchTagFilter.isValidID),
+              Set(ids.map { $0.lowercased() }).count == ids.count else { throw ImmichAPIError.invalidResponse }
+        return ids
+    }
+
+    /// 读取当前凭据可见的官方标签候选；返回完整层级名称，拒绝重复/非UUID v4身份，不写入标签或资产。
+    public func searchTags() async throws -> [ImmichSearchTag] {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        do {
+            let output = try await makeClient().getAllTags(.init())
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let tags = try response.body.json
+                guard Set(tags.map { $0.id.lowercased() }).count == tags.count else { throw ImmichAPIError.invalidResponse }
+                return try tags.map { tag in
+                    guard ImmichSearchTagFilter.isValidID(tag.id), !tag.value.isEmpty else { throw ImmichAPIError.invalidResponse }
+                    return ImmichSearchTag(id: tag.id.lowercased(), value: tag.value)
+                }
+            case let .undocumented(statusCode, _):
+                throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// query包含独立单型号与设备OR组；返回合并的官方model过滤，空条件省略，非法别名集合在网络前拒绝。
+    private func deviceModelFilter(_ query: ImmichMetadataSearch) throws -> Components.Schemas.StringFilterNullable? {
+        guard query.deviceModels.count <= 50,
+              query.deviceModels.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf16.count <= 256 })
+        else { throw ImmichAPIError.invalidResponse }
+        guard !query.cameraModel.isEmpty || !query.deviceModels.isEmpty else { return nil }
+        // 不将产品名称写入请求，也不以设备组覆盖用户额外选择的单型号。
+        return .init(eq: query.cameraModel.isEmpty ? nil : query.cameraModel,
+                     _in: query.deviceModels.isEmpty ? nil : query.deviceModels)
+    }
+
     /// 按query模式读取一页；continuation须来自相同条件的上页，禁止混用页码和游标。
-    /// 普通智能模式保留官方页码，高级组合只走独立Fork绑定游标，不删减条件降级。
+    /// 普通智能模式保留官方页码，参考图和高级组合只走独立Fork绑定游标，不删减条件降级。
     public func search(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation? = nil, size: Int = 60) async throws -> ImmichSearchPage {
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if query.mode != .smart || text.isEmpty {
+        // 参考图不能被metadata分支忽略；错误模式或混合文字必须在发送前完整拒绝。
+        if query.queryAssetID != nil {
+            guard query.mode == .smart, text.isEmpty else { throw ImmichAPIError.invalidResponse }
+        }
+        if query.mode != .smart || (text.isEmpty && query.queryAssetID == nil) {
             var cursor: String?
             if let continuation {
                 guard case let .cursor(value) = continuation else { throw ImmichAPIError.invalidResponse }
@@ -429,20 +523,28 @@ public actor ImmichClient {
         }
     }
 
-    /// 独立Fork只读请求体；不向生成的官方SmartSearchDto加入自定义字段或路径。
+    /// 独立Fork只读请求体；query/queryAssetId必须二选一，缺省Optional由合成编码器省略。
+    /// 不向生成的官方SmartSearchDto加入自定义字段或路径。
     private struct ForkSmartSearchBody: Encodable {
-        let query: String
+        let query: String?
+        let queryAssetId: String?
         let filter: Components.Schemas.SearchFilter
         let size: Int
         let cursor: String?
         let withExif = true
     }
 
-    /// query完整保留筛选，continuation仅接受Fork令牌，size限制页大小；缺路由错误保留给账号范围界面提示。
+    /// query完整保留筛选并验证文字/UUID v4参考图互斥；continuation仅接受Fork令牌，size为1–1000。
+    /// 返回本次结果页；非法来源/令牌发送前失败，缺路由和其他HTTP错误保留给账号范围界面提示。
     private func forkSmartSearch(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation?, size: Int) async throws -> ImmichSearchPage {
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
+        if let reference = query.queryAssetID {
+            guard text.isEmpty, let uuid = UUID(uuidString: reference),
+                  uuid.uuid.6 & 0xF0 == 0x40, uuid.uuid.8 & 0xC0 == 0x80 else { throw ImmichAPIError.invalidResponse }
+        } else {
+            guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
+        }
         var cursor: String?
         if let continuation {
             guard case let .forkCursor(value) = continuation, !value.isEmpty, value.utf16.count <= 4096 else { throw ImmichAPIError.invalidResponse }
@@ -455,7 +557,8 @@ public actor ImmichClient {
             var value = encoder.singleValueContainer()
             try value.encode(transcoder.encode(date))
         }
-        let data = try encoder.encode(ForkSmartSearchBody(query: text, filter: structuredSearchFilter(query), size: size, cursor: cursor))
+        let data = try encoder.encode(ForkSmartSearchBody(query: query.queryAssetID == nil ? text : nil,
+                                                          queryAssetId: query.queryAssetID, filter: structuredSearchFilter(query), size: size, cursor: cursor))
         let operationID = "forkSearchSmart"
         let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/search/smart",
                                   headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])
@@ -648,6 +751,27 @@ public actor ImmichClient {
                 return ImmichPeoplePage(people: result.people.filter { !$0.isHidden }.map {
                     ImmichPerson(id: $0.id, name: $0.name, updatedAt: $0.updatedAt)
                 }, hasNextPage: result.hasNextPage ?? (page * size < result.total))
+            case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
+            }
+        } catch { throw Self.map(error) }
+    }
+
+    /// 管理页显式包含隐藏人物；page/size沿用官方分页，默认浏览people方法保持不变。
+    /// 调用方使用前台client避免已完成GET缓存；取消/HTTP/非法分页错误继续抛出。
+    public func managementPeople(page: Int, size: Int) async throws -> ImmichManagementPeoplePage {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard page >= 1, (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
+        do {
+            try Task.checkCancellation()
+            let output = try await makeClient().getAllPeople(.init(query: .init(page: page, size: size, withHidden: true)))
+            try Task.checkCancellation()
+            switch output {
+            case let .ok(response):
+                let result = try response.body.json
+                guard result.total >= 0, result.people.count <= size else { throw ImmichAPIError.invalidResponse }
+                return ImmichManagementPeoplePage(people: result.people.map {
+                    .init(id: $0.id, name: $0.name, isHidden: $0.isHidden, updatedAt: $0.updatedAt)
+                }, hasNextPage: result.hasNextPage ?? (page <= result.total / size && page * size < result.total))
             case let .undocumented(statusCode, _): throw Self.map(status: statusCode)
             }
         } catch { throw Self.map(error) }

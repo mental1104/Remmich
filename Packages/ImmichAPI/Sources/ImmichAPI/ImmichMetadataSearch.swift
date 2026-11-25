@@ -31,8 +31,13 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public enum Media: String, CaseIterable, Sendable { case all, image, video }
 
     public var text = ""
+    /// 服务端参考图的UUID v4；必须在smart模式与非空text二选一，始终走完整Fork协议。
+    public var queryAssetID: String?
     public var mode: Mode = .fileName
     public var media: Media = .all
+    public var mediaCategory: ImmichSearchMediaCategory?
+    public var resolution: ImmichSearchResolution?
+    public var panoramasOnly = false
     public var country = ""
     public var state = ""
     /// 收藏关闭表示不限制；归档关闭保留既有timeline范围，不包含锁定内容。
@@ -42,7 +47,10 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     public var city = ""
     public var cameraMake = ""
     public var cameraModel = ""
+    /// 当前账号真实设备型号的OR集合；与单型号和其他条件组合时仍是AND，不自动改媒体类型。
+    public var deviceModels: [String] = []
     public var lensModel = ""
+    public var tags: ImmichSearchTagFilter = .any
     /// 横竖构图来自Fork扩展；未选择则不限制。
     public enum Orientation: String, Sendable { case landscape, portrait }
     public var orientation: Orientation?
@@ -57,10 +65,15 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 创建空条件；调用方按用户选择修改值，不自动读取设备照片。
     public init() {}
 
-    /// 只有旧式smart无法完整表达的组合才走独立Fork协议，普通查询仍保持官方分页。
+    /// 参考图始终走完整Fork协议；其他旧式smart无法完整表达的组合也走独立Fork分页。
     public var requiresForkSmartSearch: Bool {
-        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (!exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0))
+        guard mode == .smart else { return false }
+        if queryAssetID != nil {
+            return true
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return !exifConditions.isEmpty || orientation != nil || hasAlbums != nil || rating == .stars(0)
+            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any || !deviceModels.isEmpty
     }
 
     /// date为用户日历日，endOfDay选择当日末毫秒；返回用UTC编码的本地墙上时间。
@@ -76,6 +89,34 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
         }
         return endOfDay ? next.addingTimeInterval(-0.001) : start
     }
+}
+
+/// Fork按元数据识别的媒体来源类别；与照片/视频类型条件独立，未选时不增加限制。
+public enum ImmichSearchMediaCategory: String, CaseIterable, Sendable {
+    case phoneVideo = "phone-video", screenshot, deltaScreenshot = "delta-screenshot"
+    case steamScreenshot = "steam-screenshot", switchScreenshot = "switch-screenshot", nintendo3dsScreenshot = "3ds-screenshot"
+}
+
+/// Fork定义的分辨率档位；仅转发服务端档位，不在客户端按像素猜测归类。
+public enum ImmichSearchResolution: String, CaseIterable, Sendable {
+    case hd = "720p", fullHD = "1080p", twoK = "2k", fourK = "4k"
+}
+
+/// 标签条件区分不限制、无标签和任一所选标签（含后代）；ID数组须非空且最多100项。
+public enum ImmichSearchTagFilter: Hashable, Sendable {
+    case any, untagged, anyOf([String])
+
+    /// value为候选或保存的标签ID；只有服务端IdsFilter接受的UUID v4及RFC variant返回true。
+    static func isValidID(_ value: String) -> Bool {
+        guard let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuid.6 & 0xF0 == 0x40 && uuid.uuid.8 & 0xC0 == 0x80
+    }
+}
+
+/// 官方账号标签候选，仅保留搜索选择需要的身份和完整层级名称，不提供写入能力。
+public struct ImmichSearchTag: Hashable, Sendable {
+    public let id: String
+    public let value: String
 }
 
 /// 不限制、未评分和具体评分不能共用一个Optional；0保留为合法的结构化查询值。

@@ -5,6 +5,18 @@ import Observation
 import OSLog
 import Photos
 
+/// 已实际选用的展示资源来源；Immich资源可能来自现有缓存，不将来源标签当作网络字节统计。
+nonisolated enum MediaReadOrigin: String, Sendable {
+    case devicePhotos = "On this device"
+    case immichResource = "Immich or cache"
+}
+
+/// 来源记录绑定远端当前版本，不能让同资产旧图的来源标签冒充新版本。
+private nonisolated struct MediaReadOriginKey: Hashable {
+    let assetID: String
+    let revision: Date
+}
+
 @MainActor
 @Observable
 final class MediaLibraryController {
@@ -24,6 +36,11 @@ final class MediaLibraryController {
     private(set) var downloadService: MediaDownloadService?
     private let imageDataLoader: (any DataLoading)?
     let savedPhotosLibrary: SavedPhotosLibrary?
+    let localMediaMatches: LocalMediaMatchController
+    @ObservationIgnored private let localPhotoReader: any LocalPhotoMediaReading
+    @ObservationIgnored private let localLivePhotoReader: any LocalLivePhotoMediaReading
+    @ObservationIgnored private let localLivePhotoRemote: (any LocalMediaMatchingReading)?
+    private var mediaReadOrigins: [MediaReadOriginKey: MediaReadOrigin] = [:]
     private static let savedPhotosFiles = MediaExportFiles(
         root: FileManager.default.temporaryDirectory.appending(path: "RemmichSavedPhotos", directoryHint: .isDirectory)
     )
@@ -68,19 +85,45 @@ final class MediaLibraryController {
     private var warmedThumbnailURLs: [String: URL] = [:]
     private(set) var thumbnailInventoryRevision = 0
     private let profileImageCache = ProfileImageCache()
+    private let profileImageSession: URLSession
     private var profileImageCacheTask: Task<Void, Never>?
     private var cachedProfileImageURL: URL?
     private var profileImageCacheRevision = 0
 
-    init(imageDataLoader: (any DataLoading)? = nil, exports: MediaExportController? = nil) {
+    /// 默认沿用现有网络/导出依赖；profileImageSession隔离头像，localLivePhotoReader/remote仅替换本机读取与fresh详情来源。
+    /// imageDataLoader/exports提供原图片与导出服务，localMediaMatches/localPhotoReader保留普通本机路由；remote为nil时使用当前鉴权client。
+    init(imageDataLoader: (any DataLoading)? = nil, exports: MediaExportController? = nil,
+         localMediaMatches: LocalMediaMatchController? = nil,
+         localPhotoReader: any LocalPhotoMediaReading = PhotoKitLocalPhotoMediaReader(), profileImageSession: URLSession = .shared,
+         localLivePhotoReader: any LocalLivePhotoMediaReading = PhotoKitLocalLivePhotoMediaReader(), remote: (any LocalMediaMatchingReading)? = nil)
+    {
         self.imageDataLoader = imageDataLoader
         self.exports = exports ?? MediaExportController()
+        self.localMediaMatches = localMediaMatches ?? LocalMediaMatchController()
+        self.localPhotoReader = localPhotoReader
+        self.localLivePhotoReader = localLivePhotoReader
+        localLivePhotoRemote = remote
+        self.profileImageSession = profileImageSession
         savedPhotosLibrary = nil
     }
 
+    #if DEBUG
+        /// searchUITestPipeline是宿主独立内存/拒绝网络的管线；exports仍为隔离临时依赖，不配置真实账号或队列。
+        convenience init(searchUITestPipeline: ImagePipeline, exports: MediaExportController) {
+            self.init(exports: exports)
+            pipeline = searchUITestPipeline
+        }
+    #endif
+
+    /// Saved Photos仍由独立库和scope提供媒体；专用远端配对helper在此模式直接miss，不复用原片导出。
     init(savedPhotosLibrary: SavedPhotosLibrary, scope: MediaAccountScope) {
         self.savedPhotosLibrary = savedPhotosLibrary
         self.scope = scope
+        localMediaMatches = LocalMediaMatchController()
+        localPhotoReader = PhotoKitLocalPhotoMediaReader()
+        localLivePhotoReader = PhotoKitLocalLivePhotoMediaReader()
+        localLivePhotoRemote = nil
+        profileImageSession = .shared
         imageDataLoader = nil
         exports = MediaExportController()
         var configuration = ImagePipeline.Configuration()
@@ -129,6 +172,7 @@ final class MediaLibraryController {
         self.session = session
         activeAPIURL = activeEndpoint
         management.configure(session: session, endpoint: activeEndpoint)
+        localMediaMatches.restoreAndRefresh(using: management, scope: nextScope)
         exports.configure(media: self, scope: nextScope)
         let profileStartedAt = Date()
         prepareProfileImageCache(scope: nextScope, session: session, endpoint: activeEndpoint)
@@ -140,6 +184,7 @@ final class MediaLibraryController {
     func updateRoute(_ endpoint: URL?) {
         activeAPIURL = endpoint
         management.configure(session: session, endpoint: endpoint)
+        localMediaMatches.restoreAndRefresh(using: management, scope: scope)
         guard let scope, let session else { return }
         prepareProfileImageCache(scope: scope, session: session, endpoint: endpoint)
         if endpoint != nil {
@@ -205,10 +250,13 @@ final class MediaLibraryController {
         Self.logger.info("App shell appeared startupElapsedMs=\(startupElapsed)")
     }
 
+    /// descriptor固定资源/规格，priority为当前界面优先级，useSavedPhotos允许复用同模式离线回执。
+    /// 远程派生图明确选edited=true并隔离旧缓存；显式original及本地Saved Photos保持原有读取语义。
     func imageRequest(
         for descriptor: MediaRequestDescriptor,
         priority: ImageRequest.Priority = .normal,
-        useSavedPhotos: Bool = true
+        useSavedPhotos: Bool = true,
+        useLocalPhotos: Bool = true
     ) -> ImageRequest? {
         if let savedPhotosLibrary {
             guard let item = savedPhotosLibrary.item(timelineID: descriptor.assetID), let scope else { return nil }
@@ -250,6 +298,9 @@ final class MediaLibraryController {
                 return request
             }
         #endif
+        if useLocalPhotos, let local = localPhotoImageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos) {
+            return local
+        }
         var trace: TimelineContentTrace?
         if descriptor.derivative == .thumbnail,
            var pendingTrace = pendingTimelineContentTrace,
@@ -274,12 +325,15 @@ final class MediaLibraryController {
         }
         if useSavedPhotos, let scope, let pipeline,
            let tier = MediaExportTier.allCases.first(where: { $0.derivative == descriptor.derivative }),
-           exports.savedReceipt(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier) != nil
+           exports.savedReceipt(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier,
+                                requiredSourceMode: tier.requiredDisplaySourceMode) != nil
         {
-            let remote = imageRequest(for: descriptor, priority: priority, useSavedPhotos: false)
+            let remote = imageRequest(for: descriptor, priority: priority, useSavedPhotos: false, useLocalPhotos: false)
             let exports = exports
-            var request = ImageRequest(id: "saved-photos|" + descriptor.cacheKey(in: scope), data: {
-                if let data = try await exports.localImageData(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier) {
+            var request = ImageRequest(id: "saved-photos|" + Self.displayCacheKey(for: descriptor, scope: scope), data: {
+                if let data = try await exports.localImageData(assetID: descriptor.assetID, revision: descriptor.updatedAt, tier: tier,
+                                                               requiredSourceMode: tier.requiredDisplaySourceMode)
+                {
                     guard await self.scope == scope else { throw CancellationError() }
                     return data
                 }
@@ -312,7 +366,7 @@ final class MediaLibraryController {
         var urlRequest = URLRequest(url: url)
         urlRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
         var request = ImageRequest(urlRequest: urlRequest)
-        request.imageID = descriptor.cacheKey(in: scope)
+        request.imageID = Self.displayCacheKey(for: descriptor, scope: scope)
         if isCacheOnly {
             // A saved URL supplies request identity, not permission to connect.
             // Nuke checks both cache layers before rejecting a cache-only miss.
@@ -331,10 +385,191 @@ final class MediaLibraryController {
         return request
     }
 
+    /// descriptor限定展示版本/规格；只为已确认关联创建本机优先请求，original及视频文件下载仍走原通道。
+    private func localPhotoImageRequest(for descriptor: MediaRequestDescriptor, priority: ImageRequest.Priority,
+                                        useSavedPhotos: Bool) -> ImageRequest?
+    {
+        guard [.thumbnail, .preview, .fullSize].contains(descriptor.derivative), let scope, let pipeline,
+              let association = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt)
+        else { return nil }
+        let accountGeneration = management.generation
+        let fallback = imageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos, useLocalPhotos: false)
+        // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
+        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(association.localIdentity.localIdentifier)|\(association.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)|context:\(accountGeneration.uuidString)"
+        return ImageRequest(id: id, image: { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
+                                                 accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
+        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
+    }
+
+    /// association/scope/accountGeneration固定本次读取身份；本机miss才进入既有fallback，取消/换号绝不回源。
+    /// 返回已解码图像，不把当前Photos展示图伪装成可导出的原片字节或备份回执。
+    private func readLocalPhotoImage(_ association: LocalMediaAssociation, descriptor: MediaRequestDescriptor,
+                                     scope: MediaAccountScope, accountGeneration: UUID,
+                                     fallback: ImageRequest?, pipeline: ImagePipeline) async throws -> ImageContainer
+    {
+        let validate: @MainActor () throws -> Void = {
+            try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        }
+        try validate()
+        let limit = descriptor.derivative == .thumbnail ? 1024 : descriptor.derivative == .preview ? 2048 : 4096
+        let pixels = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
+            ?? MediaPixelSize(width: limit, height: limit)
+        // 旧request可能在创建后才被实际执行；关联已关闭/失效时直接回退，不能再访问Photos。
+        if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
+           let image = try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate),
+           localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association
+        {
+            try validate()
+            recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+            return ImageContainer(image: image)
+        }
+        try validate()
+        guard let fallback else { throw URLError(.resourceUnavailable) }
+        let response = try await pipeline.imageTask(with: fallback).response
+        try validate()
+        recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+        return response.container
+    }
+
+    /// assetID/revision为当前普通视频；仅匹配同版Photos current时返回播放器，nil交给既有缓存/远端路径。
+    func localPhotoPlayerItem(assetID: String, revision: Date) async throws -> AVPlayerItem? {
+        try Task.checkCancellation()
+        guard let scope, let association = localMediaMatches.association(assetID: assetID, revision: revision) else { return nil }
+        let accountGeneration = management.generation
+        let validate: @MainActor () throws -> Void = {
+            try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        }
+        try validate()
+        let item = try await localPhotoReader.playerItem(for: association.localIdentity, validateContext: validate)
+        try validate()
+        guard localMediaMatches.association(assetID: assetID, revision: revision) == association else { return nil }
+        if item != nil {
+            recordMediaOrigin(.devicePhotos, assetID: assetID, revision: revision)
+        }
+        return item
+    }
+
+    /// stillAssetID/revision绑定当前展示，motionAssetID必须与fresh配对一致；nil才可用既有远端motion，本helper绝不读远端媒体。
+    /// targetPixels为本机展示像素，沿用4096单边上限；原片导出、上传或备份完成不属于返回对象的语义。
+    /// 先验证远端pair与真实本机motion摘要，再准备current PHLivePhoto并重新确认pair；取消/换号/端点失效必须抛出。
+    func localLivePhoto(stillAssetID: String, revision: Date, motionAssetID: String, targetPixels: MediaPixelSize) async throws -> PHLivePhoto? {
+        try Task.checkCancellation()
+        guard savedPhotosLibrary == nil, let scope, let motionID = UUID(uuidString: motionAssetID),
+              let association = localMediaMatches.association(assetID: stillAssetID, revision: revision),
+              association.localIdentity.mediaKind == .livePhoto else { return nil }
+        let remote: any LocalMediaMatchingReading
+        if let localLivePhotoRemote {
+            remote = localLivePhotoRemote
+        } else if let client = management.client {
+            remote = client
+        } else {
+            return nil
+        }
+        let accountGeneration = management.generation
+        let validate: @MainActor () throws -> Void = {
+            try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        }
+        let currentAssociation: @MainActor () -> Bool = {
+            self.localMediaMatches.association(assetID: stillAssetID, revision: revision) == association
+        }
+        do {
+            try validate()
+            let still = try await remote.localMediaAsset(stillAssetID)
+            try validate()
+            guard currentAssociation() else { return nil }
+            let motion = try await remote.localMediaAsset(motionAssetID)
+            try validate()
+            guard currentAssociation(), let before = LocalLivePhotoRemotePair.verified(still: still, motion: motion, association: association,
+                                                                                       ownerID: scope.userID, expectedMotionID: motionID) else { return nil }
+            // still元数据关联不能替代motion证明；只接受reader实际读完的同源pairedVideo摘要。
+            let proof = try await localLivePhotoReader.motionProof(for: association.localIdentity, validateContext: validate)
+            try validate()
+            guard currentAssociation(), let proof, proof.source.identity == association.localIdentity,
+                  proof.digest.sha1Base64 == before.motionChecksum else { return nil }
+            let pixels = MediaPixelSize(width: min(4096, targetPixels.width), height: min(4096, targetPixels.height))
+            let native = try await localLivePhotoReader.livePhoto(for: association.localIdentity, targetPixels: pixels, matching: proof.source, validateContext: validate)
+            try validate()
+            guard currentAssociation(), let native else { return nil }
+            // native准备跨越异步边界；重新读取两个对象，不能沿用可能已重配/编辑/离线的初始pair。
+            let finalStill = try await remote.localMediaAsset(stillAssetID)
+            try validate()
+            guard currentAssociation() else { return nil }
+            let finalMotion = try await remote.localMediaAsset(motionAssetID)
+            try validate()
+            guard currentAssociation(), LocalLivePhotoRemotePair.verified(still: finalStill, motion: finalMotion, association: association,
+                                                                          ownerID: scope.userID, expectedMotionID: motionID) == before else { return nil }
+            recordMediaOrigin(.devicePhotos, assetID: stillAssetID, revision: revision)
+            return native
+        } catch {
+            // 当前合法账号的metadata/本机不足可回源；Task或已退休上下文绝不能借nil继续旧账号网络路径。
+            try validate()
+            if error is CancellationError {
+                throw error
+            }
+            if case LibraryWriteError.changedAccount = error {
+                throw CancellationError()
+            }
+            return nil
+        }
+    }
+
+    /// 每次await前后保持账号/端点代际；失效抛取消避免旧账户回源，本机权限/版本变化另按local miss处理。
+    private func validateLocalMediaContext(scope: MediaAccountScope, accountGeneration: UUID) throws {
+        try Task.checkCancellation()
+        guard self.scope == scope, management.generation == accountGeneration
+        else { throw CancellationError() }
+    }
+
+    /// 只保留有限最近读取来源，不记录私人文件名/Photos标识或网络凭据。
+    private func recordMediaOrigin(_ origin: MediaReadOrigin, assetID: String, revision: Date) {
+        if mediaReadOrigins.count >= 256 {
+            mediaReadOrigins.removeAll(keepingCapacity: true)
+        }
+        mediaReadOrigins[.init(assetID: assetID, revision: revision)] = origin
+    }
+
+    /// 返回该版本最近实际选用的来源；nil代表尚未经过本机匹配路径，不能推断是否产生网络流量。
+    func mediaReadOrigin(assetID: String, revision: Date) -> MediaReadOrigin? {
+        guard localMediaMatches.association(assetID: assetID, revision: revision) != nil else { return nil }
+        return mediaReadOrigins[.init(assetID: assetID, revision: revision)]
+    }
+
+    /// 视频播放选定路径可覆盖先前poster来源；Immich缓存和流属于同一资源来源，不代表已传输字节。
+    func recordVideoMediaOrigin(_ origin: MediaReadOrigin, assetID: String, revision: Date) {
+        recordMediaOrigin(origin, assetID: assetID, revision: revision)
+    }
+
+    /// assetID/revision标识当前资产，sourceVersion固定原片校验和与版本，targetPixels只限制预览解码尺寸。
+    /// 返回明确edited=false且与普通/已编辑缓存隔离的请求；无当前验证路由或本地照片模式时返回nil。
+    /// 请求仍由既有受限pipeline执行，不复用SavedPhotos、不注册下载回执、不写原图或扩大网络权限。
+    func uneditedEditorPreviewRequest(assetID: String, revision: Date, sourceVersion: String,
+                                      targetPixels: MediaPixelSize) -> ImageRequest?
+    {
+        guard savedPhotosLibrary == nil, UUID(uuidString: assetID) != nil,
+              !sourceVersion.isEmpty, let scope, let session, let activeAPIURL else { return nil }
+        let descriptor = MediaRequestDescriptor(assetID: assetID, updatedAt: revision, derivative: .preview, targetPixels: targetPixels)
+        guard let base = Self.mediaURL(for: descriptor, apiURL: activeAPIURL),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [.init(name: "size", value: "preview"), .init(name: "edited", value: "false")]
+        guard let url = components.url else { return nil }
+        var urlRequest = URLRequest(url: url)
+        urlRequest.setValue("Bearer \(session.accessToken)", forHTTPHeaderField: "Authorization")
+        var request = ImageRequest(urlRequest: urlRequest)
+        request.imageID = "editor-original|" + descriptor.cacheKey(in: scope) + "|" + sourceVersion
+        request.priority = .high
+        request.thumbnail = .init(size: .init(width: targetPixels.width, height: targetPixels.height),
+                                  unit: .pixels, contentMode: .aspectFit)
+        return request
+    }
+
+    /// request为实际图片读取身份，descriptor固定导出资产/规格/版本；记录真缓存键，避免新展示误读旧未编辑数据。
     private func registerExportRequest(_ request: ImageRequest, descriptor: MediaRequestDescriptor) {
         let key = "\(descriptor.assetID)|\(descriptor.updatedAt.timeIntervalSince1970)|\(descriptor.derivative.rawValue)"
         guard let scope else { return }
-        let id = descriptor.cacheKey(in: scope)
+        // 展示派生图改用edited=true之后，导出回执须记实际请求身份；不能误读同revision的旧未编辑缓存。
+        let id = request.imageID ?? descriptor.cacheKey(in: scope)
         // Nuke stores original response bytes without thumbnail/processors,
         // while its public cache API can also store an encoded Thumbnail.
         // Only Thumbnail may use that variant: never substitute processed
@@ -368,6 +603,7 @@ final class MediaLibraryController {
         }
     }
 
+    /// assetID/revision/tier固定显式导出范围；返回已有同模式原始响应字节，无匹配时nil，不回退旧未编辑键或联网。
     func exportCachedData(assetID: String, revision: Date, tier: MediaExportTier) async -> Data? {
         let managedURL = tier == .thumbnail ? warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: assetID, revision: revision)] : nil
         if let url = managedURL,
@@ -379,7 +615,9 @@ final class MediaLibraryController {
         let key = "\(assetID)|\(revision.timeIntervalSince1970)|\(tier.derivative.rawValue)"
         let stored = await exportManifestLoad?.value ?? [:]
         var seen = Set<String>()
-        let identities = ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter { seen.insert($0).inserted }
+        let identities = ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter {
+            Self.isCompatibleExportIdentity($0, tier: tier) && seen.insert($0).inserted
+        }
         return await Task.detached(priority: .utility) { () -> Data? in
             for identity in identities {
                 if let data = cache.cachedData(for: identity), !data.isEmpty {
@@ -396,8 +634,7 @@ final class MediaLibraryController {
         return [.thumbnail]
     }
 
-    /// Menu availability only: look up this asset's registered keys and check
-    /// file existence. Reading/validating media belongs to the selected save.
+    /// asset固定菜单范围；仅检查该资产同模式缓存键/文件存在，不解码或联网，实际验证仍在显式保存流程。
     func exportCachedTiers(for asset: TimelineAssetSummary) async -> Set<MediaExportTier> {
         guard let owner = scope else { return [] }
         let cache = pipeline?.configuration.dataCache
@@ -407,7 +644,9 @@ final class MediaLibraryController {
         func keys(assetID: String, tier: MediaExportTier) -> [String] {
             let key = "\(assetID)|\(asset.thumbnailRevision.timeIntervalSince1970)|\(tier.derivative.rawValue)"
             var seen = Set<String>()
-            return ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter { seen.insert($0).inserted }
+            return ((exportRequestIDs[key] ?? []) + (stored[key] ?? [])).filter {
+                Self.isCompatibleExportIdentity($0, tier: tier) && seen.insert($0).inserted
+            }
         }
         let candidates = Dictionary(uniqueKeysWithValues: MediaExportTier.choices(video: asset.mediaKind == .video, live: asset.livePhotoVideoID != nil)
             .map { ($0, keys(assetID: asset.id, tier: $0)) })
@@ -634,9 +873,14 @@ final class MediaLibraryController {
         return request
     }
 
+    /// descriptor是当前展示版本；普通ISO索引可能同秒碰撞，必须继续核对精确版本文件名。
+    /// 返回当前版本manifest文件或nil；不匹配沿既有缓存/远端回退，禁止把旧字节注册成新身份。
     private func registeredThumbnailURL(for descriptor: MediaRequestDescriptor) -> URL? {
-        guard descriptor.derivative == .thumbnail else { return nil }
-        return warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: descriptor.assetID, revision: descriptor.updatedAt)]
+        guard descriptor.derivative == .thumbnail,
+              let url = warmedThumbnailURLs[Self.warmedThumbnailKey(assetID: descriptor.assetID, revision: descriptor.updatedAt)],
+              url.lastPathComponent == LibraryThumbnailCache.displayThumbnailFilename(assetID: descriptor.assetID, updatedAt: descriptor.updatedAt)
+        else { return nil }
+        return url
     }
 
     private func managedThumbnailURL(for descriptor: MediaRequestDescriptor) -> URL? {
@@ -645,11 +889,13 @@ final class MediaLibraryController {
         return url
     }
 
+    /// descriptor/scope为已验证展示记录，fileURL由新版缩略图manifest提供，priority/trace保留现有调度与诊断。
+    /// 返回独立edited缓存身份的本地读取；不自行声称旧无模式文件是编辑结果。
     private func managedThumbnailRequest(for descriptor: MediaRequestDescriptor, scope: MediaAccountScope, fileURL: URL,
                                          priority: ImageRequest.Priority, trace: TimelineContentTrace? = nil) -> ImageRequest
     {
         var request = ImageRequest(
-            id: descriptor.cacheKey(in: scope),
+            id: Self.displayCacheKey(for: descriptor, scope: scope),
             data: {
                 if let trace {
                     Self.logger.info(
@@ -1010,6 +1256,8 @@ final class MediaLibraryController {
 
     func clearAll() {
         management.configure(session: nil, endpoint: nil)
+        localMediaMatches.configure(using: management, scope: nil)
+        mediaReadOrigins.removeAll()
         resumeOpeningPhotosHydration()
         exports.reset()
         exportManifestSave?.cancel()
@@ -1079,7 +1327,8 @@ final class MediaLibraryController {
                 namespace: scope.cacheNamespace,
                 userID: session.userID,
                 endpoint: endpoint,
-                accessToken: session.accessToken
+                accessToken: session.accessToken,
+                session: profileImageSession
             )
             guard !Task.isCancelled, self.scope == scope else { return }
             switch result {
@@ -1136,6 +1385,25 @@ final class MediaLibraryController {
         return pipeline
     }
 
+    /// descriptor固定资产、版本与解码规格；远程展示派生图单独命名，旧未编辑响应不能命中新语义。
+    /// original/video保持既有身份；本地Photos模式在调用此函数前已独立返回，不改变原片或视频读取。
+    private static func displayCacheKey(for descriptor: MediaRequestDescriptor, scope: MediaAccountScope) -> String {
+        switch descriptor.derivative {
+        case .thumbnail, .preview, .fullSize:
+            // 同一秒内编辑提交和派生完成也可能各自更新资源；保留Date精度，不能沿用省略小数的旧身份。
+            "server-edited-v1|" + descriptor.cacheKey(in: scope) + "|\(descriptor.updatedAt.timeIntervalSinceReferenceDate)"
+        case .original, .videoPlayback: descriptor.cacheKey(in: scope)
+        }
+    }
+
+    /// identity为既有导出manifest中的键，tier决定是否为展示派生图；旧未编辑键不能为新任务提供已编辑来源。
+    /// 明确original/playback保留既有键兼容性，不改变原片下载或回退策略。
+    private static func isCompatibleExportIdentity(_ identity: String, tier: MediaExportTier) -> Bool {
+        tier.requiredDisplaySourceMode == nil || identity.hasPrefix("server-edited-v1|") || identity.hasPrefix("saved-photos|server-edited-v1|")
+    }
+
+    /// descriptor决定官方资源路径及展示规格，apiURL是已验证端点或仅离线身份。
+    /// 展示优先已编辑派生图；original/video不附加edited，保留原片下载、分享与回退边界。
     private static func mediaURL(
         for descriptor: MediaRequestDescriptor,
         apiURL: URL
@@ -1154,11 +1422,11 @@ final class MediaLibraryController {
         )
         switch descriptor.derivative {
         case .thumbnail:
-            components?.queryItems = [.init(name: "size", value: "thumbnail")]
+            components?.queryItems = [.init(name: "size", value: "thumbnail"), .init(name: "edited", value: "true")]
         case .preview:
-            components?.queryItems = [.init(name: "size", value: "preview")]
+            components?.queryItems = [.init(name: "size", value: "preview"), .init(name: "edited", value: "true")]
         case .fullSize:
-            components?.queryItems = [.init(name: "size", value: "fullsize")]
+            components?.queryItems = [.init(name: "size", value: "fullsize"), .init(name: "edited", value: "true")]
         case .original, .videoPlayback:
             break
         }
@@ -1433,11 +1701,13 @@ private actor ProfileImageCache {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
+    /// session只负责头像请求，默认宿主沿用shared；测试可实例注入受限URLSession而不污染全局协议。
     func refresh(
         namespace: String,
         userID: String,
         endpoint: URL,
-        accessToken: String
+        accessToken: String,
+        session: URLSession
     ) async -> RefreshResult {
         let url = endpoint
             .appending(path: "users")
@@ -1446,7 +1716,7 @@ private actor ProfileImageCache {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else {
                 return .failed("The server returned an invalid response.")
             }

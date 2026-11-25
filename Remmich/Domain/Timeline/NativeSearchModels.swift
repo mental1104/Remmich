@@ -31,8 +31,13 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     enum Media: String, CaseIterable, Sendable { case all, image, video }
 
     var text = ""
+    /// 参考图使用服务端UUID v4；与文字互斥，只在smart模式使用，不包含本地文件或图片字节。
+    var queryAssetID: String?
     var mode: Mode = .fileName
     var media: Media = .all
+    var mediaCategory: NativeSearchMediaCategory?
+    var resolution: NativeSearchResolution?
+    var panoramasOnly = false
     var country = ""
     var state = ""
     /// false表示不限制收藏/保留时间线，true才增加收藏或归档条件。
@@ -42,7 +47,10 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var city = ""
     var cameraMake = ""
     var cameraModel = ""
+    /// 设备组保存真实型号别名的OR集合；不绑定当前候选缓存或产品显示名。
+    var deviceModels: [String] = []
     var lensModel = ""
+    var tags: NativeSearchTagFilter = .any
     enum Orientation: String, Codable, CaseIterable, Sendable { case landscape, portrait }
     var orientation: Orientation?
     var hasAlbums: Bool?
@@ -52,11 +60,92 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var takenBefore: Date?
     var timeZone = TimeZone.current
 
-    /// 高级智能条件需要独立Fork分页；普通metadata和旧式smart继续使用原协议。
+    /// 参考图及高级智能条件需要独立Fork分页；不能将参考图静默降级成无文字的metadata。
     var requiresForkSmartSearch: Bool {
-        mode == .smart && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch)
+        guard mode == .smart else { return false }
+        if queryAssetID != nil {
+            return true
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return orientation != nil || hasAlbums != nil || !exifConditions.isEmpty || rating.requiresStructuredSearch
+            || mediaCategory != nil || resolution != nil || panoramasOnly || tags != .any || !deviceModels.isEmpty
     }
+
+    /// assetID为已加载结果中的服务端身份；切换为参考图时只替换查询来源，完整保留筛选。
+    mutating func useReferenceAsset(_ assetID: String) {
+        queryAssetID = assetID
+        text = ""
+        mode = .smart
+    }
+
+    /// value为用户输入的文字；输入立即退出参考图模式，其他条件和当前文本模式保持不变。
+    mutating func useSearchText(_ value: String) {
+        queryAssetID = nil
+        text = value
+    }
+}
+
+/// 原生搜索与保存条件共用的来源类别；不等同于照片/视频资源类型。
+nonisolated enum NativeSearchMediaCategory: String, Codable, CaseIterable, Sendable {
+    case phoneVideo = "phone-video", screenshot, deltaScreenshot = "delta-screenshot"
+    case steamScreenshot = "steam-screenshot", switchScreenshot = "switch-screenshot", nintendo3dsScreenshot = "3ds-screenshot"
+
+    /// 返回可见类别名称；识别逻辑由服务端维护。
+    var title: String {
+        switch self {
+        case .phoneVideo: "Phone videos"
+        case .screenshot: "Portrait screenshots (1179x2556)"
+        case .deltaScreenshot: "Delta screenshots"
+        case .steamScreenshot: "Steam screenshots"
+        case .switchScreenshot: "Nintendo Switch screenshots"
+        case .nintendo3dsScreenshot: "Nintendo 3DS screenshots"
+        }
+    }
+}
+
+/// 可保存和恢复的分辨率档位，原始值保持Web登记协议。
+nonisolated enum NativeSearchResolution: String, Codable, CaseIterable, Sendable {
+    case hd = "720p", fullHD = "1080p", twoK = "2k", fourK = "4k"
+}
+
+/// 标签筛选三态；所选多个ID采用任一匹配（含后代），与Web保存条件的结构化语义一致。
+nonisolated enum NativeSearchTagFilter: Hashable, Sendable {
+    case any, untagged, anyOf([String])
+
+    /// value为保存或选择的标签ID；只接受与服务端结构化搜索同义的UUID v4及RFC variant。
+    static func isValidID(_ value: String) -> Bool {
+        guard let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuid.6 & 0xF0 == 0x40 && uuid.uuid.8 & 0xC0 == 0x80
+    }
+
+    /// 返回当前选中ID，其他两态返回空数组；仅供界面选择，不将空数组编码为查询。
+    var selectedIDs: [String] {
+        if case let .anyOf(ids) = self {
+            return ids
+        }
+        return []
+    }
+
+    /// id是候选UUID；按UUID大小写不敏感比较，以正确呈现既有保存条件。
+    func contains(_ id: String) -> Bool {
+        selectedIDs.contains { $0.caseInsensitiveCompare(id) == .orderedSame }
+    }
+
+    /// id是当前账号候选、selected决定加入/移除；选最后一项取消后恢复不限制，不保留空ID数组。
+    mutating func setSelected(_ id: String, selected: Bool) {
+        guard contains(id) != selected else { return }
+        var ids = selectedIDs.filter { $0.caseInsensitiveCompare(id) != .orderedSame }
+        if selected {
+            ids.append(id)
+        }
+        self = ids.isEmpty ? .any : .anyOf(ids)
+    }
+}
+
+/// Domain标签候选只包含搜索所需字段，Feature不接触SDK类型。
+nonisolated struct NativeSearchTag: Identifiable, Hashable, Sendable {
+    let id: String
+    let value: String
 }
 
 /// 界面评分筛选的三种语义；具体0分不能在保存/复用时变为未指定。

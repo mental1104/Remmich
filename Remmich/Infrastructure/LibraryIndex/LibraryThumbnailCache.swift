@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import OSLog
 
+/// 账户内已验证展示缩略图的持久缓存；edited-v1文件与旧未编辑缓存分离，源revision仍由服务器负责。
 actor LibraryThumbnailCache {
     private nonisolated static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Remmich",
@@ -118,6 +119,8 @@ actor LibraryThumbnailCache {
         self.rootURL = rootURL ?? Self.defaultRootURL
     }
 
+    /// assets为当前索引资产，scope隔离账户，endpoint/accessToken为已验证下载通道，progress报告已完成图/元数据对。
+    /// 返回本轮统计；旧展示语义的文件不算完成，但不会隐式删除旧文件或修改原片。
     func warm(
         assets: [LibraryIndexAssetRecord],
         scope: MediaAccountScope,
@@ -134,10 +137,10 @@ actor LibraryThumbnailCache {
         let eligibleIDs = Set(assets.map(\.id))
         let detailSource = assetDetails
         let transfer = transfers.map { TransferContext(queue: $0, scope: scope, endpoint: endpoint, accessToken: accessToken) }
-        let assetKeys = Set(assets.map { "\($0.id)|\($0.updatedAt.ISO8601Format())" })
+        let assetKeys = Set(assets.map { "\($0.id)|\($0.updatedAt.ISO8601Format())|\(Self.displayThumbnailFilename(assetID: $0.id, updatedAt: $0.updatedAt))" })
         let currentExisting = existing.filter {
-            $0.derivative == .thumbnail
-                && assetKeys.contains("\($0.assetID)|\($0.sourceRevision)")
+            Self.isEditedDisplayRecord($0)
+                && assetKeys.contains("\($0.assetID)|\($0.sourceRevision)|\(URL(filePath: $0.relativeFileKey).lastPathComponent)")
         }
         let existingKeys = Set(currentExisting.map { "\($0.assetID)|\($0.sourceRevision)" })
         var thumbnailIDs = Set(currentExisting.map(\.assetID))
@@ -272,15 +275,16 @@ actor LibraryThumbnailCache {
         )
     }
 
+    /// assets/derivatives来自同账号已接受索引，metadataIDs可缺省；只把新展示语义的匹配版本计入完成。
     nonisolated static func cachedProgress(
         assets: [LibraryIndexAssetRecord],
         derivatives: [LibraryIndexDerivativeRecord],
         metadataIDs: Set<String>? = nil
     ) -> WarmProgress {
-        let assetKeys = Set(assets.map { "\($0.id)|\($0.updatedAt.ISO8601Format())" })
+        let assetKeys = Set(assets.map { "\($0.id)|\($0.updatedAt.ISO8601Format())|\(Self.displayThumbnailFilename(assetID: $0.id, updatedAt: $0.updatedAt))" })
         let currentExisting = derivatives.filter {
-            $0.derivative == .thumbnail
-                && assetKeys.contains("\($0.assetID)|\($0.sourceRevision)")
+            Self.isEditedDisplayRecord($0)
+                && assetKeys.contains("\($0.assetID)|\($0.sourceRevision)|\(URL(filePath: $0.relativeFileKey).lastPathComponent)")
         }
         let thumbnailIDs = Set(currentExisting.map(\.assetID))
         let currentMetadataIDs = metadataIDs.map { $0.intersection(Set(assets.map(\.id))) }
@@ -508,6 +512,7 @@ actor LibraryThumbnailCache {
         availableThumbnails(records: snapshot.derivatives, scope: scope)
     }
 
+    /// records/scope限定当前账户；返回模式版本有效且文件实际存在的展示缩略图，不采用旧未编辑记录。
     private func availableThumbnails(records: [LibraryIndexDerivativeRecord], scope: MediaAccountScope) -> [AvailableThumbnail] {
         let startedAt = ContinuousClock.now
         let thumbnailDirectory = rootURL
@@ -521,7 +526,7 @@ actor LibraryThumbnailCache {
             ))?.map(\.lastPathComponent) ?? []
         )
         let thumbnails: [AvailableThumbnail] = records.compactMap { record in
-            guard record.derivative == .thumbnail, record.isVerified else { return nil }
+            guard Self.isEditedDisplayRecord(record) else { return nil }
             let filename = URL(filePath: record.relativeFileKey).lastPathComponent
             guard availableFilenames.contains(filename) else { return nil }
             return .init(
@@ -558,6 +563,7 @@ actor LibraryThumbnailCache {
         return thumbnails
     }
 
+    /// records/scope来自同一账户，rootURL可注入隔离目录；仅投影新展示语义的已验证路径，不扫描文件或联网。
     nonisolated static func projectIndexedThumbnails(records: [LibraryIndexDerivativeRecord], scope: MediaAccountScope,
                                                      rootURL: URL? = nil) -> [AvailableThumbnail]
     {
@@ -566,7 +572,7 @@ actor LibraryThumbnailCache {
             directoryHint: .isDirectory
         )
         return records.compactMap { record in
-            guard record.derivative == .thumbnail, record.isVerified else { return nil }
+            guard Self.isEditedDisplayRecord(record) else { return nil }
             return .init(
                 assetID: record.assetID,
                 sourceRevision: record.sourceRevision,
@@ -725,6 +731,8 @@ actor LibraryThumbnailCache {
         }
     }
 
+    /// asset决定源revision，endpoint/accessToken为已验证通道，directory保存派生图；transfer缺省走原有HTTP通道。
+    /// 返回新edited展示记录或可见失败；取消传播，不覆盖服务器原片。
     private nonisolated static func download(
         _ asset: LibraryIndexAssetRecord,
         _ endpoint: URL,
@@ -733,12 +741,7 @@ actor LibraryThumbnailCache {
         transfer: TransferContext? = nil
     ) async throws -> DownloadResult {
         try Task.checkCancellation()
-        var components = URLComponents(
-            url: endpoint.appending(path: "assets/\(asset.id)/thumbnail"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [.init(name: "size", value: "thumbnail")]
-        guard let url = components?.url else {
+        guard let url = displayThumbnailURL(assetID: asset.id, endpoint: endpoint) else {
             logger.error(
                 "Thumbnail unavailable asset=\(asset.id.prefix(8), privacy: .public) reason=invalid-url"
             )
@@ -750,7 +753,8 @@ actor LibraryThumbnailCache {
         let response: URLResponse
         if let transfer {
             let result = try await transfer.queue.thumbnailData(for: request, scope: transfer.scope,
-                                                                endpoint: transfer.endpoint, accessToken: transfer.accessToken)
+                                                                endpoint: transfer.endpoint, accessToken: transfer.accessToken,
+                                                                updatedAt: asset.updatedAt)
             data = result.data
             response = result.response
         } else {
@@ -781,7 +785,8 @@ actor LibraryThumbnailCache {
             return .failure(thumbnailFailure(asset: asset, requestURL: url, reason: "empty-response"))
         }
         try Task.checkCancellation()
-        let filename = "\(asset.id)-\(stableRevision(asset.updatedAt)).bin"
+        // 同一源revision也可能已被旧客户端以edited=false缓存；新文件名标记请求语义，旧文件保留但不冒充新展示。
+        let filename = displayThumbnailFilename(assetID: asset.id, updatedAt: asset.updatedAt)
         let fileURL = directory.appending(path: filename)
         try data.write(to: fileURL, options: .atomic)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -821,5 +826,31 @@ actor LibraryThumbnailCache {
 
     private nonisolated static func stableRevision(_ date: Date) -> String {
         String(Int64(date.timeIntervalSince1970 * 1000))
+    }
+
+    /// assetID为索引资产标识，endpoint为已验证API根；缓存下载及预取共享同一官方edited展示URL。
+    /// 这里只构造URL，鉴权、持久队列路由和取消仍由既有调用链负责。
+    nonisolated static func displayThumbnailURL(assetID: String, endpoint: URL) -> URL? {
+        var components = URLComponents(url: endpoint.appending(path: "assets/\(assetID)/thumbnail"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "size", value: "thumbnail"), .init(name: "edited", value: "true")]
+        return components?.url
+    }
+
+    /// assetID/updatedAt固定新展示文件名；毫秒版本防止同一秒内任务完成后仍把中间派生图算作最新。
+    /// sourceRevision本身仍保留既有ISO契约，文件名额外提供精确匹配，旧文件不会被删除。
+    nonisolated static func displayThumbnailFilename(assetID: String, updatedAt: Date) -> String {
+        "edited-v1-\(assetID)-\(stableRevision(updatedAt)).bin"
+    }
+
+    /// updatedAt为当前服务端版本；传输日志另保留精确标识，不能仅凭省略小数的ISO重放旧响应。
+    nonisolated static func displayThumbnailVersion(updatedAt: Date) -> String {
+        "edited-v1|\(updatedAt.timeIntervalSinceReferenceDate)"
+    }
+
+    /// record必须是新语义下的已验证缩略图；旧文件/SQL记录不删除，只在后续正常warm/rebuild时替换。
+    /// 文件名版本不改变sourceRevision，时间线仍用真实服务器updatedAt对齐资源。
+    private nonisolated static func isEditedDisplayRecord(_ record: LibraryIndexDerivativeRecord) -> Bool {
+        record.derivative == .thumbnail && record.isVerified
+            && URL(filePath: record.relativeFileKey).lastPathComponent.hasPrefix("edited-v1-")
     }
 }

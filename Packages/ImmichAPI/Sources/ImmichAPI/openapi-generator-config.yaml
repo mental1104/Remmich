@@ -23,12 +23,14 @@ filter:
     - getTimeBucket
     - searchAssets
     - searchSmart
+    - searchRandom
     - getSearchSuggestions
     - getAssetInfo
     - searchMemories
     - getAllAlbums
     - getAlbumInfo
     - getAllPeople
+    - getAllTags
     - getAllSharedLinks
     - getPartners
     - getUniqueOriginalPaths

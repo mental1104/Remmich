@@ -988,6 +988,7 @@ struct RemmichTests {
         #expect(local.urlRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer ui-test-token")
     }
 
+    /// 缺失本机缓存回退到已编辑展示缩略图；精确检查两个参数，不能退回旧未编辑响应。
     @Test @MainActor func missingIndexedThumbnailFallsBackToActiveRoute() throws {
         let media = MediaLibraryController()
         let endpoint = try url("http://immich.local/api")
@@ -1012,7 +1013,10 @@ struct RemmichTests {
         let request = try #require(media.imageRequest(for: descriptor))
 
         #expect(request.url?.path == "/api/assets/missing-local-asset/thumbnail")
-        #expect(request.url?.query == "size=thumbnail")
+        let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        #expect(query.count == 2)
+        #expect(query.first { $0.name == "size" }?.value == "thumbnail")
+        #expect(query.first { $0.name == "edited" }?.value == "true")
         #expect(request.urlRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer ui-test-token")
     }
 
@@ -1020,10 +1024,11 @@ struct RemmichTests {
         let media = MediaLibraryController()
         try media.configure(session: .fixture, activeEndpoint: url("http://immich.local/api"))
         let revision = Date(timeIntervalSince1970: 1000)
-        let localURL = FileManager.default.temporaryDirectory
-            .appending(path: "warmed-\(UUID().uuidString).jpeg")
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let localURL = directory.appending(path: LibraryThumbnailCache.displayThumbnailFilename(assetID: "warmed-local-asset", updatedAt: revision))
         try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: localURL)
-        defer { try? FileManager.default.removeItem(at: localURL) }
+        defer { try? FileManager.default.removeItem(at: directory) }
         media.registerWarmedThumbnails([
             .init(
                 assetID: "warmed-local-asset",
@@ -1092,6 +1097,7 @@ struct RemmichTests {
         #expect(display.targetPixels == targetPixels)
     }
 
+    /// 查看器预览保留目标像素和preview规格，同时明确请求服务端已编辑版本。
     @Test @MainActor func viewerPreviewUsesTheSizedPreviewDerivative() throws {
         let media = MediaLibraryController()
         media.configure(session: .fixture, activeEndpoint: AccountSession.fixture.apiURL)
@@ -1107,7 +1113,10 @@ struct RemmichTests {
         #expect(descriptor.derivative == .preview)
         #expect(descriptor.targetPixels == targetPixels)
         #expect(request.url?.path == "/api/assets/viewer-preview-asset/thumbnail")
-        #expect(request.url?.query == "size=preview")
+        let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        #expect(query.count == 2)
+        #expect(query.first { $0.name == "size" }?.value == "preview")
+        #expect(query.first { $0.name == "edited" }?.value == "true")
     }
 
     @Test func fullSizeRedirectKeepsAuthorizationOnTheImmichOrigin() throws {
@@ -1860,7 +1869,7 @@ struct RemmichTests {
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appending(path: "thumbnail.jpg")
+        let file = directory.appending(path: LibraryThumbnailCache.displayThumbnailFilename(assetID: asset.id, updatedAt: asset.thumbnailRevision))
         try data.write(to: file)
         media.registerWarmedThumbnails([
             .init(

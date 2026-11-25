@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 真实搜索页，复用原生缩略图与查看器，不显示演示资源。
 struct SearchView: View {
@@ -6,15 +7,60 @@ struct SearchView: View {
     let media: MediaLibraryController
     let assetDetails: any AssetDetailReading
     let showAccount: () -> Void
+    private let searchReader: (any NativeSearchReading)?
+    #if DEBUG
+        private var searchCompletion: ((NativeSearchQuery) -> Void)?
+    #endif
     @State private var query = NativeSearchQuery()
+    /// 搜索展示与查询、请求分开持有；退出只恢复导航控件，不完成请求或切换账号。
+    @State private var isSearchPresented = false
     @State private var store = NativeSearchStore()
     @State private var selection: Selection?
+    @State private var referencePreview: TimelineAssetSummary?
     @State private var people: [LibraryPerson] = []
     @State private var peopleError: String?
+    @State private var tagChoices: [NativeSearchTag] = []
+    @State private var tagChoicesError: String?
+    @State private var loadingTags = false
     @State private var suggestions: [NativeSearchSuggestionKind: [String]] = [:]
     @State private var suggestionError: String?
     @State private var loadingSuggestions = false
+    @State private var devices: [NativeCaptureDeviceOption] = []
+    @State private var deviceError: String?
+    @State private var loadingDevices = false
     @Namespace private var viewerNamespace
+
+    /// source保留账号候选读取，media/assetDetails复用原生显示，showAccount打开账号入口。
+    /// searchReader仅供显式依赖注入；正常调用省略它，仍使用真实账号仓库，不产生演示结果。
+    init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+         showAccount: @escaping () -> Void, searchReader: (any NativeSearchReading)? = nil)
+    {
+        self.source = source
+        self.media = media
+        self.assetDetails = assetDetails
+        self.showAccount = showAccount
+        self.searchReader = searchReader
+    }
+
+    #if DEBUG
+        /// 仅DEBUG的观察重载；source/media/details/account/reader语义同正常初始化。
+        /// searchCompletion接收已结束store发布检查的条件，不改结果；Release没有此回调接口。
+        init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+             showAccount: @escaping () -> Void, searchReader: (any NativeSearchReading)?,
+             searchCompletion: @escaping (NativeSearchQuery) -> Void)
+        {
+            self.init(source: source, media: media, assetDetails: assetDetails, showAccount: showAccount, searchReader: searchReader)
+            self.searchCompletion = searchCompletion
+        }
+    #endif
+
+    /// 返回当前注入读取器或正常账号仓库；nil保留未连接状态，不创建网络替身。
+    private var activeSearchReader: (any NativeSearchReading)? {
+        if let searchReader {
+            return searchReader
+        }
+        return source
+    }
 
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
     private struct Selection: Identifiable {
@@ -32,21 +78,42 @@ struct SearchView: View {
                     Text("Videos").tag(NativeSearchQuery.Media.video)
                 }
                 .pickerStyle(.segmented).padding(.horizontal)
+                .accessibilityIdentifier("search-media")
+                if let reference = query.queryAssetID {
+                    referenceCard(reference)
+                }
                 SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
-                DisclosureGroup("Filters") {
+                DisclosureGroup {
                     VStack {
-                        Picker("Search mode", selection: $query.mode) {
+                        Picker("Search mode", selection: Binding(get: { query.mode }, set: { mode in
+                            query.mode = mode
+                            if mode != .smart {
+                                query.queryAssetID = nil
+                                referencePreview = nil
+                            }
+                        })) {
                             ForEach(NativeSearchQuery.Mode.allCases, id: \.self) { mode in
                                 Text(mode.title).tag(mode)
                             }
                         }
+                        .accessibilityIdentifier("search-mode")
                         SearchChoiceField(title: "Country", text: $query.country, values: suggestions[.country])
                         SearchChoiceField(title: "State or province", text: $query.state, values: suggestions[.state])
                         SearchChoiceField(title: "City", text: $query.city, values: suggestions[.city])
                         SearchChoiceField(title: "Camera make", text: $query.cameraMake, values: suggestions[.cameraMake])
                         SearchChoiceField(title: "Camera model", text: $query.cameraModel, values: suggestions[.cameraModel])
                         SearchChoiceField(title: "Lens model", text: $query.lensModel, values: suggestions[.cameraLensModel])
+                        DisclosureGroup("Capture devices") {
+                            SearchDevicePicker(models: $query.deviceModels, devices: devices)
+                            if let deviceError {
+                                Text(deviceError).font(.caption)
+                            }
+                            Button(loadingDevices ? "Loading devices" : "Load capture devices") { Task { await loadDevices() } }
+                                .disabled(loadingDevices)
+                                .accessibilityIdentifier("search-load-devices")
+                        }
                         Toggle("Favorites only", isOn: $query.favoritesOnly)
+                            .accessibilityIdentifier("search-favorites")
                         Toggle("Archived only", isOn: $query.archivedOnly)
                         Picker("Rating", selection: $query.rating) {
                             Text("Any rating").tag(NativeSearchRating.any)
@@ -63,6 +130,19 @@ struct SearchView: View {
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
                         DisclosureGroup("Advanced filters") {
+                            Picker("Media category", selection: $query.mediaCategory) {
+                                Text("Any").tag(nil as NativeSearchMediaCategory?)
+                                ForEach(NativeSearchMediaCategory.allCases, id: \.self) { category in
+                                    Text(category.title).tag(Optional(category))
+                                }
+                            }
+                            Picker("Resolution", selection: $query.resolution) {
+                                Text("Any").tag(nil as NativeSearchResolution?)
+                                ForEach(NativeSearchResolution.allCases, id: \.self) { resolution in
+                                    Text(resolution.rawValue.uppercased()).tag(Optional(resolution))
+                                }
+                            }
+                            Toggle("Panoramas only", isOn: $query.panoramasOnly)
                             Picker("Orientation", selection: $query.orientation) {
                                 Text("Any").tag(nil as NativeSearchQuery.Orientation?)
                                 Text("Landscape").tag(Optional(NativeSearchQuery.Orientation.landscape))
@@ -74,6 +154,38 @@ struct SearchView: View {
                                 Text("Not in an album").tag(Optional(false))
                             }
                             SearchExifEditor(conditions: $query.exifConditions)
+                        }
+                        DisclosureGroup("Tags") {
+                            Toggle("Without tags", isOn: Binding(get: { query.tags == .untagged }, set: { enabled in
+                                if enabled {
+                                    query.tags = .untagged
+                                } else if query.tags == .untagged {
+                                    query.tags = .any
+                                }
+                            }))
+                            Text("Multiple selections match any selected tag or its children.").font(.caption)
+                            if !query.tags.selectedIDs.isEmpty {
+                                Text("Selected tags: \(query.tags.selectedIDs.count)").font(.caption)
+                            }
+                            Button("Clear tag filter") { query.tags = .any }
+                                .disabled(query.tags == .any)
+                            if let tagChoicesError {
+                                Text(tagChoicesError).font(.caption)
+                            }
+                            if !tagChoices.isEmpty {
+                                ScrollView {
+                                    LazyVStack(alignment: .leading) {
+                                        ForEach(tagChoices) { tag in
+                                            Toggle(tag.value, isOn: Binding(get: { query.tags.contains(tag.id) }, set: { selected in
+                                                query.tags.setSelected(tag.id, selected: selected)
+                                            }))
+                                            .disabled(!query.tags.contains(tag.id) && query.tags.selectedIDs.count >= 100)
+                                        }
+                                    }
+                                }.frame(maxHeight: 240)
+                            }
+                            Button(loadingTags ? "Loading tags" : "Load tags") { Task { await loadTags() } }
+                                .disabled(loadingTags)
                         }
                         DisclosureGroup("People") {
                             if let peopleError {
@@ -90,11 +202,15 @@ struct SearchView: View {
                             Button("Load people") { Task { await loadPeople() } }
                         }
                     }.textFieldStyle(.roundedBorder)
+                } label: {
+                    // 容器identifier会传播到开关等子节点；只标记标题，保留每个筛选控件自己的身份。
+                    Text("Filters").accessibilityIdentifier("search-filters")
                 }.padding(.horizontal)
                 if let error = store.error {
                     Text(error).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("search-error")
                     Button("Retry") { Task {
-                        if let source {
+                        if let source = activeSearchReader {
                             if store.hasSearched, store.continuation == nil {
                                 await store.search(query, source: source)
                             } else {
@@ -102,6 +218,7 @@ struct SearchView: View {
                             }
                         }
                     } }
+                    .accessibilityIdentifier("search-retry")
                 }
                 if invalidDateRange {
                     Text("End date must not be earlier than start date.").foregroundStyle(.secondary)
@@ -110,15 +227,22 @@ struct SearchView: View {
                     ContentUnavailableView(store.hasSearched ? "No results" : "Search your library",
                                            systemImage: "magnifyingglass",
                                            description: Text("Choose a search mode or metadata filters."))
+                        .accessibilityIdentifier("search-empty-state")
                 }
                 LazyVGrid(columns: [.init(.adaptive(minimum: 100, maximum: 180), spacing: 2)], spacing: 2) {
                     ForEach(store.assets) { asset in
                         Button { open(asset) } label: {
-                            LibraryAssetCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
-                                .aspectRatio(1, contentMode: .fit).clipped()
+                            SearchResultCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
+                        .accessibilityIdentifier("search-result-\(asset.id)")
+                        .contextMenu {
+                            Button("Find similar photos", systemImage: "photo.on.rectangle.angled") {
+                                referencePreview = asset
+                                query.useReferenceAsset(asset.id)
+                            }
+                        }
                     }
                 }
                 if store.isLoading {
@@ -126,29 +250,45 @@ struct SearchView: View {
                 }
                 if store.continuation != nil, !store.isLoading {
                     Button("Load more") { Task {
-                        if let source {
+                        if let source = activeSearchReader {
                             await store.loadMore(source: source)
                         }
                     } }
+                    .accessibilityIdentifier("search-load-more")
                 }
                 if !store.assets.isEmpty {
                     Text("Loaded \(store.assets.count) items").font(.caption)
+                        .accessibilityIdentifier("search-loaded-count")
                 }
             }.padding(.vertical)
         }
         .navigationBarTitleDisplayMode(.inline)
-        .searchable(text: $query.text, prompt: Text(query.mode.title))
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .top, spacing: 0) { searchDismissalHeader }
+        // 固定原生导航栏字段，避免自动底部搜索工具栏在横屏键盘动画中失去可访问性命中。
+        .searchable(text: Binding(get: { query.text }, set: {
+            query.useSearchText($0)
+            referencePreview = nil
+        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in
             store.invalidate()
             selection = nil
+            referencePreview = nil
             query = .init()
+            isSearchPresented = false
             people = []
             peopleError = nil
+            tagChoices = []
+            tagChoicesError = nil
+            loadingTags = false
             suggestions = [:]
             suggestionError = nil
             loadingSuggestions = false
+            devices = []
+            deviceError = nil
+            loadingDevices = false
         }
         .onChange(of: query.cameraMake) { _, _ in
             suggestions[.cameraModel] = nil
@@ -165,19 +305,65 @@ struct SearchView: View {
         .accessibilityIdentifier("search-root")
     }
 
+    /// iPad原生搜索会遮住账号工具栏且可能没有关闭按钮；固定内容头使滚动后仍能正常退出搜索。
+    @ViewBuilder private var searchDismissalHeader: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad, isSearchPresented {
+            HStack {
+                Text("Search").font(.headline)
+                Spacer()
+                Button("Close") {
+                    // 只关闭原生搜索展示；查询、在途请求与账号入口继续由原来的流程处理。
+                    isSearchPresented = false
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .accessibilityIdentifier("search-dismiss")
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+            .background(.bar)
+        }
+    }
+
     /// 防抖后按当前条件搜索；输入变化取消等待，不显示网络失败。
     private func search() async {
         store.invalidate()
         guard !invalidDateRange,
-              !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
+              query.queryAssetID != nil || !query.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || query.media != .all
               || !query.country.isEmpty || !query.state.isEmpty || !query.city.isEmpty || !query.cameraMake.isEmpty || !query.cameraModel.isEmpty || !query.lensModel.isEmpty
-              || !query.personIDs.isEmpty || query.takenAfter != nil || query.takenBefore != nil
-              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty else { return }
+              || !query.personIDs.isEmpty || !query.deviceModels.isEmpty || query.takenAfter != nil || query.takenBefore != nil
+              || query.favoritesOnly || query.archivedOnly || query.rating != .any || query.tags != .any || query.orientation != nil || query.hasAlbums != nil || !query.exifConditions.isEmpty
+              || query.mediaCategory != nil || query.resolution != nil || query.panoramasOnly else { return }
         do {
             try await Task.sleep(for: .milliseconds(300))
-            guard let source else { return }
-            await store.search(query, source: source)
+            guard let source = activeSearchReader else { return }
+            let requested = query
+            await store.search(requested, source: source)
+            #if DEBUG
+                searchCompletion?(requested)
+            #endif
         } catch { /* 取消防抖无需显示错误。 */ }
+    }
+
+    /// assetID为当前账号的参考图；只在持有已知缩略图版本时显示预览，登记恢复不猜测版本或联网补查。
+    private func referenceCard(_ assetID: String) -> some View {
+        HStack {
+            if let referencePreview, referencePreview.id == assetID {
+                LibraryAssetCover(assetID: assetID, revision: referencePreview.thumbnailRevision, media: media)
+                    .frame(width: 56, height: 56).clipped().accessibilityHidden(true)
+            } else {
+                Image(systemName: "photo.on.rectangle.angled").frame(width: 56, height: 56).accessibilityHidden(true)
+            }
+            Text("Similar photos").font(.headline)
+            Spacer()
+            Button("Use text search") {
+                query.queryAssetID = nil
+                referencePreview = nil
+            }
+            .accessibilityIdentifier("search-clear-reference")
+        }
+        .padding(.horizontal)
+        .accessibilityIdentifier("search-reference")
     }
 
     /// 仅比较用户选择的日历日，不因DatePicker保留小时而误判同一天。
@@ -186,6 +372,28 @@ struct SearchView: View {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = query.timeZone
         return calendar.startOfDay(for: start) > calendar.startOfDay(for: end)
+    }
+
+    /// 加载当前账号官方标签，不清除所选条件；候选失败或跨账号迟到均不能变成另一账号的列表。
+    private func loadTags() async {
+        guard let source, !loadingTags else { return }
+        let owner = media.management.generation
+        loadingTags = true
+        tagChoicesError = nil
+        defer {
+            if owner == media.management.generation {
+                loadingTags = false
+            }
+        }
+        do {
+            let values = try await source.searchTags()
+            try Task.checkCancellation()
+            guard owner == media.management.generation else { return }
+            tagChoices = values
+        } catch {
+            guard owner == media.management.generation, !Task.isCancelled else { return }
+            tagChoicesError = "Tags could not be loaded. Check permissions and connection. Your filter has been kept."
+        }
     }
 
     /// 按当前账号加载人物；跨账号/端点的迟到候选不可发布，不把权限失败当作空列表。
@@ -201,6 +409,28 @@ struct SearchView: View {
         } catch {
             guard owner == media.management.generation, !Task.isCancelled else { return }
             peopleError = "People could not be loaded. Check permissions and connection."
+        }
+    }
+
+    /// 读取账号内全部型号再按产品别名分组；不沿用单相机厂商约束，迟到响应和取消均不得发布。
+    private func loadDevices() async {
+        guard let source, !loadingDevices else { return }
+        let owner = media.management.generation
+        loadingDevices = true
+        deviceError = nil
+        defer {
+            if owner == media.management.generation {
+                loadingDevices = false
+            }
+        }
+        do {
+            let values = try await source.searchSuggestions(.cameraModel, query: .init())
+            try Task.checkCancellation()
+            guard owner == media.management.generation else { return }
+            devices = NativeCaptureDeviceCatalog.options(values)
+        } catch {
+            guard owner == media.management.generation, !Task.isCancelled else { return }
+            deviceError = "Capture devices could not be loaded. Check permissions and connection. Your selection has been kept."
         }
     }
 
@@ -242,6 +472,59 @@ struct SearchView: View {
                                  groupedCatalogs: .init(), isComplete: true))
         selection = Selection(route: .init(selectedAsset: asset, initialAssets: store.assets,
                                            origin: .timeline(bucketID: NativeSearchSnapshot.bucket, contentName: "Search")), timeline: timeline)
+    }
+}
+
+/// 搜索按钮的真实正方形标签；图片区原本禁止命中，需由独立矩形定义可点击边界，避免原图宽高比溢出格子。
+private struct SearchResultCover: View {
+    let assetID: String
+    let revision: Date
+    let media: MediaLibraryController
+
+    var body: some View {
+        Rectangle().fill(.clear)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                LibraryAssetCover(assetID: assetID, revision: revision, media: media)
+            }
+            .clipped()
+            .contentShape(Rectangle())
+    }
+}
+
+/// 拍摄设备只替换型号OR组，不清空相机、媒体、文本或其他条件；保存的选择无需候选也可清除。
+private struct SearchDevicePicker: View {
+    @Binding var models: [String]
+    let devices: [NativeCaptureDeviceOption]
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if !models.isEmpty {
+                Text(NativeCaptureDeviceCatalog.selectedTitle(models)).font(.caption)
+                Button("Any capture device") { models = [] }
+                    .accessibilityIdentifier("search-clear-devices")
+            }
+            ForEach(NativeCaptureDeviceOption.Group.allCases, id: \.self) { group in
+                let options = devices.filter { $0.group == group }
+                if !options.isEmpty {
+                    Text(group.title).font(.caption).foregroundStyle(.secondary)
+                    ForEach(options) { option in
+                        Button {
+                            models = option.models
+                        } label: {
+                            HStack {
+                                Text(option.label)
+                                if Set(models) == Set(option.models) {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                        // 保存契约最多50个原始别名；不能通过截断候选悄悄改变设备语义。
+                        .disabled(option.models.count > 50 || option.models.contains { $0.utf16.count > 256 })
+                    }
+                }
+            }
+        }
     }
 }
 

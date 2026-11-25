@@ -51,7 +51,7 @@ def prepare(document: JsonObject, extensions: JsonObject) -> JsonObject:
         target = cast(JsonObject, schemas[name]["properties"])
         additions = cast(JsonObject, extension_schemas[name]["properties"])
         target.update(deepcopy(additions))
-    for name in ("MediaOrientationFilter", "SearchOrientation"):
+    for name in ("MediaOrientationFilter", "SearchOrientation", "MediaResolutionFilter", "MediaResolution"):
         schemas[name] = deepcopy(extension_schemas[name])
     # 从可空的内联评分提取等价引用，才能用生成器typeOverrides保留显式null。
     # 只调整生成类型归属；min/max/nullable及文档等原始约束完整保留。

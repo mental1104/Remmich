@@ -5,7 +5,16 @@ cd "$(git rev-parse --show-toplevel)"
 build_directory=$(mktemp -d "${TMPDIR:-/tmp}/remmich-contracts.XXXXXX")
 swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/LibraryMutationClient.swift \
+  Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
+  Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
+  Remmich/Domain/Management/AlbumDirectoryManagement.swift \
+  Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
+  Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
+  Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \
+  Remmich/Domain/LocalMedia/LocalMediaAssociation.swift \
+  Remmich/Domain/LocalMedia/LocalLivePhotoRemotePair.swift \
+  Remmich/Domain/LocalMedia/LocalLivePhotoMotionProof.swift \
   Remmich/Domain/Timeline/NativeSearchModels.swift \
   Remmich/Domain/Timeline/NativeSearchPreset.swift \
   Scripts/check-fork-contracts.swift \

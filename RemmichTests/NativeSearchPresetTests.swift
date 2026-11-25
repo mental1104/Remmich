@@ -160,11 +160,27 @@ struct NativeSearchPresetTests {
         #expect(!metadata.requiresForkSmartSearch)
     }
 
-    /// 暂不支持的条件必须整组拒绝，不能把复用变成只有城市的部分搜索。
-    @Test func rejectsPartialRestoration() throws {
+    /// 参考图已支持完整恢复；非法ID或与文字冲突仍整组拒绝，不能只留下城市条件。
+    @Test func restoresReferenceAndRejectsConflictingConditions() throws {
         var conditions = NativeSearchPresetConditions()
         conditions.city = "Synthetic City"
-        conditions.tagIds = .null
+        conditions.queryAssetId = "11111111-1111-4111-8111-111111111111"
+        let restored = try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
+        #expect(restored.mode == .smart)
+        #expect(restored.queryAssetID == conditions.queryAssetId)
+        #expect(restored.city == "Synthetic City")
+        let captured = try NativeSearchPresetCodec.capture(restored)
+        #expect(captured.queryAssetId == conditions.queryAssetId)
+        #expect(captured.city == conditions.city)
+
+        for invalidID in ["not-an-asset-id", "11111111-1111-1111-8111-111111111111"] {
+            var invalid = conditions
+            invalid.queryAssetId = invalidID
+            #expect(throws: NativeSearchPresetConversionError.self) {
+                try NativeSearchPresetCodec.restore(invalid, timeZone: .gmt)
+            }
+        }
+        conditions.query = .init(value: "Another source", type: .smart)
         #expect(throws: NativeSearchPresetConversionError.self) {
             try NativeSearchPresetCodec.restore(conditions, timeZone: .gmt)
         }

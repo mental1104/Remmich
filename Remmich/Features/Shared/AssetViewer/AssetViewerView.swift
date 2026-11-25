@@ -16,6 +16,7 @@ struct AssetViewerDismissalTarget {
     let fillsFrame: Bool
 }
 
+/// 原生照片/视频查看器；静态远程照片可显式直读或有限观察编辑版本，其他媒体仍走既有显示生命周期。
 struct AssetViewerView: View {
     private static let memoryLogger = Logger(
         subsystem: "io.github.ender-wang.Remmich",
@@ -53,6 +54,7 @@ struct AssetViewerView: View {
     @State private var zoomedAssetID: String?
     @State private var chromeVisible = true
     @State private var showsManagement = false
+    @State private var viewerRefresh = AssetViewerRefreshController()
     @State private var showsInfo = false
     @State private var detailStates: [String: AssetViewerDetailState] = [:]
     @State private var selectedPlace: PlaceLocation?
@@ -191,6 +193,12 @@ struct AssetViewerView: View {
     }
 
     var body: some View {
+        viewerLifecycle
+    }
+
+    /// 几何/手势主体单独确定opaque返回类型，不让外层弹层与事件修饰链一起进入同次类型推断。
+    /// 只拆计算边界，不增加View容器或状态所有者，所有尺寸和State仍在本实例实时读取。
+    private var viewerGeometry: some View {
         GeometryReader { safeGeometry in
             GeometryReader { fullGeometry in
                 let infoProgress = isMemoryViewer ? 0 : infoPresentationProgress
@@ -539,172 +547,213 @@ struct AssetViewerView: View {
             }
             .ignoresSafeArea(.container, edges: .all)
         }
-        .foregroundStyle(.primary)
-        .modifier(AssetViewerStatusBarVisibilityModifier(hidden: shouldHideStatusBar))
-        .presentationBackground(.clear)
-        .interactiveDismissDisabled(true)
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(true)
-        .sheet(isPresented: $showsManagement) {
-            if let asset = session.selectedAsset {
-                AssetManagementView(assetID: asset.id, controller: media.management) {
-                    refreshedDetailAssetIDs.remove(asset.id)
-                    Task { await loadAssetDetail(asset.id) }
-                }
-            }
-        }
-        .task {
-            await session.start()
-            updateViewerPrefetch()
-            resetMemoryAutoRotation()
-        }
-        .task(id: openingIsActive ? nil : videoPlaybackSession?.assetID) {
-            guard !openingIsActive, !isDismissing, let videoPlaybackSession else { return }
-            updateVideoNowPlayingTitle()
-            seedVideoNowPlayingArtwork()
-            await videoPlaybackSession.prepare(using: media)
-        }
-        .onChange(of: selectedAssetDetail) {
-            updateVideoNowPlayingTitle()
-        }
-        .task(id: PlaceLoadRequest(assetID: session.selectedAssetID,
-                                   coordinate: selectedPlaceCoordinate,
-                                   revision: locations?.revision ?? 0,
-                                   dismissing: isDismissing))
-        {
-            if selectedPlaceAssetID != session.selectedAssetID || selectedPlaceGPS != selectedPlaceCoordinate || selectedPlaceScope != locations?.namespace {
-                selectedPlace = nil
-                selectedPlaceAssetID = nil
-            }
-            guard media.savedPhotosLibrary == nil, !isDismissing, let coordinate = selectedPlaceCoordinate, let locations else { return }
-            let assetID = session.selectedAssetID
-            let revision = locations.revision
-            do {
-                let place = try await locations.resolve(coordinate, assetID: assetID)
-                guard !Task.isCancelled, !isDismissing, session.selectedAssetID == assetID,
-                      locations.revision == revision else { return }
-                selectedPlace = place
-                selectedPlaceAssetID = assetID
-                selectedPlaceGPS = coordinate
-                selectedPlaceScope = locations.namespace
-            } catch { /* Keep the existing complete locality fallback. */ }
-        }
-        .onChange(of: viewerPreviewTargetPixels) {
-            seedVideoNowPlayingArtwork()
-        }
-        .onChange(of: videoPlaybackSession?.generation) { _, _ in
-            videoFirstFrameReady = false
-            chromeVisible = true
-        }
-        .onChange(of: videoPlaybackSession?.phase) { _, phase in
-            guard case .failed = phase else { return }
-            withAnimation(chromeAnimation) {
-                chromeVisible = true
-            }
-        }
-        .task(id: AssetDetailLoadRequest(
-            assetID: session.selectedAssetID,
-            includesNeighbors: showsInfo
-        )) {
-            await loadSelectedAssetDetail()
-        }
-        .task(id: AssetDetailCacheWindowRequest(
-            assetIDs: pagerWindowAssets.map(\.id)
-        )) {
-            await preloadCachedAssetDetails(pagerWindowAssets.map(\.id))
-        }
-        .onChange(of: session.selectedAssetID) { _, newAssetID in
-            interactiveMapFrame = nil
-            infoScrollDismissalBlocked = false
-            logMemoryPlayback("selection")
-            videoFirstFrameReady = false
-            chromeVisible = true
-            syncVideoPlaybackSession()
-            nativeDismissalController.reset()
-            nativeDismissalTransitionActive = false
-            zoomedAssetID = nil
-            livePhotoPlaybackAssetID = nil
-            memoryAssetPressActive = false
-            updateViewerPrefetch()
-            if pagerPosition != newAssetID {
-                pagerPosition = newAssetID
-            }
-            if !pagerWindowAssets.contains(where: { $0.id == newAssetID }) {
-                pagerWindowCenterID = newAssetID
-            }
-            resetMemoryAutoRotation()
-        }
-        .onChange(of: showsInfo) { _, shown in
-            if !shown {
-                interactiveMapFrame = nil
-            }
-        }
-        .onChange(of: locations?.namespace) { _, _ in interactiveMapFrame = nil }
-        .onChange(of: route.id) { _, _ in
-            replaceMemoryRoute()
-        }
-        .onChange(of: verticalDragIsActive) { _, active in
-            if !active {
-                viewerDragAxis = nil
-                cancelOpeningDrag()
-            }
-        }
-        .onAppear {
-            media.beginViewerSession(id: mediaViewerID)
-            logMemoryPlayback("appear")
-            visibilityChanged(true)
-            beginOpeningAnimation()
-        }
-        .onDisappear {
-            interactiveMapFrame = nil
-            returnSource?.stop()
-            logMemoryPlayback("disappear")
-            videoPlaybackSession?.close()
-            openingTask?.cancel()
-            openingGeneration += 1
-            dismissalLandingTask?.cancel()
-            dismissalThumbnailRevealTask?.cancel()
-            nativeDismissalController.reset()
-            let requestedFullSizeAssets = session.assets.filter {
-                fullResolutionRequestIDs[$0.id] != nil
-            }
-            neighborLoadTask?.cancel()
-            pagerSelectionTask?.cancel()
-            memoryAutoAdvanceTask?.cancel()
-            memoryWrapTask?.cancel()
-            memoryAutoStartedAt = nil
-            livePhotoPlaybackAssetID = nil
-            livePhotoSoundEnabled = false
-            visibilityChanged(false)
-            returningTimelineThumbnailChanged(nil)
-            media.endViewerSession(id: mediaViewerID, originalAssets: requestedFullSizeAssets)
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard !isDismissing else { return }
-            if phase == .active {
-                if let videoPlaybackSession {
-                    Task { @MainActor in
-                        await videoPlaybackSession.resumeFromSuspension()
-                        resumeVideoAfterCancelledDismissalIfNeeded()
+    }
+
+    /// 在同一几何主体上依原顺序附加外观、系统栏与管理sheet，绑定仍指向本实例的State。
+    private var viewerPresentation: some View {
+        viewerGeometry
+            .foregroundStyle(.primary)
+            .modifier(AssetViewerStatusBarVisibilityModifier(hidden: shouldHideStatusBar))
+            .presentationBackground(.clear)
+            .interactiveDismissDisabled(true)
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarBackButtonHidden(true)
+            .sheet(isPresented: $showsManagement) {
+                if let asset = session.selectedAsset {
+                    AssetManagementView(assetID: asset.id, controller: media.management, media: media,
+                                        previewRevision: asset.thumbnailRevision, editsChanged: { refreshFromServer(afterEdit: true) })
+                    {
+                        refreshedDetailAssetIDs.remove(asset.id)
+                        Task { await loadAssetDetail(asset.id) }
+                        refreshFromServer(afterEdit: false)
                     }
                 }
-                resumeMemoryAutoRotation()
-            } else {
-                // AVKit owns background pause versus automatic Picture in
-                // Picture. Pausing at .inactive would cancel the Home gesture's
-                // PiP handoff before AVKit can start it.
-                if phase == .background {
-                    videoPlaybackSession?.sceneDidEnterBackground()
-                }
-                pauseMemoryAutoRotation()
             }
+    }
+
+    /// 原有启动、视频、地点与详情任务保持修饰顺序和task身份；返回类型与主体/观察器分开推断。
+    private var viewerLoading: some View {
+        viewerPresentation
+            .task {
+                await session.start()
+                updateViewerPrefetch()
+                resetMemoryAutoRotation()
+            }
+            .task(id: openingIsActive ? nil : videoPlaybackSession?.assetID) {
+                guard !openingIsActive, !isDismissing, let videoPlaybackSession else { return }
+                updateVideoNowPlayingTitle()
+                seedVideoNowPlayingArtwork()
+                await videoPlaybackSession.prepare(using: media)
+            }
+            .onChange(of: selectedAssetDetail) {
+                updateVideoNowPlayingTitle()
+            }
+            .task(id: PlaceLoadRequest(assetID: session.selectedAssetID,
+                                       coordinate: selectedPlaceCoordinate,
+                                       revision: locations?.revision ?? 0,
+                                       dismissing: isDismissing))
+            {
+                if selectedPlaceAssetID != session.selectedAssetID || selectedPlaceGPS != selectedPlaceCoordinate || selectedPlaceScope != locations?.namespace {
+                    selectedPlace = nil
+                    selectedPlaceAssetID = nil
+                }
+                guard media.savedPhotosLibrary == nil, !isDismissing, let coordinate = selectedPlaceCoordinate, let locations else { return }
+                let assetID = session.selectedAssetID
+                let revision = locations.revision
+                do {
+                    let place = try await locations.resolve(coordinate, assetID: assetID)
+                    guard !Task.isCancelled, !isDismissing, session.selectedAssetID == assetID,
+                          locations.revision == revision else { return }
+                    selectedPlace = place
+                    selectedPlaceAssetID = assetID
+                    selectedPlaceGPS = coordinate
+                    selectedPlaceScope = locations.namespace
+                } catch { /* Keep the existing complete locality fallback. */ }
+            }
+            .onChange(of: viewerPreviewTargetPixels) {
+                seedVideoNowPlayingArtwork()
+            }
+            .onChange(of: videoPlaybackSession?.generation) { _, _ in
+                videoFirstFrameReady = false
+                chromeVisible = true
+            }
+            .onChange(of: videoPlaybackSession?.phase) { _, phase in
+                guard case .failed = phase else { return }
+                withAnimation(chromeAnimation) {
+                    chromeVisible = true
+                }
+            }
+            .task(id: AssetDetailLoadRequest(
+                assetID: session.selectedAssetID,
+                includesNeighbors: showsInfo
+            )) {
+                await loadSelectedAssetDetail()
+            }
+            .task(id: AssetDetailCacheWindowRequest(
+                assetIDs: pagerWindowAssets.map(\.id)
+            )) {
+                await preloadCachedAssetDetails(pagerWindowAssets.map(\.id))
+            }
+    }
+
+    /// 选择/路由/手势的观察器继续包在读取任务之外；不缓存旧State值，不改变回调时机或取消条件。
+    private var viewerObservation: some View {
+        viewerLoading
+            .onChange(of: session.selectedAssetID) { _, newAssetID in
+                viewerRefresh.cancel()
+                interactiveMapFrame = nil
+                infoScrollDismissalBlocked = false
+                logMemoryPlayback("selection")
+                videoFirstFrameReady = false
+                chromeVisible = true
+                syncVideoPlaybackSession()
+                nativeDismissalController.reset()
+                nativeDismissalTransitionActive = false
+                zoomedAssetID = nil
+                livePhotoPlaybackAssetID = nil
+                memoryAssetPressActive = false
+                updateViewerPrefetch()
+                if pagerPosition != newAssetID {
+                    pagerPosition = newAssetID
+                }
+                if !pagerWindowAssets.contains(where: { $0.id == newAssetID }) {
+                    pagerWindowCenterID = newAssetID
+                }
+                resetMemoryAutoRotation()
+            }
+            .onChange(of: showsInfo) { _, shown in
+                if !shown {
+                    interactiveMapFrame = nil
+                }
+            }
+            .onChange(of: locations?.namespace) { _, _ in interactiveMapFrame = nil }
+            .onChange(of: media.management.generation) { _, _ in viewerRefresh.cancel() }
+            .onChange(of: isDismissing) {
+                _, value in if value {
+                    viewerRefresh.cancel()
+                }
+            }
+            .onChange(of: route.id) { _, _ in
+                replaceMemoryRoute()
+            }
+            .onChange(of: verticalDragIsActive) { _, active in
+                if !active {
+                    viewerDragAxis = nil
+                    cancelOpeningDrag()
+                }
+            }
+    }
+
+    /// 最外层生命周期和辅助功能观察保持原位置；通过some View边界避免整条泛型链超出编译预算。
+    private var viewerLifecycle: some View {
+        viewerObservation
+            .onAppear {
+                media.beginViewerSession(id: mediaViewerID)
+                logMemoryPlayback("appear")
+                visibilityChanged(true)
+                beginOpeningAnimation()
+            }
+            .onDisappear {
+                viewerDidDisappear()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active {
+                    viewerRefresh.cancel()
+                }
+                guard !isDismissing else { return }
+                if phase == .active {
+                    if let videoPlaybackSession {
+                        Task { @MainActor in
+                            await videoPlaybackSession.resumeFromSuspension()
+                            resumeVideoAfterCancelledDismissalIfNeeded()
+                        }
+                    }
+                    resumeMemoryAutoRotation()
+                } else {
+                    // AVKit owns background pause versus automatic Picture in
+                    // Picture. Pausing at .inactive would cancel the Home gesture's
+                    // PiP handoff before AVKit can start it.
+                    if phase == .background {
+                        videoPlaybackSession?.sceneDidEnterBackground()
+                    }
+                    pauseMemoryAutoRotation()
+                }
+            }
+            .onChange(of: reduceMotion) {
+                resetMemoryAutoRotation()
+            }
+            .onChange(of: voiceOverEnabled) {
+                resetMemoryAutoRotation()
+            }
+    }
+
+    /// 宿主实际消失时按原顺序收尾；在长SwiftUI表达式外确定数组类型，不改变状态所有权或视图identity。
+    /// 原片列表在调用时从实时session/ID字典读取，先固定再取消其余任务，不能捕获构建body时的旧快照。
+    private func viewerDidDisappear() {
+        viewerRefresh.cancel()
+        interactiveMapFrame = nil
+        returnSource?.stop()
+        logMemoryPlayback("disappear")
+        videoPlaybackSession?.close()
+        openingTask?.cancel()
+        openingGeneration += 1
+        dismissalLandingTask?.cancel()
+        dismissalThumbnailRevealTask?.cancel()
+        nativeDismissalController.reset()
+        var requestedFullSizeAssets: [TimelineAssetSummary] = []
+        for asset in session.assets where fullResolutionRequestIDs[asset.id] != nil {
+            requestedFullSizeAssets.append(asset)
         }
-        .onChange(of: reduceMotion) {
-            resetMemoryAutoRotation()
-        }
-        .onChange(of: voiceOverEnabled) {
-            resetMemoryAutoRotation()
-        }
+        neighborLoadTask?.cancel()
+        pagerSelectionTask?.cancel()
+        memoryAutoAdvanceTask?.cancel()
+        memoryWrapTask?.cancel()
+        memoryAutoStartedAt = nil
+        livePhotoPlaybackAssetID = nil
+        livePhotoSoundEnabled = false
+        visibilityChanged(false)
+        returningTimelineThumbnailChanged(nil)
+        media.endViewerSession(id: mediaViewerID, originalAssets: requestedFullSizeAssets)
     }
 
     private func viewerContent(
@@ -907,6 +956,8 @@ struct AssetViewerView: View {
                         contentHeightChanged: { updateInfoContentHeight($0, for: asset.id) },
                         retry: { retryDetail(for: asset.id) },
                         loadFullResolution: { requestFullResolution(for: asset.id) },
+                        mediaReadOrigin: media.mediaReadOrigin(assetID: asset.id, revision: asset.thumbnailRevision)
+                            ?? (media.savedPhotosLibrary != nil ? .devicePhotos : .immichResource),
                         place: asset.id == session.selectedAssetID ? currentPlace : nil,
                         showsMap: showsInfo && !openingIsActive,
                         mapViewportSize: CGSize(width: infoWidth, height: viewerRect.height),
@@ -948,6 +999,8 @@ struct AssetViewerView: View {
                         contentHeightChanged: { updateInfoContentHeight($0, for: asset.id) },
                         retry: { retryDetail(for: asset.id) },
                         loadFullResolution: { requestFullResolution(for: asset.id) },
+                        mediaReadOrigin: media.mediaReadOrigin(assetID: asset.id, revision: asset.thumbnailRevision)
+                            ?? (media.savedPhotosLibrary != nil ? .devicePhotos : .immichResource),
                         place: asset.id == session.selectedAssetID ? currentPlace : nil,
                         showsMap: showsInfo && !openingIsActive,
                         bottomContentInset: mapUnderlap,
@@ -987,13 +1040,21 @@ struct AssetViewerView: View {
         .frame(width: pageSize.width, height: pageSize.height)
         .animation(infoAnimation, value: showsInfo)
         .animation(infoAnimation, value: targetInfoHeight)
-        .accessibilityIdentifier(
-            isLandscape
-                ? (infoProgress > 0.5
-                    ? "asset-viewer-landscape-split"
-                    : "asset-viewer-landscape")
-                : "asset-viewer-portrait"
-        )
+        .background {
+            if asset.id == session.selectedAssetID {
+                layoutAccessibilityMarker(isLandscape: isLandscape, infoVisible: infoProgress > 0.5)
+            }
+        }
+    }
+
+    /// 当前选中页的方向标记单独成为AX叶子，避免容器identifier传播覆盖照片页/实际像素标记。
+    /// isLandscape与infoVisible只描述当前布局；返回禁止命中的明确元素，不替代真实照片的可见性证明。
+    private func layoutAccessibilityMarker(isLandscape: Bool, infoVisible: Bool) -> some View {
+        Color.clear
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Viewer layout")
+            .accessibilityIdentifier(isLandscape ? (infoVisible ? "asset-viewer-landscape-split" : "asset-viewer-landscape") : "asset-viewer-portrait")
+            .allowsHitTesting(false)
     }
 
     private func mediaPage(
@@ -1095,6 +1156,7 @@ struct AssetViewerView: View {
             {
                 LivePhotoPlaybackView(
                     assetID: asset.id,
+                    assetRevision: asset.thumbnailRevision,
                     motionAssetID: motionAssetID,
                     media: media,
                     isHeld: livePhotoPlaybackAssetID == asset.id,
@@ -1333,6 +1395,11 @@ struct AssetViewerView: View {
                     .opacity(1 - infoProgress)
                     .allowsHitTesting(infoProgress < 0.5)
                     .accessibilityHidden(infoProgress >= 0.5)
+                }
+
+                if supportsFreshStillRefresh {
+                    refreshStatus
+                        .padding(.horizontal, 16)
                 }
 
                 bottomActions
@@ -1728,6 +1795,60 @@ struct AssetViewerView: View {
                 }
             }
         }
+    }
+
+    /// 只对远程静态照片提供新刷新流程；Saved Photos、视频和Live Photo沿用原有播放/读取行为。
+    private var supportsFreshStillRefresh: Bool {
+        media.savedPhotosLibrary == nil && media.management.client != nil
+            && session.selectedAsset?.mediaKind == .image && session.selectedAsset?.livePhotoVideoID == nil
+    }
+
+    /// 显式刷新与有限观察状态；文案说明派生可能仍在生成，从不把HTTP写入或尺寸变化标为ready。
+    private var refreshStatus: some View {
+        HStack(spacing: 12) {
+            if let message = viewerRefresh.message {
+                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Spacer(minLength: 0)
+            }
+            Button { refreshFromServer(afterEdit: false) } label: {
+                if viewerRefresh.busy {
+                    ProgressView()
+                } else {
+                    Label("刷新照片", systemImage: "arrow.clockwise")
+                }
+            }
+            .disabled(viewerRefresh.busy)
+            .accessibilityIdentifier("asset-viewer-refresh")
+        }
+        .padding(12)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityIdentifier("asset-viewer-refresh-status")
+    }
+
+    /// afterEdit最多观察四次，其余只读一次；固定选中资源及管理代际，后台/关闭/换选择或账号后禁止发布。
+    private func refreshFromServer(afterEdit: Bool) {
+        guard supportsFreshStillRefresh, scenePhase == .active, !isDismissing,
+              let asset = session.selectedAsset, let client = media.management.client else { return }
+        let owner = media.management.generation
+        viewerRefresh.refresh(asset: asset, afterEdit: afterEdit,
+                              read: { try await client.freshViewerAsset(asset.id, ownerID: asset.ownerID) },
+                              isCurrent: {
+                                  media.management.generation == owner && session.selectedAssetID == asset.id
+                                      && scenePhase == .active && !isDismissing
+                              }, publish: { fresh in
+                                  guard session.replaceSelectedAsset(fresh) else { return false }
+                                  if fresh.thumbnailRevision != asset.thumbnailRevision {
+                                      renderedImageMetadataByAssetID.removeValue(forKey: asset.id)
+                                      displayedShareImage = nil
+                                      if afterEdit {
+                                          fullResolutionRequestIDs.removeValue(forKey: asset.id)
+                                          fullResolutionLoadErrors.removeValue(forKey: asset.id)
+                                      }
+                                      updateViewerPrefetch()
+                                  }
+                                  return true
+                              })
     }
 
     private var shareSelection: MediaShareSelection? {

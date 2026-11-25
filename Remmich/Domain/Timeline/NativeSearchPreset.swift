@@ -53,12 +53,8 @@ nonisolated struct NativeSearchPresetConditions: Codable, Sendable {
 
     enum AlbumStatus: String, Codable, Sendable { case inAlbum = "in", notInAlbum = "notIn" }
     enum MediaType: String, Codable, Sendable { case image, video }
-    enum MediaCategory: String, Codable, Sendable {
-        case phoneVideo = "phone-video", screenshot, deltaScreenshot = "delta-screenshot"
-        case steamScreenshot = "steam-screenshot", switchScreenshot = "switch-screenshot", nintendo3dsScreenshot = "3ds-screenshot"
-    }
-
-    enum Resolution: String, Codable, Sendable { case hd = "720p", fullHD = "1080p", twoK = "2k", fourK = "4k" }
+    typealias MediaCategory = NativeSearchMediaCategory
+    typealias Resolution = NativeSearchResolution
 
     var query: TextQuery?
     var queryAssetId: String?

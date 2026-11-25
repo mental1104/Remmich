@@ -88,7 +88,47 @@ struct MediaSavedPhotosTests {
         #expect(afterReset == nil)
     }
 
-    private func fixture(local: Data?, connected: Bool, tier: MediaExportTier = .preview) async throws -> SavedPhotosFixture {
+    /// 旧回执继续可在显式Saved Photos读取；普通编辑结果不复用unknown，也不在离线时偷偷读取原片。
+    @Test func legacyUnknownRemainsReadableButCannotImpersonateEditedDisplay() async throws {
+        let fixture = try await fixture(local: Data([1, 2, 3]), connected: false, legacy: true)
+        defer { fixture.cleanup() }
+        let exports = fixture.media.exports
+        let receipt = try #require(exports.savedReceipt(assetID: "asset", revision: fixture.descriptor.updatedAt, tier: .preview))
+        #expect(receipt.sourceMode == nil)
+        #expect(exports.savedReceipt(assetID: "asset", revision: fixture.descriptor.updatedAt, tier: .preview, requiredSourceMode: .editedDisplay) == nil)
+        #expect(fixture.media.imageRequest(for: fixture.descriptor) == nil)
+        #expect(try await exports.localImageData(assetID: "asset", revision: fixture.descriptor.updatedAt, tier: .preview) == Data([1, 2, 3]))
+        #expect(await fixture.photos.imageReads == 1)
+        #expect(fixture.loader.isEmpty)
+    }
+
+    /// 即使同一资产原片已在手机，普通预览仍走edited=true通道；显式原片离线能力由下一用例保护。
+    @Test func residentOriginalCannotSubstituteForEditedPreview() async throws {
+        let fixture = try await fixture(local: Data([1, 2, 3]), connected: true, tier: .original)
+        defer { fixture.cleanup() }
+        let preview = MediaRequestDescriptor(assetID: "asset", updatedAt: fixture.descriptor.updatedAt, derivative: .preview, targetPixels: nil)
+        let request = try #require(fixture.media.imageRequest(for: preview))
+        #expect(request.url?.query == "size=preview&edited=true")
+        let pipeline = try #require(fixture.media.pipeline)
+        #expect(try await pipeline.data(for: request).0 == Data([9, 8, 7]))
+        #expect(await fixture.photos.imageReads == 0)
+        #expect(fixture.loader.count == 1)
+    }
+
+    /// 原片路由没有变更，旧unknown原片回执仍服务显式原片读取，不会被模式迁移删除或强迫联网。
+    @Test func explicitLegacyOriginalStillLoadsOffline() async throws {
+        let fixture = try await fixture(local: Data([1, 2, 3]), connected: false, tier: .original, legacy: true)
+        defer { fixture.cleanup() }
+        let request = try #require(fixture.media.imageRequest(for: fixture.descriptor))
+        let pipeline = try #require(fixture.media.pipeline)
+        #expect(try await pipeline.data(for: request).0 == Data([1, 2, 3]))
+        #expect(await fixture.photos.imageReads == 1)
+        #expect(fixture.loader.isEmpty)
+    }
+
+    /// local为合成Photos内容，connected决定可用路由，tier指定精确规格，legacy表示冷恢复无来源字段的旧回执。
+    /// 返回真实SQLite→exports→media通路及局部网络拦截器，不调用PhotoKit或真实HTTP。
+    private func fixture(local: Data?, connected: Bool, tier: MediaExportTier = .preview, legacy: Bool = false) async throws -> SavedPhotosFixture {
         let root = FileManager.default.temporaryDirectory.appending(path: "SavedPhotosTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let session = AccountSession(apiURL: URL(string: "http://127.0.0.1:1/api")!, accessToken: "fixture",
@@ -99,7 +139,8 @@ struct MediaSavedPhotosTests {
         try await store.prepare(scope: scope)
         let revision = Date(timeIntervalSince1970: 1_700_000_000)
         let receipt = MediaPhotosReceipt(key: "saved", assetID: "asset", revision: revision, tier: tier,
-                                         photosID: "photos-asset", albumID: "album", savedAt: .now)
+                                         photosID: "photos-asset", albumID: "album", savedAt: .now,
+                                         sourceMode: legacy ? nil : tier.requestSourceMode)
         try await store.saveMediaExports(.init(receipts: [receipt]), scope: scope)
         let photos = SavedPhotosFixtureWriter(data: local)
         let exports = MediaExportController(store: store, photos: photos)
