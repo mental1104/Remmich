@@ -204,16 +204,21 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let allowCloud: Bool
         let excludedAlbumIDs: [String]?
         let rawJPEGVersion: Int?
+        let foregroundAutomaticEnabled: Bool?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
         /// rawJPEGVersion仅格式3允许且必须为1；其他格式不得偷偷携带双图资料。
-        init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil) {
+        /// foregroundAutomaticEnabled缺省nil表示默认关闭；旧读取器忽略后只会失去自动启用，不会扩大上传范围。
+        init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil,
+             foregroundAutomaticEnabled: Bool? = nil)
+        {
             self.version = version
             self.namespace = namespace
             self.selectedAlbumIDs = selectedAlbumIDs
             self.allowCloud = allowCloud
             self.excludedAlbumIDs = excludedAlbumIDs
             self.rawJPEGVersion = rawJPEGVersion
+            self.foregroundAutomaticEnabled = foregroundAutomaticEnabled
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -222,6 +227,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             let validIncludes = !selectedAlbumIDs.isEmpty && selectedAlbumIDs.allSatisfy { !$0.isEmpty }
                 && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
             guard [1, 2, 3].contains(version), namespace == expected,
+                  foregroundAutomaticEnabled != true || validIncludes,
                   version == 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
                   exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
                   version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
@@ -235,6 +241,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     private(set) var excludedAlbumIDs: [String]?
     private(set) var jobs: [PhotoBackupJob]
     private(set) var rawJPEGVersion: Int?
+    private(set) var foregroundAutomaticEnabled: Bool?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -245,6 +252,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         excludedAlbumIDs = nil
         jobs = []
         rawJPEGVersion = nil
+        foregroundAutomaticEnabled = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -256,11 +264,49 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         excludedAlbumIDs = header.excludedAlbumIDs
         self.jobs = jobs
         rawJPEGVersion = header.rawJPEGVersion
+        foregroundAutomaticEnabled = header.foregroundAutomaticEnabled
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
-        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs, rawJPEGVersion: rawJPEGVersion)
+        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs,
+              rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled)
+    }
+
+    /// enabled是用户对当前已保存选择的明确自动化同意；不修改相簿/iCloud草稿，也不恢复任何任务。
+    mutating func setForegroundAutomaticEnabled(_ enabled: Bool) throws {
+        try validate(namespace: namespace)
+        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        foregroundAutomaticEnabled = enabled
+    }
+
+    /// scan须精确使用已保存的包含/排除规则；自动计划仅新增安全源，不重排完成项或恢复失败/取消/未知尝试。
+    /// 返回新增逻辑源数；生命周期暂停且从未尝试的项目可排队，已有任何失败或用户取消的localID需手动处理。
+    @discardableResult mutating func applyAutomaticAlbumScan(_ scan: PhotoBackupAlbumScan) throws -> Int {
+        try validate(namespace: namespace)
+        guard foregroundAutomaticEnabled == true, !jobs.contains(where: \.stage.isInFlight),
+              Set(selectedAlbumIDs) == scan.selection.included, Set(excludedAlbumIDs ?? []) == scan.selection.excluded
+        else { throw PhotoBackupStateError.invalidTransition }
+        let eligible = Set(scan.sources)
+        let blockedIDs = Set(jobs.filter {
+            $0.stage == .cancelled || $0.stage == .failed || ($0.stage != .completed
+                && ($0.attempts > 0 || $0.failure != nil || $0.motionAssetID != nil || $0.primaryAssetID != nil || $0.rawReceipt != nil || $0.jpegReceipt != nil))
+        }.map(\.source.localID))
+        let existing = Set(jobs.map(\.source))
+        for index in jobs.indices where jobs[index].stage == .queued || jobs[index].stage == .paused {
+            let job = jobs[index]
+            if !eligible.contains(job.source) {
+                jobs[index].cancel()
+            } else if job.attempts == 0, job.failure == nil, job.motionAssetID == nil, job.primaryAssetID == nil,
+                      job.rawReceipt == nil, job.jpegReceipt == nil, !blockedIDs.contains(job.source.localID)
+            {
+                jobs[index].queueForVerification()
+            } else if job.stage == .queued {
+                jobs[index].pause()
+            }
+        }
+        // enqueue只接收从未出现过的完整源；不能把它的手动重验语义施加到既有完成/失败/取消任务。
+        return try enqueue(scan.sources.filter { !existing.contains($0) && !blockedIDs.contains($0.localID) })
     }
 
     /// scan已验证完整包含/排除集合，allowCloud来自本轮用户选择；原子保存前取消不再属于本轮选择的未完成项。

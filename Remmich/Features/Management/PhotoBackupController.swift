@@ -54,28 +54,49 @@ import Photos
     private(set) var total = 0
     private(set) var jobs: [PhotoBackupJob] = []
     private(set) var status = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
+    private(set) var foregroundAutomaticEnabled = false
+    private(set) var automaticRunning = false
+    private(set) var configuringAutomatic = false
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let exporter: any PhotoBackupResourceExporting
     @ObservationIgnored private let albumLoader: @MainActor () async throws -> AlbumCatalog
     @ObservationIgnored private let albumScanner: @MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private var configurationScope: MediaAccountScope?
+    @ObservationIgnored private var applyingConfiguration = false
+    @ObservationIgnored private var automaticTask: Task<Void, Never>?
+    @ObservationIgnored private weak var automaticManager: LibraryManagementController?
+    @ObservationIgnored private var automaticManagerGeneration: UUID?
+    @ObservationIgnored private var automaticScope: MediaAccountScope?
+    @ObservationIgnored private var automaticActive = false
+    @ObservationIgnored private var automaticEpoch = UUID()
+    @ObservationIgnored private var automaticRequested = false
+    @ObservationIgnored private var automaticMonitor: LocalPhotoChangeMonitor?
+    @ObservationIgnored private let authorizationStatus: @MainActor () -> PHAuthorizationStatus
+    @ObservationIgnored private let observeAutomaticPhotos: Bool
+    @ObservationIgnored private var automaticSuppressedScopes: Set<String> = []
 
     /// store复用账号存储，exporter控制媒体导出；albumLoader读取当前授权列表，albumScanner按包含/排除ID并集重新取源快照。
-    /// 两个可选边界仅隔离PhotoKit读取；nil使用真实权限/枚举，扫描失败在任何持久化/上传前停止。
+    /// 两个可选读取边界的nil使用真实权限/枚举，扫描失败在任何持久化/上传前停止。
+    /// authorizationStatus只查询已有授权，自动周期不得请求授权；observeAutomaticPhotos为false时仅关闭系统变更观察供隔离测试。
     init(store: SQLiteLibraryIndexStore = .init(), exporter: any PhotoBackupResourceExporting = PhotoKitBackupResourceExporter(),
          albumLoader: (@MainActor () async throws -> AlbumCatalog)? = nil,
-         albumScanner: (@MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot])? = nil)
+         albumScanner: (@MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot])? = nil,
+         authorizationStatus: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
+         observeAutomaticPhotos: Bool = true)
     {
         self.store = store
         self.exporter = exporter
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
         self.albumScanner = albumScanner ?? Self.albumSnapshots
+        self.authorizationStatus = authorizationStatus
+        self.observeAutomaticPhotos = observeAutomaticPhotos
     }
 
     /// manager绑定本次读取账号；只冷恢复/读取配置，同scope保留未扫描草稿，不自动扫描或上传。
     /// 调用取消在读取前后与发布前检查；取消或账号退役不应用迟到配置，已完成的安全暂停恢复仍保留。
     func load(using manager: LibraryManagementController) async {
+        guard !configuringAutomatic else { return }
         guard let scope = manager.backupScope else { status = "请先连接服务器。"; return }
         let owner = manager.generation
         do {
@@ -165,7 +186,7 @@ import Photos
     /// 返回持久化任务供调用方等待完整退役；nil表示读取/选择门禁拒绝或同步扫描失败，没有写入或上传。
     @discardableResult
     func scan(using manager: LibraryManagementController) -> Task<Void, Never>? {
-        guard !running, hasLoadedAlbums, !loadingAlbums, !selected.isEmpty, let scope = manager.backupScope else { return nil }
+        guard !running, !configuringAutomatic, hasLoadedAlbums, !loadingAlbums, !selected.isEmpty, let scope = manager.backupScope else { return nil }
         guard configurationScope == scope else { status = "请先读取当前账户的备份队列，再扫描相簿。"; return nil }
         let owner = manager.generation
         let albumIDs = selected
@@ -182,7 +203,7 @@ import Photos
         }
         running = true
         task = Task {
-            defer { running = false; task = nil }
+            defer { running = false; task = nil; requestAutomaticWork() }
             do {
                 let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
                     try Self.validate(manager, owner: owner, scope: scope)
@@ -196,7 +217,9 @@ import Photos
                 }
                 try Self.validate(manager, owner: owner, scope: scope)
                 apply(journal, scope: scope)
-                status = "扫描已保存：可备份 \(scan.sources.count) 项；不再符合选择的待执行项已取消。点击继续后上传。"
+                status = foregroundAutomaticEnabled
+                    ? "扫描已保存：可备份 \(scan.sources.count) 项；前台自动备份将使用本次保存的规则。"
+                    : "扫描已保存：可备份 \(scan.sources.count) 项；不再符合选择的待执行项已取消。点击继续后上传。"
             } catch { showFailure(error, manager: manager, owner: owner) }
         }
         return task
@@ -236,7 +259,7 @@ import Photos
     /// 返回实际执行任务供调用方等待完整退役；nil表示前置门禁拒绝，页面可忽略该句柄。
     @discardableResult
     func resume(using manager: LibraryManagementController, jobID: UUID? = nil) -> Task<Void, Never>? {
-        guard !running, !requiresSelectionScan, !manager.busy, let scope = manager.backupScope,
+        guard !running, !configuringAutomatic, !requiresSelectionScan, !manager.busy, let scope = manager.backupScope,
               configurationScope == scope, let client = manager.client else { return nil }
         let owner = manager.generation
         running = true
@@ -286,7 +309,7 @@ import Photos
 
     /// id为当前列表中的逻辑任务，manager须匹配已读取配置的账号；只取消本地任务，不删除服务器资源。
     func cancelJob(_ id: UUID, using manager: LibraryManagementController) {
-        guard !running, let scope = manager.backupScope, configurationScope == scope else { return }
+        guard !running, !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope else { return }
         let owner = manager.generation
         running = true
         task = Task {
@@ -311,6 +334,7 @@ import Photos
     /// 停止实际Task，worker负责将未完成任务持久化为暂停；已发送结果可能已被服务器保存。
     func cancel() {
         task?.cancel()
+        automaticTask?.cancel()
         if running {
             status = "正在停止并保存队列；再次继续会重新查重。"
         }
@@ -319,19 +343,24 @@ import Photos
     /// 已读取账户配置后的包含/排除/iCloud改动都属于未保存草稿；直到成功扫描才解除恢复/重试门禁。
     /// 初始构造不创建草稿；apply恢复配置时会在全部字段赋值后统一清除标记。
     private func markSelectionDraftChanged() {
-        guard configurationScope != nil else { return }
+        guard configurationScope != nil, !applyingConfiguration else { return }
         requiresSelectionScan = true
+        automaticRequested = false
+        automaticTask?.cancel()
     }
 
     /// journal/scope为刚验证的当前账号快照；restoreConfiguration为false时仅保留同scope未扫描草稿。
     /// 换账号必须恢复新账号自己的选择并清除旧门禁，不能把旧账号排除规则带入新的扫描计划。
     private func apply(_ journal: PhotoBackupJournal, scope: MediaAccountScope, restoreConfiguration: Bool = true) {
         if restoreConfiguration || configurationScope != scope {
+            applyingConfiguration = true
             selected = Set(journal.selectedAlbumIDs)
             excluded = Set(journal.excludedAlbumIDs ?? [])
             allowCloud = journal.allowCloud
             requiresSelectionScan = false
+            applyingConfiguration = false
         }
+        foregroundAutomaticEnabled = journal.foregroundAutomaticEnabled == true
         configurationScope = scope
         jobs = journal.jobs
         total = jobs.count
@@ -346,5 +375,243 @@ import Photos
     private func showFailure(_ error: any Error, manager: LibraryManagementController, owner: UUID) {
         guard manager.generation == owner else { return }
         status = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
+    }
+}
+
+/// 前台自动化只围绕同一Controller/SQLite队列工作；无定时器、OS后台任务或独立上传器。
+extension PhotoBackupController {
+    /// scope来自Media已认证账号，active为scene活跃状态；nil保留当前活跃值供端点更新使用。
+    /// 返回本轮退役/自动任务以便测试等待；同条件重复通知复用任务，不并发重扫。
+    @discardableResult
+    func automaticConditionsChanged(using manager: LibraryManagementController, scope: MediaAccountScope?, active: Bool? = nil) -> Task<Void, Never>? {
+        let nextActive = active ?? automaticActive
+        guard automaticManager !== manager || automaticManagerGeneration != manager.generation || automaticScope != scope || automaticActive != nextActive else {
+            return automaticTask
+        }
+        let previous = automaticTask
+        let previousManual = task
+        previous?.cancel()
+        previousManual?.cancel()
+        automaticMonitor?.stop(); automaticMonitor = nil
+        automaticEpoch = UUID()
+        automaticManager = manager; automaticManagerGeneration = manager.generation
+        if automaticScope != scope {
+            foregroundAutomaticEnabled = false
+        }
+        automaticScope = scope; automaticActive = nextActive; automaticRequested = nextActive
+        automaticTask = nil
+        return launchAutomaticWork(after: previous, manual: previousManual)
+    }
+
+    /// 公开Photos观察事件只合并一个待处理请求；测试也可调用同入口，不替代实际扫描/Worker。
+    @discardableResult
+    func automaticLibraryChanged() -> Task<Void, Never>? {
+        requestAutomaticWork()
+    }
+
+    /// enabled是对最近保存相簿/iCloud选项的明确同意；关闭先取消并等待真实任务，再持久保存关闭。
+    /// 读取/写入错误可见且不上传；未保存草稿只影响页面，不借切换自动开关偷偷保存。
+    func setForegroundAutomaticEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        guard !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope,
+              !enabled || (!running && !manager.busy && !requiresSelectionScan) else { return }
+        let owner = manager.generation
+        configuringAutomatic = true
+        defer { configuringAutomatic = false }
+        let previous = automaticTask, previousManual = task
+        automaticEpoch = UUID(); automaticRequested = false
+        previous?.cancel(); automaticTask = nil
+        automaticMonitor?.stop(); automaticMonitor = nil
+        if !enabled {
+            foregroundAutomaticEnabled = false
+            automaticSuppressedScopes.insert(scope.cacheNamespace)
+            previousManual?.cancel()
+        }
+        await previous?.value
+        if !enabled {
+            await previousManual?.value
+        }
+        do {
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            let journal = try await persistAutomaticSetting(enabled, manager: manager, owner: owner, scope: scope)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            apply(journal, scope: scope, restoreConfiguration: false)
+            if enabled {
+                automaticSuppressedScopes.remove(scope.cacheNamespace)
+                status = "已开启前台自动备份，使用最近保存的相簿与 iCloud 选项；失败、已尝试暂停及取消项仍需手动处理。"
+                configuringAutomatic = false
+                requestAutomaticWork()
+            } else {
+                status = "前台自动备份已关闭并保存；队列与已确认回执保留，需明确重新开启或手动继续。"
+            }
+        } catch {
+            guard manager.generation == owner else { return }
+            status = "自动备份开关未确认保存，当前自动任务已停止；请重新读取并明确设置。"
+        }
+    }
+
+    /// 明确停止关闭并持久保存自动规则；生命周期取消使用cancel而不更改用户开关。
+    func stopManually(using manager: LibraryManagementController) async {
+        cancel()
+        await setForegroundAutomaticEnabled(false, using: manager)
+    }
+
+    /// 关闭备份页仅停止页面发起的手动操作；已明确开启的自动周期由整个App前台生命周期持有。
+    func cancelPageWork() {
+        if !automaticRunning {
+            task?.cancel()
+        }
+    }
+
+    /// 合并Photos/扫描后的请求；默认关闭、离线、未授权或有当前账号草稿时不进入上传。
+    @discardableResult
+    private func requestAutomaticWork() -> Task<Void, Never>? {
+        guard foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
+              manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
+              !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic else { return nil }
+        automaticRequested = true
+        if let automaticTask {
+            return automaticTask
+        }
+        guard !running else { return nil }
+        return launchAutomaticWork(after: nil, manual: nil)
+    }
+
+    /// previous/manual为已取消的前台任务；先等其退役，避免旧defer或检查点覆盖新账号运行状态。
+    /// 返回实际任务；整个周期仍使用唯一PhotoBackupRunCoordinator，不拥有第二套队列/重试器。
+    private func launchAutomaticWork(after previous: Task<Void, Never>?, manual: Task<Void, Never>?) -> Task<Void, Never> {
+        let epoch = automaticEpoch
+        let operation = Task { [weak self] in
+            await previous?.value; await manual?.value
+            guard let self else { return }
+            // 退役等待不自动抛取消；旧epoch不得先消费新前台/账号周期写入的pending请求。
+            guard !Task.isCancelled, automaticEpoch == epoch else { return }
+            var ownsRun = false
+            defer {
+                if ownsRun {
+                    running = false; automaticRunning = false
+                }
+                if automaticEpoch == epoch {
+                    automaticTask = nil
+                }
+            }
+            while automaticRequested {
+                guard !Task.isCancelled, automaticEpoch == epoch else { return }
+                automaticRequested = false
+                guard let manager = automaticManager, let scope = automaticScope, automaticActive,
+                      manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
+                      !running, !manager.busy, !configuringAutomatic, !(requiresSelectionScan && configurationScope == scope) else { return }
+                let owner = manager.generation
+                let authorization = authorizationStatus()
+                guard authorization == .authorized || authorization == .limited else {
+                    status = "前台自动备份等待已有照片授权，不会主动弹出授权或修改 iCloud 选项。"
+                    return
+                }
+                do {
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    let saved = try await store.loadPhotoBackups(scope: scope)
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    // 首次读取期间用户可能已开始明确手动操作；自动周期不能在await后抢占其Coordinator或运行状态。
+                    guard !running, !manager.busy, !configuringAutomatic else { return }
+                    foregroundAutomaticEnabled = saved.foregroundAutomaticEnabled == true
+                    guard foregroundAutomaticEnabled else { return }
+                    if observeAutomaticPhotos, automaticMonitor == nil {
+                        automaticMonitor = LocalPhotoChangeMonitor { [weak self] in self?.automaticLibraryChanged() }
+                    }
+                    running = true; ownsRun = true
+                    let result = try await PhotoBackupRunCoordinator.perform(scope: scope) { [self] in
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        var journal = try await store.loadPhotoBackups(scope: scope)
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        guard journal.foregroundAutomaticEnabled == true else { throw CancellationError() }
+                        journal.recoverInterrupted()
+                        let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
+                        let scan = try selection.scan(albumScanner(selection.included.union(selection.excluded)))
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        try journal.applyAutomaticAlbumScan(scan)
+                        try await store.savePhotoBackups(journal, scope: scope)
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        apply(journal, scope: scope)
+                        automaticRunning = true
+                        total = journal.jobs.count { $0.stage == .queued }
+                        completed = 0; duplicates = 0; failed = 0
+                        guard let client = manager.client else { throw LibraryWriteError.unavailable }
+                        let cloud = journal.allowCloud
+                        let result = try await manager.perform(publishChange: false) { [self] _ in
+                            try await PhotoBackupWorker(store: store, exporter: exporter).run(
+                                scope: scope, userID: client.userID, allowCloud: cloud, client: client,
+                                // cleanup仍须在Task取消后保存安全暂停；正常Worker检查点先检查Task取消。
+                                validateContext: {
+                                    try Self.validate(manager, owner: owner, scope: scope)
+                                    guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
+                                },
+                                progress: { [self] _, value in completed = value.completed; duplicates = value.duplicates; failed = value.failed }
+                            )
+                        }
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        var current = try await store.loadPhotoBackups(scope: scope)
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                        if result.stopped || result.failed > 0 {
+                            try current.setForegroundAutomaticEnabled(false)
+                            try await store.savePhotoBackups(current, scope: scope)
+                            try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                            automaticSuppressedScopes.insert(scope.cacheNamespace)
+                            automaticMonitor?.stop(); automaticMonitor = nil; automaticRequested = false
+                        }
+                        apply(current, scope: scope)
+                        return result
+                    }
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    if result.completed > 0 {
+                        manager.publishChanges(ifGeneration: owner)
+                    }
+                    status = result.stopped || result.failed > 0
+                        ? "本轮有失败或未知结果，前台自动备份已关闭；请先手动检查，未自动重试。"
+                        : "前台自动备份已确认 \(result.completed) 项；等待新的照片库变更。"
+                    running = false; automaticRunning = false; ownsRun = false
+                } catch {
+                    guard automaticEpoch == epoch, manager.generation == owner else { return }
+                    if Task.isCancelled || error is CancellationError {
+                        return
+                    }
+                    automaticSuppressedScopes.insert(scope.cacheNamespace)
+                    foregroundAutomaticEnabled = false; automaticRequested = false
+                    automaticMonitor?.stop(); automaticMonitor = nil
+                    if let current = try? await persistAutomaticSetting(false, manager: manager, owner: owner, scope: scope) {
+                        apply(current, scope: scope, restoreConfiguration: false)
+                        status = "前台自动备份已关闭；相簿、权限或未确认结果需明确检查后再开启，未自动重试。"
+                    } else {
+                        status = "前台自动备份已停止，关闭开关未确认保存；恢复资料保留，请明确检查。"
+                    }
+                    return
+                }
+            }
+        }
+        automaticTask = operation
+        return operation
+    }
+
+    /// enabled只改变已有账号日志头；manager/owner/scope固定，整个保存仍等待同一Coordinator退役屏障。
+    private func persistAutomaticSetting(_ enabled: Bool, manager: LibraryManagementController, owner: UUID,
+                                         scope: MediaAccountScope) async throws -> PhotoBackupJournal
+    {
+        try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            var journal = try await store.loadPhotoBackups(scope: scope)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            try journal.setForegroundAutomaticEnabled(enabled)
+            try await store.savePhotoBackups(journal, scope: scope)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            return journal
+        }
+    }
+
+    /// epoch/active/权限限定自动周期；账号检查复用原实现，禁止在await后解释旧账号或后台结果。
+    private func validateAutomatic(_ manager: LibraryManagementController, owner: UUID, scope: MediaAccountScope,
+                                   epoch: UUID, authorization: PHAuthorizationStatus) throws
+    {
+        try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+        guard automaticEpoch == epoch, automaticActive, automaticScope == scope,
+              authorizationStatus() == authorization, !(requiresSelectionScan && configurationScope == scope)
+        else { throw CancellationError() }
     }
 }
