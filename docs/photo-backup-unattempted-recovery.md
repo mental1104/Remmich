@@ -17,9 +17,17 @@
 
 恢复使用已保存 `allowCloud`，不保存页面草稿，不默许下载 iCloud 原片。原单项明确重试仍重新导出当前源、计算实际完整 SHA1、请求官方查重并执行 fresh GET/必要配对核对；旧 UUID 或部分回执不充当成功。用户取消及未知结果没有自动重放路径。所有执行继续由唯一 `PhotoBackupRunCoordinator`、原 Worker、真实上传客户端和账号 SQLite 持有。
 
+## 冷启动停止门禁修复
+
+整合前只读审查发现，自动冷启动在等待旧 Coordinator 退役时已经 `running=true`，但尚未 `apply` 当前账号配置。原开关方法把 `configurationScope == scope` 同时作为开启和关闭门禁，导致此时可见的“停止并关闭”只取消任务，却直接返回而没有保存关闭。修复仅让启用保留已加载当前配置的条件；关闭固定当前 manager 的 scope/generation，沿用原取消、等待退役、冷读并保存 false 的路径，仍拒绝迟到账号结果。
+
+新增 1 个真实 Coordinator gate 场景：旧 operation 已进入 → 自动周期确实要求它取消/退役 → 验证尚未 apply 时运行状态 → 明确停止真正写入 `configuringAutomatic` 门 → 才释放旧 operation → 冷读 false 并再次激活验证零导出/HTTP。真实 Observation 与停止提前结束两种结果都解除等待；旧缺陷直接返回会得到 false，未用 sleep/yield 猜事件顺序。清理先释放 gate 再等待实际任务，保持所有原回执和 iCloud 同意。
+
+该修复基于458b5c6的独立本地分支；没有推送/CI/dev/生产或旧分支修改。NAS 格式/diff 与声明数检查通过；新增回归尚未 Swift 执行。
+
 ## 验证边界
 
-新增 `Explicit unattempted backup recovery` 测试组：6 个函数 / 7 个声明场景，整文件合计 23 个函数 / 27 个声明场景。包含领域摘要/队列保留，以及真实 Controller → Coordinator → Worker → URLSession/LibraryMutationClient → SQLite 的隔离序列：503 后关闭自动规则 → 新 SQLite/Controller 冷读 → 只继续未尝试尾项 → 用户明确单项重试才重新查重/fresh 回读旧失败项。另有权限/失效排除、真实导出 await 取消后恢复尾项、未保存草稿、await 中撤权后保留未知项。只替换系统源/字节和有限 HTTP 边界，未伪造成功行；取消门与失败清理不依赖 sleep。503 是合成 HTTP 不可用证据设计，不能称为真实设备物理断网验收。
+新增 `Explicit unattempted backup recovery` 测试组：6 个函数 / 7 个声明场景；加上独立冷启动停止回归，整文件合计 24 个函数 / 28 个声明场景。包含领域摘要/队列保留，以及真实 Controller → Coordinator → Worker → URLSession/LibraryMutationClient → SQLite 的隔离序列：503 后关闭自动规则 → 新 SQLite/Controller 冷读 → 只继续未尝试尾项 → 用户明确单项重试才重新查重/fresh 回读旧失败项。另有权限/失效排除、真实导出 await 取消后恢复尾项、未保存草稿、await 中撤权后保留未知项。只替换系统源/字节和有限 HTTP 边界，未伪造成功行；取消门与失败清理不依赖 sleep。503 是合成 HTTP 不可用证据设计，不能称为真实设备物理断网验收。
 
 | 关口 | 实际结果 | 完成比例 |
 | --- | --- | ---: |
