@@ -5,13 +5,22 @@ import Observation
 nonisolated protocol LocalMediaMatchingReading: Sendable {
     /// cloudIDs完整不截断；只接收完整只读metadata流，不能ACK/reset或发布半截候选。
     func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord]
-    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝。
+    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝；明确不可读抛LocalMediaCandidateError。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset
     /// queries最多64项，只查SHA1；noMatch绝不触发上传。
     func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup]
 }
 
 extension LibraryMutationClient: LocalMediaMatchingReading {}
+
+/// 明确相簿组织只读取当前已启用关联并重新核证；不调用原片checksum reader，不把结果写为备份完成。
+@MainActor protocol PhotoBackupAlbumMatchingReading: Sendable {
+    var revision: Int { get }
+    var albumOrganizationGeneration: UUID { get }
+    func albumOrganizationAssociations(localIDs: Set<String>, using manager: LibraryManagementController) async throws -> [LocalMediaAssociation]
+}
+
+extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
 /// 显式前台本机关联扫描；账号代际隔离、批量有界，不将进度/哈希查重写成备份成功。
 @MainActor @Observable final class LocalMediaMatchController {
@@ -85,6 +94,63 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
               let access, inventory.authorization == access, let id = UUID(uuidString: assetID),
               let association = associations[id], association.remoteRevision == revision else { return nil }
         return association
+    }
+
+    /// 只暴露不透明证明epoch；新扫描/关闭/权限或账号退役都撤销尚未完成的明确组织操作。
+    var albumOrganizationGeneration: UUID {
+        generation
+    }
+
+    /// localIDs只来自已保存包含减排除后的当前相簿源；只重核已有匹配，不发起新字节匹配或请求Photos授权。
+    /// metadata来源重新取当前完整metadata证据链；缺本机hash不等于缺组织依据，但旧UUID/旧revision单独不够。
+    func albumOrganizationAssociations(localIDs: Set<String>, using manager: LibraryManagementController) async throws -> [LocalMediaAssociation] {
+        guard self.manager === manager, let scope, manager.backupScope == scope, enabled,
+              let access, inventory.authorization == access, access == .full || access == .limited else { return [] }
+        let owner = manager.generation, run = generation, stamp = revision
+        let validateContext: @MainActor () throws -> Void = {
+            try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: access)
+            guard self.enabled, self.revision == stamp else { throw LocalMediaMetadataError.sourceChanged }
+        }
+        let remote: any LocalMediaMatchingReading
+        if let remoteOverride {
+            remote = remoteOverride
+        } else if let client = manager.client {
+            remote = client
+        } else {
+            throw LibraryWriteError.unavailable
+        }
+        let selected = associations.values.filter { localIDs.contains($0.localIdentity.localIdentifier) }
+        let ids = Array(Set(selected.map(\.localIdentity.localIdentifier))).sorted()
+        var snapshots: [String: LocalPhotoSnapshot] = [:]
+        for start in stride(from: 0, to: ids.count, by: 64) {
+            let batch = Array(ids[start ..< min(start + 64, ids.count)])
+            let values = try await metadata.snapshots(for: batch, validateContext: validateContext)
+            try validateContext(); try validateSnapshots(values, requested: batch)
+            for value in values {
+                snapshots[value.identity.localIdentifier] = value
+            }
+        }
+        var result: [LocalMediaAssociation] = []
+        for association in selected {
+            try validateContext()
+            guard let snapshot = snapshots[association.localIdentity.localIdentifier], snapshot.identity == association.localIdentity else { continue }
+            if association.source == .mobileMetadata {
+                guard let client = manager.client else { throw LibraryWriteError.unavailable }
+                // 已有精确UUID不需重扫全库stream；官方单资产GET提供当前mobile-app，仍逐字段与当前Photos metadata比较。
+                let current = try await client.albumSyncMetadata(association.remoteID)
+                try validateContext()
+                let candidateValue = LocalMediaRemoteCandidate(assetID: association.remoteID, metadata: current)
+                guard case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: association.localIdentity, snapshot: snapshot, candidates: [candidateValue]),
+                      candidate.assetID == association.remoteID else { continue }
+            }
+            guard let fresh = try await freshCandidate(association.remoteID, using: remote, validateContext: validateContext),
+                  fresh.updatedAt == association.remoteRevision,
+                  let verified = LocalMediaAssociation.verified(remote: fresh, requestedID: association.remoteID, ownerID: scope.userID,
+                                                                local: snapshot.identity, source: association.source, expectedChecksum: association.checksum) else { continue }
+            result.append(verified)
+        }
+        try validateContext()
+        return result
     }
 
     /// 明确停止当前前台扫描；只保留此前已经完成fresh验证的内存关联，不宣称扫描完成。
@@ -279,11 +345,12 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         if case let .resolved(cloudID) = snapshot.cloudIdentity,
                            case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: candidates[cloudID] ?? [])
                         {
-                            let fresh = try await remote.localMediaAsset(candidate.assetID.uuidString)
-                            try validateContext()
-                            if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata) {
+                            if let fresh = try await freshCandidate(candidate.assetID, using: remote, validateContext: validateContext),
+                               let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata)
+                            {
                                 accept(value); confirmedRemoteIDs.insert(value.remoteID); confirmed = true
                             } else {
+                                // 明确不可读只撤销此候选；独立本机字节仍可能找到另一个当前可读副本。
                                 removeAssociation(candidate.assetID)
                             }
                         }
@@ -308,9 +375,8 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         for item in hashes {
                             guard let lookup = byID[item.query.id] else { throw LocalMediaMetadataError.invalidMetadata }
                             if case let .existing(id) = lookup.outcome {
-                                let fresh = try await remote.localMediaAsset(id.uuidString)
-                                try validateContext()
-                                if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
+                                if let fresh = try await freshCandidate(id, using: remote, validateContext: validateContext),
+                                   let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
                                                                               source: .checksum, expectedChecksum: item.proof.digest.sha1Base64)
                                 {
                                     accept(value); confirmedRemoteIDs.insert(value.remoteID)
@@ -347,6 +413,25 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         }
         task = operation
         return operation
+    }
+
+    /// id来自本轮metadata/precheck；remote只读候选，validateContext在解释成功或错误前重验Task/账号/权限。
+    /// 仅窄typed不可读返回nil，由调用方撤销该ID并继续；其他HTTP、解码和网络错误原样抛出。
+    private func freshCandidate(_ id: UUID, using remote: any LocalMediaMatchingReading,
+                                validateContext: @MainActor () throws -> Void) async throws -> LocalMediaRemoteAsset?
+    {
+        try validateContext()
+        let fresh: LocalMediaRemoteAsset
+        do { fresh = try await remote.localMediaAsset(id.uuidString) }
+        catch {
+            try validateContext()
+            if case LocalMediaCandidateError.inaccessible = error {
+                return nil
+            }
+            throw error
+        }
+        try validateContext()
+        return fresh
     }
 
     /// run/manager/scope均绑定本次明确操作；expectedAccess开启后禁止在授权范围改变时继续发布旧清单。

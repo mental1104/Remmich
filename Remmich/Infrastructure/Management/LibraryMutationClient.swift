@@ -1,6 +1,14 @@
 import CryptoKit
 import Foundation
 
+/// 仅候选详情GET的精确服务端拒绝可产生此错误；不代表所有400或其他读取/写入失败都是未匹配。
+nonisolated enum LocalMediaCandidateError: Error, Sendable {
+    case inaccessible
+}
+
+/// 单项相簿成员的HTTP回执，尚非组织成功；放在传输边界以保留独立离线契约编译输入。
+nonisolated enum PhotoBackupAlbumMemberReceipt: Sendable { case added, duplicate, denied }
+
 /// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
     case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
@@ -35,6 +43,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let projectionType: String?
     let updatedAt: String?
     let checksum: String?
+    let isOffline: Bool?
 
     /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
@@ -53,10 +62,11 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 
     /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
-    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum/isOffline缺省nil兼容旧构造，存在时仍真实解码。
+    /// isOffline缺失保持未知，新的双原图完整确认不能把nil推断为在线。
     init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
          originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
-         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil, isOffline: Bool? = nil)
     {
         self.id = id
         self.ownerId = ownerId
@@ -70,13 +80,51 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
         self.projectionType = projectionType
         self.updatedAt = updatedAt
         self.checksum = checksum
+        self.isOffline = isOffline
     }
 }
 
+/// 相簿管理使用的最小身份投影；当前官方响应从albumUsers首个owner取得兼容ownerId，不推断其他成员的写权限。
 nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+
+    /// id/albumName/ownerId为已有调用方的显式快照构造；不增加网络请求或改变原管理权限判断。
+    init(id: String, albumName: String, ownerId: String) {
+        self.id = id; self.albumName = albumName; self.ownerId = ownerId
+    }
+
+    /// 保留原ownerId响应读取；该字段缺失/null时才按当前官方有序albumUsers核对首个owner。
+    /// decoder仅提供本次HTTP响应，不从登录用户、任意成员或界面缓存猜测所有者；不完整的新投影直接失败。
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        albumName = try values.decode(String.self, forKey: .albumName)
+        // 已有ownerId合同原样保留，包括旧响应中不同形状的albumUsers附加信息。
+        if let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId) {
+            ownerId = legacyOwner
+            return
+        }
+        let members = try values.decode([OwnerMember].self, forKey: .albumUsers)
+        guard let first = members.first, first.role == "owner", !first.user.id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .albumUsers, in: values,
+                                                   debugDescription: "Album users must begin with the owner.")
+        }
+        ownerId = first.user.id
+    }
+
+    /// 只读取实际管理投影字段；未知响应字段保持原Decodable兼容行为。
+    private enum CodingKeys: String, CodingKey { case id, albumName, ownerId, albumUsers }
+
+    /// 当前AlbumUserResponse的公开嵌套形状；保留原顺序，只用首项确认兼容所有者身份。
+    private nonisolated struct OwnerMember: Decodable, Sendable {
+        let user: OwnerUser
+        let role: String
+    }
+
+    /// 只需要当前公开用户的ID，不要求姓名、邮箱、头像等与所有权无关的字段。
+    private nonisolated struct OwnerUser: Decodable, Sendable { let id: String }
 }
 
 nonisolated struct AssetEditList: Codable, Sendable {
@@ -127,11 +175,22 @@ final nonisolated class LibraryMutationClient: Sendable {
     }
 
     /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
-    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    /// 只读取资产信息；仅HTTP400且精确JSON拒绝正文抛LocalMediaCandidateError，其余错误保留原语义。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
         let expected = try validID(id)
-        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
-        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        let (data, response) = try await session.data(for: request("GET", ["assets", expected]))
+        try Task.checkCancellation()
+        // 当前服务的权限前不存在/不可读和权限后消失均为400；只在此候选GET识别拥有者合同，不放宽通用send。
+        if let response = response as? HTTPURLResponse, response.statusCode == 400,
+           response.mimeType?.lowercased() == "application/json",
+           let body = try? JSONDecoder().decode([String: String].self, from: data), body.count == 1,
+           let message = body["message"], ["Not found or no asset.read access", "Asset not found"].contains(message)
+        {
+            throw LocalMediaCandidateError.inaccessible
+        }
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: bytes)
         guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
         return asset
     }
@@ -409,6 +468,71 @@ final nonisolated class LibraryMutationClient: Sendable {
     func albums(containing assetID: String? = nil) async throws -> [ManagedAlbum] {
         let query = try assetID.map { try [URLQueryItem(name: "assetId", value: validID($0))] } ?? []
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
+    }
+
+    /// 组织目标仅当前自有相簿；名称不唯一，调用方必须明确保存UUID，不选择同名第一个。
+    func albumSyncTargets() async throws -> [ManagedAlbum] {
+        guard let owner = UUID(uuidString: userID) else { throw LibraryWriteError.invalidID }
+        let data = try await send("GET", ["albums"], expectedStatus: 200)
+        let values = try JSONDecoder().decode([ManagedAlbum].self, from: data)
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.filter { UUID(uuidString: $0.ownerId) == owner }
+    }
+
+    /// 开始/恢复与成员写入后均fresh验证同一目标及owner；编辑者目标留后续，不以缓存角色推测许可。
+    func albumSyncTarget(_ id: UUID) async throws -> ManagedAlbum {
+        let data = try await send("GET", ["albums", id.uuidString], expectedStatus: 200)
+        let value = try JSONDecoder().decode(ManagedAlbum.self, from: data)
+        guard UUID(uuidString: value.id) == id, let owner = UUID(uuidString: value.ownerId), owner == UUID(uuidString: userID) else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 只读当前资产metadata，不请求原片/预览；锁定资产不可因存在本机关联而被分享进相簿。
+    func albumSyncAsset(_ id: UUID) async throws -> LocalMediaRemoteAsset {
+        let data = try await send("GET", ["assets", id.uuidString], expectedStatus: 200)
+        let managed = try JSONDecoder().decode(ManagedAsset.self, from: data)
+        guard managed.visibility != "locked" else { throw LibraryWriteError.http(403) }
+        return try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+    }
+
+    /// 精确已匹配UUID的当前mobile-app值；只GET既有官方metadata端点，不走全量stream/ACK，也不读取媒体。
+    func albumSyncMetadata(_ id: UUID) async throws -> LocalMediaMobileMetadata {
+        // 读取完整官方回执身份与版本，缺字段不能当成有效旧metadata。
+        struct Receipt: Decodable { let key: String; let value: LocalMediaMobileMetadata; let updatedAt: String }
+        let data = try await send("GET", ["assets", id.uuidString, "metadata", "mobile-app"], expectedStatus: 200)
+        let receipt = try JSONDecoder().decode(Receipt.self, from: data)
+        let updated = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(receipt.updatedAt))
+            ?? (try? Date.ISO8601FormatStyle().parse(receipt.updatedAt))
+        guard receipt.key == "mobile-app", updated?.timeIntervalSince1970.isFinite == true else { throw LibraryWriteError.malformedResponse }
+        return receipt.value
+    }
+
+    /// 成员查询只传assetId；该参数会使服务端忽略id等其他筛选，必须在返回列表中显式比较目标UUID。
+    func albumSyncContains(_ assetID: UUID, target: UUID) async throws -> Bool {
+        let data = try await send("GET", ["albums"], query: [.init(name: "assetId", value: assetID.uuidString)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([ManagedAlbum].self, from: data)
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.contains { UUID(uuidString: $0.id) == target }
+    }
+
+    /// 一次只写明确主体UUID；success/duplicate都只是待fresh核查的回执，no_permission单项失败不算完成。
+    func albumSyncAdd(_ assetID: UUID, target: UUID) async throws -> PhotoBackupAlbumMemberReceipt {
+        // 仅使用官方ids字段；一项一回执，避免部分结果在数组位置上错配。
+        struct Body: Encodable { let ids: [UUID] }
+        // id必须精确等于请求主体；成功与错误字段冲突时拒绝确认。
+        struct Receipt: Decodable { let id: UUID; let success: Bool; let error: String? }
+        let data = try await send("PUT", ["albums", target.uuidString, "assets"], body: JSONEncoder().encode(Body(ids: [assetID])), expectedStatus: 200)
+        let values = try JSONDecoder().decode([Receipt].self, from: data)
+        guard values.count == 1, let value = values.first, value.id == assetID else { throw LibraryWriteError.malformedResponse }
+        if value.success {
+            guard value.error == nil else { throw LibraryWriteError.malformedResponse }
+            return .added
+        }
+        switch value.error {
+        case "duplicate": return .duplicate
+        case "no_permission": return .denied
+        default: throw LibraryWriteError.malformedResponse
+        }
     }
 
     /// id为当前查看照片；精确200、匹配的assetId及可完整保留的编辑文档才允许进入编辑器。

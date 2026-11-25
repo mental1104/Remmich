@@ -352,11 +352,15 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
-        .onChange(of: media.management.revision) { _, _ in sessionController?.libraryIndex.syncNow() }
+        .onChange(of: media.management.revision) { _, _ in
+            sessionController?.libraryIndex.syncNow()
+            media.photoBackups.automaticLibraryChanged()
+        }
         .onAppear { media.logShellPresented() }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }
         .onChange(of: exportScenePhase, initial: true) { _, phase in
             media.exports.sceneActivityChanged(active: phase == .active)
+            media.photoBackups.automaticConditionsChanged(using: media.management, scope: media.scope, active: phase == .active)
             if phase == .active {
                 // 恢复当前账号本机关联；只检查已有权限，重复前台事件复用当前扫描，不主动弹授权框。
                 media.localMediaMatches.restoreAndRefresh(using: media.management, scope: media.scope)
