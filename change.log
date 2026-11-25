@@ -1,3 +1,9 @@
+## 2026-11-25: Align local matching limits with verified native Live Photo selection
+
+- Source: codex/feature-local-live-media from51e5d10; upstream remains672f02e, no sync. The settings limit text still described the previous still-only candidate. Explain that native motion requires a confirmed pair/current version and otherwise uses Immich, matching the integrated Viewer/helper behavior.
+- User-visible wording only; no matching, playback, API, persistence, workflow or production behavior change. Scoped SwiftFormat and whitespace checks pass on NAS; no new mirrored text test. The current PR8 CI still tests51e5d10, and this follow-up remains local until that chain ends. Native reconstruction, App/UI and device acceptance remain pending.
+- Revert this text/log entry independently; no media or recovery data changes.
+
 ## 2026-11-25: Integrate native local Live Photo and retain the compiled candidate lineage
 
 - Source: codex/feature-local-live-media with the original a7138e0 merged normally; upstream remains672f02e, no upstream sync. Combine strict still/motion metadata and byte proof, network-disabled current native loading, final pair rereads, Viewer/native/audio ownership, Live still SHA1, search-host repairs and one bounded CI-tablet startup recovery. No server/API/schema/official-mobile/workflow/production or original-media change.

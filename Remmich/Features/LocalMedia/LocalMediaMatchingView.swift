@@ -35,7 +35,7 @@ struct LocalMediaMatchingView: View {
             }
             Section("范围与限制") {
                 Text("首次启用需要照片访问权限。有限权限只扫描已授权范围；启用配置与确认关联按服务器和账号隔离保存。以后启动恢复并自动刷新，照片库变化会使旧关联失效。")
-                Text("仅本机可用资源参与读取。无法确认、仅在iCloud或服务端另有编辑时使用Immich。Live Photo本轮仅支持本机静态帧，动态效果仍走现有路径。关联不代表原片已备份，不能用作清理设备空间的凭据。")
+                Text("仅本机可用资源参与读取。无法确认、仅在iCloud或服务端另有编辑时使用Immich。Live Photo的配对和当前版本均确认后优先本机播放，否则使用Immich。关联不代表原片已备份，不能用作清理设备空间的凭据。")
             }.font(.footnote).foregroundStyle(.secondary)
         }
         .navigationTitle("本机照片匹配")
