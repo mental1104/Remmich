@@ -1,3 +1,10 @@
+## 2026-11-25: Decode current album ownership for directory reads and group receipts
+
+- Source: codex/fix-directory-album-ownership-decoding fromdf816a5; upstream remains672f02e, no sync. ManagedDirectoryAlbum still required ownerId although current main/fork AlbumResponse exposes ordered albumUsers instead. Reuse the reviewed ManagedAlbum decoder for identity, preserving legacy ownerId precedence and requiring the first member to be an owner when that field is absent/null; never choose a later owner or infer full member permissions.
+- Keep directory grouping normalization, missing/null read compatibility, exact PATCH200/ID/group-field receipt checks, transport, server authorization and all existing write methods unchanged. Explicit construction retains its optional group default. The manual offline compiler list already includes both model files, so no new source input or script change is needed.
+- Add3 functions/24 declared scenarios covering actual client GET-directory/PATCH-group/clear with current and legacy responses, rejected owner projections, and missing group fields that permit reads but cannot confirm writes. NAS2-file SwiftFormat/lint, shell syntax and diff checks pass; an independent Node audit parses12 actual Swift JSON fragments and verifies unchanged transport/policy/compiler inputs. Swift compilation/execution, real-server HTTP and device acceptance remain UNVERIFIED.
+- No push/CI/dev merge/parentgitlink/server/API/SDK/production or persistent-data change. Revert only this DTO/tests/docs patch to restore the previous directory decoder; no data migration or recovery rollback is needed. See docs/album-ownership-response-compatibility.md.
+
 ## 2026-11-25: Decode current album ownership without requiring a removed response field
 
 - Source: codex/fix-album-user-ownership-decoding fromc902a8f; upstream remains672f02e, no sync. Current main/v3.4.2 AlbumResponse/mapAlbum exposes ordered albumUsers with nested user+role and no ownerId; the direct management decoder still required ownerId. List/create/cover response decoding therefore needs this client projection adaptation.

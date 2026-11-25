@@ -1,11 +1,27 @@
 import Foundation
 
-/// 目录管理读取的真实相簿属性；分组名缺失或null均代表未分组，官方相簿解码模型不受影响。
+/// 目录管理的相簿投影；身份沿用ManagedAlbum的官方首owner兼容规则，不扩大目录写入权限。
 nonisolated struct ManagedDirectoryAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
     let customGroupName: String?
+
+    /// id/albumName/ownerId为既有显式身份快照，customGroupName默认nil表示未分组；保留原调用方构造。
+    init(id: String, albumName: String, ownerId: String, customGroupName: String? = nil) {
+        self.id = id; self.albumName = albumName; self.ownerId = ownerId; self.customGroupName = customGroupName
+    }
+
+    /// decoder为同一HTTP相簿响应；复用已验证的旧ownerId优先/首albumUsers owner回退，畸形身份仍抛解码错误。
+    init(from decoder: any Decoder) throws {
+        let identity = try ManagedAlbum(from: decoder)
+        id = identity.id; albumName = identity.albumName; ownerId = identity.ownerId
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        customGroupName = try values.decodeIfPresent(String.self, forKey: .customGroupName)
+    }
+
+    /// 身份字段由ManagedAlbum读取；目录字段保持缺失/null兼容，不用分组信息推断所有者。
+    private enum CodingKeys: String, CodingKey { case customGroupName }
 
     /// 分组按服务端trim规则归一化，空串是可分配大组的“未分组”节点。
     var groupName: String {
