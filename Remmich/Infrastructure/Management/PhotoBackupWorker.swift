@@ -228,8 +228,16 @@ nonisolated struct PhotoBackupRunResult: Sendable {
         if let error = error as? PhotoBackupExportError {
             return error.reason
         }
-        if error is URLError {
-            return .network
+        if let error = error as? URLError {
+            // 只有短暂连接失败可进入独立同意的网络重核；超时也可能已提交，仍须完整查重，绝不直接重POST。
+            switch error.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet:
+                return .network
+            case .userAuthenticationRequired, .userCancelledAuthentication, .clientCertificateRejected, .clientCertificateRequired:
+                return .permission
+            default:
+                return .unconfirmedResponse
+            }
         }
         if let error = error as? LibraryWriteError {
             switch error {

@@ -55,6 +55,7 @@ import Photos
     private(set) var jobs: [PhotoBackupJob] = []
     private(set) var status = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
     private(set) var foregroundAutomaticEnabled = false
+    private(set) var foregroundNetworkRecoveryEnabled = false
     private(set) var backgroundAutomaticEnabled = false
     private(set) var backgroundLastResult: Bool?
     private(set) var automaticRunning = false
@@ -83,6 +84,10 @@ import Photos
     @ObservationIgnored private var automaticActive = false
     @ObservationIgnored private var automaticEpoch = UUID()
     @ObservationIgnored private var automaticRequested = false
+    @ObservationIgnored private var automaticNetworkRecoveryRequested = false
+    @ObservationIgnored private var automaticWaitingForNetwork = false
+    /// 仅记录当前有效上下文已经消费的真实路由事件；同token不能再次启动失败重核。
+    @ObservationIgnored private(set) var lastValidatedNetworkRecoveryEvent: UUID?
     @ObservationIgnored private var automaticMonitor: LocalPhotoChangeMonitor?
     @ObservationIgnored private let authorizationStatus: @MainActor () -> PHAuthorizationStatus
     @ObservationIgnored private let observeAutomaticPhotos: Bool
@@ -462,6 +467,7 @@ import Photos
         guard configurationScope != nil, !applyingConfiguration else { return }
         requiresSelectionScan = true
         automaticRequested = false
+        automaticNetworkRecoveryRequested = false
         automaticTask?.cancel()
     }
 
@@ -477,6 +483,7 @@ import Photos
             applyingConfiguration = false
         }
         foregroundAutomaticEnabled = journal.foregroundAutomaticEnabled == true
+        foregroundNetworkRecoveryEnabled = journal.foregroundNetworkRecoveryEnabled == true
         backgroundAutomaticEnabled = journal.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
         configurationScope = scope
         jobs = journal.jobs
@@ -507,6 +514,8 @@ extension PhotoBackupController {
         }
         let previous = automaticTask
         let previousManual = task
+        let retainedNetworkEvent = nextActive && automaticManager === manager && automaticManagerGeneration == manager.generation
+            && automaticScope == scope && automaticNetworkRecoveryRequested
         previous?.cancel()
         previousManual?.cancel()
         automaticMonitor?.stop(); automaticMonitor = nil
@@ -514,9 +523,13 @@ extension PhotoBackupController {
         automaticManager = manager; automaticManagerGeneration = manager.generation
         if automaticScope != scope {
             foregroundAutomaticEnabled = false
+            foregroundNetworkRecoveryEnabled = false
+            automaticWaitingForNetwork = false
+            lastValidatedNetworkRecoveryEvent = nil
             backgroundAutomaticEnabled = false
             backgroundLastResult = nil
         }
+        automaticNetworkRecoveryRequested = retainedNetworkEvent
         automaticScope = scope; automaticActive = nextActive; automaticRequested = nextActive
         automaticTask = nil
         return launchAutomaticWork(after: previous, manual: previousManual)
@@ -526,6 +539,62 @@ extension PhotoBackupController {
     @discardableResult
     func automaticLibraryChanged() -> Task<Void, Never>? {
         requestAutomaticWork()
+    }
+
+    /// eventID来自原NWPathMonitor变化后真实验证的当前路由；不创建网络观察器，也不把同endpoint保留误作无恢复。
+    /// 只有当前前台/账号接受事件，SQL保存同意仍在原周期内重新核对；同token合并，默认不恢复任何失败。
+    @discardableResult
+    func networkRouteValidated(using manager: LibraryManagementController, scope: MediaAccountScope?, eventID: UUID) -> Task<Void, Never>? {
+        guard automaticManager === manager, automaticManagerGeneration == manager.generation,
+              let scope, automaticScope == scope, manager.backupScope == scope,
+              !automaticSuppressedScopes.contains(scope.cacheNamespace), !requiresSelectionScan, !configuringAutomatic else { return nil }
+        guard lastValidatedNetworkRecoveryEvent != eventID else { return automaticTask }
+        lastValidatedNetworkRecoveryEvent = eventID
+        automaticNetworkRecoveryRequested = true; automaticWaitingForNetwork = false; automaticRequested = true
+        // App已在前台而scene尚未active时只暂存本代际事件；相同上下文转active才由原生命周期启动。
+        guard automaticActive else { return nil }
+        if let automaticTask {
+            return automaticTask
+        }
+        guard !running, !manager.busy else { return nil }
+        return launchAutomaticWork(after: nil, manual: nil)
+    }
+
+    /// enabled为独立的失败重核同意，默认关闭；只保存已有规则，绝不借开关重排失败或扩大iCloud选择。
+    /// 关闭先取消并等待旧周期；保存后仅恢复原安全新项扫描，失败仍须新验证网络token才能进入Worker。
+    func setForegroundNetworkRecoveryEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        guard !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope,
+              !enabled || (foregroundAutomaticEnabled && !running && !manager.busy && !requiresSelectionScan) else { return }
+        let owner = manager.generation
+        configuringAutomatic = true
+        defer { configuringAutomatic = false }
+        let previous = automaticTask
+        automaticEpoch = UUID(); automaticRequested = false; automaticNetworkRecoveryRequested = false
+        previous?.cancel(); automaticTask = nil
+        await previous?.value
+        do {
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                var journal = try await store.loadPhotoBackups(scope: scope)
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                try journal.setForegroundNetworkRecoveryEnabled(enabled)
+                try await store.savePhotoBackups(journal, scope: scope)
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                return journal
+            }
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            apply(journal, scope: scope, restoreConfiguration: false)
+            status = enabled ? "已同意网络恢复后核查连接失败项；只在新路由验证后重新查重，不立即重试。" : "网络恢复重核已关闭；失败项仍需手动继续。"
+            if !enabled {
+                automaticWaitingForNetwork = false
+            }
+            configuringAutomatic = false
+            requestAutomaticWork()
+        } catch {
+            guard manager.generation == owner else { return }
+            status = "网络恢复选项未确认保存；请重新读取并明确设置，未恢复失败项。"
+        }
     }
 
     /// enabled为当前账号的独立系统后台同意；启用只使用已保存选择，关闭先取消/等待真实后台任务。
@@ -576,6 +645,8 @@ extension PhotoBackupController {
         defer { configuringAutomatic = false }
         let previous = automaticTask, previousManual = task
         automaticEpoch = UUID(); automaticRequested = false
+        automaticNetworkRecoveryRequested = false
+        automaticWaitingForNetwork = false
         previous?.cancel(); automaticTask = nil
         automaticMonitor?.stop(); automaticMonitor = nil
         if !enabled {
@@ -639,7 +710,8 @@ extension PhotoBackupController {
     private func requestAutomaticWork() -> Task<Void, Never>? {
         guard foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
               manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
-              !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic else { return nil }
+              !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic,
+              !automaticWaitingForNetwork else { return nil }
         automaticRequested = true
         if let automaticTask {
             return automaticTask
@@ -668,10 +740,16 @@ extension PhotoBackupController {
             }
             while automaticRequested {
                 guard !Task.isCancelled, automaticEpoch == epoch else { return }
+                // inactive退休任务不可消费刚由App前台路由暂存、待同一scene恢复的网络事件。
+                guard automaticActive else { return }
                 automaticRequested = false
+                let networkRecovery = automaticNetworkRecoveryRequested
+                let consumedNetworkEvent = networkRecovery ? lastValidatedNetworkRecoveryEvent : nil
+                automaticNetworkRecoveryRequested = false
                 guard let manager = automaticManager, let scope = automaticScope, automaticActive,
                       manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
-                      !running, !manager.busy, !configuringAutomatic, !(requiresSelectionScan && configurationScope == scope) else { return }
+                      !running, !manager.busy, !configuringAutomatic, !(requiresSelectionScan && configurationScope == scope),
+                      !automaticWaitingForNetwork || networkRecovery else { return }
                 let owner = manager.generation
                 let authorization = authorizationStatus()
                 guard authorization == .authorized || authorization == .limited else {
@@ -685,6 +763,7 @@ extension PhotoBackupController {
                     // 首次读取期间用户可能已开始明确手动操作；自动周期不能在await后抢占其Coordinator或运行状态。
                     guard !running, !manager.busy, !configuringAutomatic else { return }
                     foregroundAutomaticEnabled = saved.foregroundAutomaticEnabled == true
+                    foregroundNetworkRecoveryEnabled = saved.foregroundNetworkRecoveryEnabled == true
                     backgroundAutomaticEnabled = saved.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
                     guard foregroundAutomaticEnabled else { return }
                     if observeAutomaticPhotos, automaticMonitor == nil {
@@ -701,6 +780,9 @@ extension PhotoBackupController {
                         let scan = try selection.scan(albumScanner(selection.included.union(selection.excluded)))
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                         try journal.applyAutomaticAlbumScan(scan)
+                        if networkRecovery, journal.foregroundNetworkRecoveryEnabled == true {
+                            try journal.resumeNetworkFailures(scan)
+                        }
                         try await store.savePhotoBackups(journal, scope: scope)
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                         apply(journal, scope: scope)
@@ -709,6 +791,7 @@ extension PhotoBackupController {
                         completed = 0; duplicates = 0; failed = 0
                         guard let client = manager.client else { throw LibraryWriteError.unavailable }
                         let cloud = journal.allowCloud
+                        let attempted = Set(journal.jobs.filter { $0.stage == .queued }.map(\.id))
                         let result = try await manager.perform(publishChange: false) { [self] _ in
                             try await PhotoBackupWorker(store: store, exporter: exporter).run(
                                 scope: scope, userID: client.userID, allowCloud: cloud, client: client,
@@ -724,11 +807,23 @@ extension PhotoBackupController {
                         var current = try await store.loadPhotoBackups(scope: scope)
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                         if result.stopped || result.failed > 0 {
-                            try current.setForegroundAutomaticEnabled(false)
-                            try await store.savePhotoBackups(current, scope: scope)
-                            try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
-                            automaticSuppressedScopes.insert(scope.cacheNamespace)
-                            automaticMonitor?.stop(); automaticMonitor = nil; automaticRequested = false
+                            let failures = current.jobs.filter { attempted.contains($0.id) && $0.stage == .failed }
+                            if current.foregroundNetworkRecoveryEnabled == true, !failures.isEmpty,
+                               failures.allSatisfy({ $0.failure == .network })
+                            {
+                                // 保留明确同意，但本轮停止；Photos/管理通知不能形成网络重试循环。
+                                let newerEvent = automaticNetworkRecoveryRequested && lastValidatedNetworkRecoveryEvent != consumedNetworkEvent
+                                automaticWaitingForNetwork = !newerEvent; automaticRequested = newerEvent
+                                if !newerEvent {
+                                    automaticNetworkRecoveryRequested = false
+                                }
+                            } else {
+                                try current.setForegroundAutomaticEnabled(false)
+                                try await store.savePhotoBackups(current, scope: scope)
+                                try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                                automaticSuppressedScopes.insert(scope.cacheNamespace)
+                                automaticMonitor?.stop(); automaticMonitor = nil; automaticRequested = false
+                            }
                         }
                         apply(current, scope: scope)
                         return result
@@ -737,9 +832,13 @@ extension PhotoBackupController {
                     if result.completed > 0 {
                         manager.publishChanges(ifGeneration: owner)
                     }
-                    status = result.stopped || result.failed > 0
-                        ? "本轮有失败或未知结果，前台自动备份已关闭；请先手动检查，未自动重试。"
-                        : "前台自动备份已确认 \(result.completed) 项；等待新的照片库变更。"
+                    if automaticWaitingForNetwork {
+                        status = "连接失败，等待新的网络路由验证后再核查；未立即重发上传。"
+                    } else if result.stopped || result.failed > 0 {
+                        status = foregroundAutomaticEnabled ? "连接恢复，正在核对待处理照片。" : "本轮有失败或未知结果，前台自动备份已关闭；请先手动检查，未自动重试。"
+                    } else {
+                        status = "前台自动备份已确认 \(result.completed) 项；等待新的照片库变更。"
+                    }
                     running = false; automaticRunning = false; ownsRun = false
                 } catch {
                     guard automaticEpoch == epoch, manager.generation == owner else { return }

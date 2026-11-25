@@ -67,6 +67,8 @@ final class AppSessionController {
     private var hasReceivedNetworkPath = false
     private var lastNetworkPathSignature: NetworkPathSignature?
     private var validatedNetworkPathSignature: NetworkPathSignature?
+    private var backupNetworkPathEvent: UUID?
+    private var backupNetworkPathEventScope: MediaAccountScope?
     private var isRestoringSession = false
     private var routeGeneration = 0
     private var pendingPathChangeTask: Task<Void, Never>?
@@ -510,6 +512,8 @@ final class AppSessionController {
         routeStatus = .waitingForNetwork
         validatedNetworkPathSignature = nil
         connectionProfile = .init()
+        backupNetworkPathEvent = nil
+        backupNetworkPathEventScope = nil
         libraryIndex.suspend()
         locations.reset()
         media.clearAll()
@@ -674,13 +678,23 @@ final class AppSessionController {
     }
 
     private func reevaluateRoute(trigger: RouteEvaluationTrigger, startIndex: Bool = true) async {
-        guard !isPreparingAccountSelection, automaticSyncAllowed, !Task.isCancelled, case .signedIn = state else { return }
+        guard !isPreparingAccountSelection, automaticSyncAllowed, !Task.isCancelled, case let .signedIn(session) = state else { return }
         let pathSignature = lastNetworkPathSignature
+        let backupEvent = backupNetworkPathEvent
         await routeEvaluationGate.submit { [weak self] in
             await self?.performRouteEvaluation(trigger: trigger, startIndex: startIndex)
         }
-        if automaticSyncAllowed, !Task.isCancelled, routeStatus == .connected, pathSignature == lastNetworkPathSignature {
+        if automaticSyncAllowed, !Task.isCancelled, routeStatus == .connected, pathSignature == lastNetworkPathSignature,
+           case let .signedIn(current) = state, current == session
+        {
             validatedNetworkPathSignature = pathSignature
+            // 原路径事件在前台真实验证后只交付同一token；保留同endpoint也必须通知，后台变化等前台重新验证才交付。
+            if isAppInForeground, pathSignature?.status == "satisfied", let backupEvent, backupEvent == backupNetworkPathEvent,
+               backupNetworkPathEventScope == MediaAccountScope(session: session),
+               let route = activeRoute, media.management.client?.apiURL == route.endpoint
+            {
+                media.photoBackups.networkRouteValidated(using: media.management, scope: media.scope, eventID: backupEvent)
+            }
         }
     }
 
@@ -774,8 +788,9 @@ final class AppSessionController {
         pathMonitor.start(queue: DispatchQueue(label: "Remmich.NetworkPath"))
     }
 
-    func handleNetworkPathChange(usesWiFi: Bool) async {
-        await handleNetworkPathChange(.test(usesWiFi: usesWiFi))
+    /// usesWiFi/isSatisfied只提供现有路径处理器的合成输入；默认保持原测试调用，生产始终由同一NWPathMonitor提供真实路径。
+    func handleNetworkPathChange(usesWiFi: Bool, isSatisfied: Bool = true) async {
+        await handleNetworkPathChange(.test(usesWiFi: usesWiFi, isSatisfied: isSatisfied))
     }
 
     private func handleNetworkPathChange(_ signature: NetworkPathSignature) async {
@@ -794,6 +809,13 @@ final class AppSessionController {
                 validatedNetworkPathSignature = signature
             }
             return
+        }
+        // 已连接/恢复期首次噪声已在上方过滤；其余路径变化或未解析路由唤醒沿原gate验证，不创建第二监视器。
+        backupNetworkPathEvent = UUID()
+        if case let .signedIn(session) = state {
+            backupNetworkPathEventScope = MediaAccountScope(session: session)
+        } else {
+            backupNetworkPathEventScope = nil
         }
         // An interface actually transitioning (Wi-Fi associating, a VPN/proxy tunnel
         // re-establishing, link-quality assessment) fires a burst of raw path callbacks, not
@@ -1273,9 +1295,10 @@ private nonisolated struct NetworkPathSignature: Equatable, Sendable {
         supportsIPv6 = path.supportsIPv6
     }
 
-    static func test(usesWiFi: Bool) -> NetworkPathSignature {
+    /// usesWiFi为合成接口，isSatisfied为连通性快照；只替代NWPath值，不替代服务端真实route验证。
+    static func test(usesWiFi: Bool, isSatisfied: Bool = true) -> NetworkPathSignature {
         NetworkPathSignature(
-            status: "satisfied",
+            status: isSatisfied ? "satisfied" : "unsatisfied",
             interfaces: [usesWiFi ? "wifi:test" : "cellular:test"],
             gateways: [],
             isExpensive: !usesWiFi,
