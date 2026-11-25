@@ -87,7 +87,7 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                         guard let primaryID = UUID(uuidString: primary.id), ["created", "duplicate"].contains(primary.status) else {
                             throw LibraryWriteError.malformedResponse
                         }
-                        try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate")
+                        try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate", checksum: primary.checksum)
                         try await checkpoint(job, scope: scope, validateContext: validateContext)
                         // created与duplicate都回读真实主体；部分Live Photo回执永远不能替代最终配对核对。
                         let confirmed = try await client.asset(primaryID.uuidString)

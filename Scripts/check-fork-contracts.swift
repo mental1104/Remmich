@@ -217,6 +217,7 @@ struct ForkContractChecks {
             do {
                 let uploaded = try await client.upload(file: file, filename: "abc.jpg", created: .now, modified: .now, favorite: false)
                 precondition(!trashed && uploaded.status == "duplicate" && uploaded.id == assetID)
+                precondition(uploaded.checksum == "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
             } catch LibraryWriteError.trashedDuplicate { precondition(trashed) }
         }
         print("PASS: streaming SHA1, duplicate skip and trashed-duplicate rejection")
@@ -233,6 +234,7 @@ struct ForkContractChecks {
         }
         let created = try await client.upload(file: file, filename: "unsafe\"\r\nname.jpg", created: .now, modified: .now, favorite: true)
         precondition(created.status == "created")
+        precondition(created.checksum == "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
         print("PASS: accepted original streams through the authenticated multipart upload route")
 
         ContractProtocol.install { request in

@@ -671,13 +671,23 @@ final nonisolated class LibraryMutationClient: Sendable {
         else { throw LibraryWriteError.malformedResponse }
     }
 
-    struct UploadResult: Decodable, Sendable { let id: String; let status: String }
+    /// 上传结果携带本次实际字节摘要；wire只信id/status，checksum由同一次流式计算附加，不采信服务器同名字段。
+    struct UploadResult: Decodable, Sendable {
+        let id: String
+        let status: String
+        let checksum: String?
+        /// checksum为本次本机SHA1的canonical Base64；默认nil兼容旧构造，不构造已存在的字节证明。
+        init(id: String, status: String, checksum: String? = nil) {
+            self.id = id; self.status = status; self.checksum = checksum
+        }
+    }
 
     /// 流式计算校验和、先查重、再从磁盘上传；绝不把大视频整体读入内存。
     @concurrent func upload(file: URL, filename: String, created: Date, modified: Date,
                             favorite: Bool, hidden: Bool = false, livePhotoVideoID: String? = nil) async throws -> UploadResult
     {
-        let checksum = try Self.checksum(file)
+        let digests = try Self.checksumValues(file)
+        let checksum = digests.hex
         struct Check: Encodable { let assets: [Item]; struct Item: Encodable { let id: String; let checksum: String } }
         struct Checks: Decodable {
             let results: [Item]
@@ -690,7 +700,7 @@ final nonisolated class LibraryMutationClient: Sendable {
         if result.action == "reject" {
             guard result.isTrashed != true else { throw LibraryWriteError.trashedDuplicate }
             guard let id = result.assetId else { throw LibraryWriteError.malformedResponse }
-            return try UploadResult(id: validID(id), status: "duplicate")
+            return try UploadResult(id: validID(id), status: "duplicate", checksum: digests.base64)
         }
         guard result.action == "accept" else { throw LibraryWriteError.malformedResponse }
         let boundary = "Remmich-\(UUID().uuidString)"
@@ -732,10 +742,16 @@ final nonisolated class LibraryMutationClient: Sendable {
         let uploaded = try JSONDecoder().decode(UploadResult.self, from: checked(data, response))
         _ = try validID(uploaded.id)
         guard ["created", "duplicate"].contains(uploaded.status) else { throw LibraryWriteError.malformedResponse }
-        return uploaded
+        return .init(id: uploaded.id, status: uploaded.status, checksum: digests.base64)
     }
 
+    /// file为现有导出原图；返回原有小写hex SHA1，保持独立契约和旧调用不变。
     static func checksum(_ file: URL) throws -> String {
+        try checksumValues(file).hex
+    }
+
+    /// file为调用方现有导出文件；只流式读一次，以同一SHA1同时输出原查重hex和组织证明Base64。
+    private static func checksumValues(_ file: URL) throws -> (hex: String, base64: String) {
         var hash = Insecure.SHA1()
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
@@ -743,6 +759,7 @@ final nonisolated class LibraryMutationClient: Sendable {
             try Task.checkCancellation()
             hash.update(data: chunk)
         }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let digest = hash.finalize()
+        return (digest.map { String(format: "%02x", $0) }.joined(), Data(digest).base64EncodedString())
     }
 }
