@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Remmich uses photo access to back up the albums you select, preserve original photos, videos and Live Photos, and save or browse downloaded media. Uploads start only when you choose to back up.</string>
+	<string>Remmich uses photo access to back up the albums you select, preserve original photos, videos and Live Photos, and save or browse downloaded media. Uploads start when you choose to back up or explicitly enable automatic backup.</string>
 	<key>MLNIdeographicFontFamilyName</key>
 	<array>
 		<string>PingFang SC</string>

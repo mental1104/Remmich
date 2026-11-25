@@ -52,6 +52,14 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         return journal
     }
 
+    /// scope为当前认证账号；只读取已验证日志头的独立后台同意，不恢复/改写任务或读取任务数组。
+    /// 无日志/已删除账号返回false，坏版本或跨账号资料抛错，不以损坏状态猜测同意。
+    func photoBackupBackgroundEnabled(scope: MediaAccountScope) throws -> Bool {
+        guard try canRead(scope) else { return false }
+        let database = try photoBackupDatabase(scope: scope)
+        return try photoBackupHeader(scope: scope, database: database)?.backgroundAutomaticEnabled == true
+    }
+
     /// journal为冷快照/明确扫描结果，scope为同一账号；批量事务创建任务并保存扫描顺序，热转换使用savePhotoBackupJob。
     /// 已有未知版本或损坏旧日志不能覆盖；账号删除后不能重建其日志。
     func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {

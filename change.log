@@ -1,3 +1,10 @@
+## 2026-11-25: Run opted-in photo backup through the existing OS processing owner
+
+- Source: codex/feature-system-background-photo-backup from98109d6; upstream672f02e and official serverv3.4.2 unchanged, no sync. Add independent account-scoped background consent to the existing optional journal header and backup form. Default/legacy missing is off; no implicit saved-selection/iCloud change. Explicit stop disables and fresh-confirms both automatic choices, while system expiration only cancels actual execution.
+- Reuse the existing processing registration/identifier/requests/resource/expiration/session owner; refresh stays index-only. Headless authenticated route setup binds only the original management channel, then cold-checks consent, scans saved rules and runs the original Controller/Coordinator/Worker. No fake foreground active, new scheduler/queue/identifier, original-media overwrite or automatic replay of failed/unknown/partial work.
+- Add7 functions/9 declared scenarios through actual Controller/SQLite/Worker/private HTTP and cold AppSession wiring; all remain UNEXECUTED until final unified acceptance. Nine-file NAS lint, diff and Node old-test/worker/identifier-boundary audit pass. Read-only peer review identified and fixed cold management binding, post-await generation validation and late old-owner error publication; cold load now retains drafts only within the original account scope, with a separate regression. Swift/device/system execution is not claimed.
+- No new CI/push/dev merge/parent pin/server/API/schema/generated SDK/production change or SQL migration. Existing Info background arrays/build inputs stay byte-identical; only photo-use description changes. Revert the client patch without deleting journals or pretending remote originals/relations are undone. See docs/system-background-photo-backup.md.
+
 ## 2026-11-25: Create explicit backup album targets with recoverable POST identity
 
 - Source: codex/feature-photo-backup-album-create fromf13f7e3; upstream672f02e unchanged, no sync. Reuse official album.create POST/albums201 and fresh GET, no server/official-mobile/API/SDK/workflow change.

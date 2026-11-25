@@ -26,11 +26,11 @@ struct PhotoBackupView: View {
             Form {
                 Section("前台备份") {
                     Text(backup.status)
-                    Text("队列及回执按账户保存。手动备份离开本页会停止；前台自动备份可离开本页，但锁屏、换号或进入后台会停止。不会删除或修改手机原片。")
+                    Text("队列及回执按账户保存。手动备份离开本页会停止；前台自动备份进入后台会停止。系统后台备份须另行开启并等待 iOS 调度。不会删除或修改手机原片。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
                         ProgressView(value: Double(backup.completed + backup.failed), total: Double(max(1, backup.total)))
-                        Button(backup.foregroundAutomaticEnabled ? "停止并关闭前台自动备份" : "停止并保存队列", role: .destructive) {
+                        Button(backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled ? "停止并关闭自动备份" : "停止并保存队列", role: .destructive) {
                             Task { await backup.stopManually(using: controller) }
                         }
                     } else {
@@ -61,6 +61,14 @@ struct PhotoBackupView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                         Toggle("允许下载 iCloud 原片（可能使用移动数据）", isOn: $backup.allowCloud)
                             .disabled(loadingQueue)
+                        Toggle("系统后台备份（本账户）", isOn: Binding(
+                            get: { backup.backgroundAutomaticEnabled },
+                            set: { value in Task { await backup.setBackgroundAutomaticEnabled(value, using: controller) } }
+                        ))
+                        .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil
+                            || (!backup.backgroundAutomaticEnabled && (backup.requiresSelectionScan || backup.selected.isEmpty || controller.busy)))
+                        Text("默认关闭，独立于前台开关。iOS 可延后运行；后台只使用保存的相簿、排除和 iCloud 选项，失败或未知历史保持待核查。系统到期会暂停并保存回执。")
+                            .font(.footnote).foregroundStyle(.secondary)
                         ForEach(backup.albums) { album in
                             Toggle(album.title, isOn: Binding(
                                 get: { backup.selected.contains(album.id) },

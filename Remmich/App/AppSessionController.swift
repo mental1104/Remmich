@@ -983,6 +983,8 @@ final class AppSessionController {
         libraryIndex.start(session: session, endpoint: activeRoute?.endpoint ?? session.apiURL, automatic: true)
     }
 
+    /// id/kind为原调度器持有的系统租约；恢复认证路由后串行执行已同意备份及原索引，返回本轮合并结果。
+    /// 到期由调度器取消父Task并调用endBackgroundSync，备份等待实际Worker退役，不改变用户开关。
     func performBackgroundSync(id: UUID, kind: LibraryBackgroundSyncKind = .processing) async -> Bool {
         guard !Task.isCancelled, backgroundSyncID == nil else { return false }
         backgroundSyncID = id
@@ -994,8 +996,39 @@ final class AppSessionController {
               case let .signedIn(session) = state else { return false }
         await reevaluateRoute(trigger: .background)
         guard backgroundSyncID == id, !Task.isCancelled, routeStatus == .connected else { return false }
+        // 同一processing租约先执行当前账号已同意的备份，再继续原索引；不伪装成前台或创建第二个系统owner。
+        let backupSucceeded = kind == .processing ? await performBackgroundPhotoBackup() : true
+        guard backgroundSyncID == id, !Task.isCancelled, routeStatus == .connected else { return false }
         startLibraryIndexing(session: session)
-        return await libraryIndex.finishBackgroundSync(kind: kind)
+        let indexed = await libraryIndex.finishBackgroundSync(kind: kind)
+        return indexed && backupSucceeded
+    }
+
+    /// 在已认证processing会话内冷读独立同意和保存规则；等待真实任务，并将系统取消传递到原Worker。
+    /// 返回本次执行结果；无后台同意视为无需执行，不因旧队列/前台开关推断已授权。
+    private func performBackgroundPhotoBackup() async -> Bool {
+        let backup = media.photoBackups
+        let manager = media.management
+        guard !Task.isCancelled, case let .signedIn(session) = state,
+              routeStatus == .connected, let endpoint = activeRoute?.endpoint else { return false }
+        // headless恢复刻意不创建Media pipeline；仅给原管理通道绑定刚验证的账号/路由，不能依赖前台configure曾运行。
+        manager.configure(session: session, endpoint: endpoint)
+        guard !backup.running, !manager.busy else { return !backup.backgroundAutomaticEnabled }
+        let generation = manager.generation
+        let scope = manager.backupScope
+        do {
+            guard try await backup.refreshBackgroundConsent(using: manager) else { return true }
+        } catch { return false }
+        await backup.load(using: manager)
+        guard !Task.isCancelled, manager.generation == generation, scope != nil, manager.backupScope == scope else { return false }
+        guard backup.backgroundAutomaticEnabled else { return true }
+        guard let operation = backup.runSystemBackground(using: manager) else { return false }
+        await withTaskCancellationHandler {
+            await operation.value
+        } onCancel: {
+            operation.cancel()
+        }
+        return !Task.isCancelled && manager.generation == generation && backup.backgroundLastResult == true
     }
 
     func performTransferReconciliation(id: UUID, delivery: LibraryTransferDelivery) async -> Bool {
@@ -1034,8 +1067,10 @@ final class AppSessionController {
         return await libraryIndex.finishTransferReconciliation(resumeIndex: delivery.hasIndexWork)
     }
 
+    /// id必须匹配当前系统owner；撤销后台备份执行与原索引资格，用户意愿和持久恢复资料保留。
     func endBackgroundSync(id: UUID) {
         guard backgroundSyncID == id else { return }
+        media.photoBackups.cancelSystemBackground()
         backgroundSyncID = nil
         backgroundSyncKind = nil
         if !isAppInForeground {

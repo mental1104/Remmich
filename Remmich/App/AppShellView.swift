@@ -357,6 +357,10 @@ struct AppShellView: View {
             media.photoBackups.automaticLibraryChanged()
         }
         .onAppear { media.logShellPresented() }
+        .onChange(of: media.photoBackups.backgroundAutomaticEnabled) { _, _ in
+            // 冷恢复或明确修改同意后更新原系统请求；不会移动已排请求的最早日期。
+            LibraryBackgroundSyncCoordinator.shared.scheduleNextSync()
+        }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }
         .onChange(of: exportScenePhase, initial: true) { _, phase in
             media.exports.sceneActivityChanged(active: phase == .active)

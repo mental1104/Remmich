@@ -480,6 +480,112 @@ struct PhotoBackupUnattemptedRecoveryTests {
     }
 }
 
+/// 系统后台独立同意与真实队列执行；不伪造scene active，也不替换原Coordinator/Worker/SQLite。
+@Suite("System background backup")
+struct PhotoBackupSystemBackgroundTests {
+    /// 老日志默认关闭，后台同意需已有保存选择，冷编码不改变前台或iCloud意愿。
+    @Test func backgroundConsentIsIndependentAndColdPersistent() throws {
+        let old = try JSONDecoder().decode(PhotoBackupJournal.Header.self, from: Data(#"{"version":1,"namespace":"synthetic","selectedAlbumIDs":[],"allowCloud":false}"#.utf8))
+        #expect(old.backgroundAutomaticEnabled == nil)
+        var journal = PhotoBackupJournal(header: old, jobs: [])
+        #expect(throws: PhotoBackupStateError.invalidJournal) { try journal.setBackgroundAutomaticEnabled(true) }
+        let selection = try PhotoBackupAlbumSelection(included: ["include"], excluded: ["exclude"])
+        try journal.applyAlbumScan(selection.scan([.init(id: "include", assets: []), .init(id: "exclude", assets: [])]), allowCloud: true)
+        try journal.setBackgroundAutomaticEnabled(true)
+        let cold = try JSONDecoder().decode(PhotoBackupJournal.Header.self, from: JSONEncoder().encode(journal.header))
+        #expect(cold.backgroundAutomaticEnabled == true && cold.foregroundAutomaticEnabled == nil && cold.allowCloud)
+        #expect(cold.selectedAlbumIDs == ["include"] && cold.excludedAlbumIDs == ["exclude"])
+    }
+
+    /// 未激活任何前台周期，系统入口仍扫描新增源并经真实SQLite/Worker/HTTP确认，前台开关保持关闭。
+    @Test(.timeLimit(.minutes(1))) @MainActor func systemGrantScansAndUploadsWithSavedConsent() async throws {
+        try await withAutomaticBackupFixture(enabled: false, cloud: true) { fixture in
+            await fixture.controller.load(using: fixture.manager)
+            let before = try await fixture.controller.refreshBackgroundConsent(using: fixture.manager)
+            #expect(!before)
+            await fixture.controller.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            let operation = try #require(fixture.runSystemBackground())
+            await operation.value
+            let cold = try await fixture.coldJournal()
+            #expect(cold.backgroundAutomaticEnabled == true && cold.foregroundAutomaticEnabled == false)
+            #expect(cold.jobs.map(\.stage) == [.completed] && fixture.exporter.observations.map(\.allowCloud) == [true])
+            #expect(fixture.server.counts == [1, 1] && fixture.port.permissionPrompts == 0)
+            #expect(fixture.controller.backgroundLastResult == true && !fixture.controller.running)
+        }
+    }
+
+    /// 用户明确停止会保存两种关闭；与系统到期保留同意的行为严格分开。
+    @Test(.timeLimit(.minutes(1))) @MainActor func explicitStopPersistsBothAutomaticChoicesOff() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            await fixture.controller.load(using: fixture.manager)
+            await fixture.controller.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            await fixture.controller.stopManually(using: fixture.manager)
+            let cold = try await fixture.coldJournal()
+            #expect(cold.backgroundAutomaticEnabled == false && cold.foregroundAutomaticEnabled == false)
+            #expect(fixture.runSystemBackground() == nil && fixture.server.counts == [0, 0])
+        }
+    }
+
+    /// 无同意、已有授权撤销或未保存草稿均不发HTTP、不请求新权限，不借系统入口扩大相簿选择。
+    @Test(arguments: ["disabled", "permission", "draft"]) @MainActor
+    func systemGrantRespectsExplicitGates(_ reason: String) async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            await fixture.controller.load(using: fixture.manager)
+            if reason != "disabled" {
+                await fixture.controller.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            }
+            if reason == "permission" {
+                fixture.port.authorization = .denied
+            }
+            if reason == "draft" {
+                fixture.controller.selected = ["draft-include"]
+            }
+            #expect(fixture.runSystemBackground() == nil)
+            #expect(fixture.server.counts == [0, 0] && fixture.port.permissionPrompts == 0 && fixture.port.scans == 0)
+            let cold = try await fixture.coldJournal()
+            #expect(cold.jobs.isEmpty && cold.selectedAlbumIDs == ["include"])
+        }
+    }
+
+    /// 账号A草稿不能污染账号B冷恢复；A的后台同意/保存选择仍在A持久namespace内保留。
+    @Test(.timeLimit(.minutes(1))) @MainActor func anotherAccountDropsThePreviousSelectionDraft() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            await fixture.controller.load(using: fixture.manager)
+            await fixture.controller.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            fixture.controller.selected = ["draft-from-first-account"]; fixture.controller.allowCloud = true
+            let other = AccountSession(apiURL: fixture.endpoint, accessToken: "synthetic-other", userID: UUID().uuidString,
+                                       userEmail: "other@example.invalid", name: "Other", isAdmin: false,
+                                       serverVersion: AccountSession.fixture.serverVersion)
+            fixture.manager.configure(session: other, endpoint: fixture.endpoint)
+            await fixture.controller.load(using: fixture.manager)
+            #expect(fixture.controller.selected.isEmpty && !fixture.controller.allowCloud && !fixture.controller.requiresSelectionScan)
+            #expect(!fixture.controller.backgroundAutomaticEnabled && fixture.runSystemBackground() == nil)
+            let firstAccount = try await fixture.coldJournal()
+            #expect(firstAccount.backgroundAutomaticEnabled == true && firstAccount.selectedAlbumIDs == ["include"] && !firstAccount.allowCloud)
+            #expect(fixture.server.counts == [0, 0])
+        }
+    }
+
+    /// 原导出真实await后模拟系统到期；取消传递并等完整退役，持久暂停且不关闭用户后台同意。
+    @Test(.timeLimit(.minutes(1))) @MainActor func expirationCancelsActualWorkerAndKeepsConsent() async throws {
+        try await withAutomaticBackupFixture(enabled: false) { fixture in
+            await fixture.controller.load(using: fixture.manager)
+            await fixture.controller.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            fixture.exporter.hold = true
+            let operation = try #require(fixture.runSystemBackground())
+            try #require(await fixture.exporter.waitUntilHeld())
+            fixture.controller.cancelSystemBackground()
+            await fixture.exporter.waitUntilCancellation()
+            fixture.exporter.release()
+            await operation.value
+            let cold = try await fixture.coldJournal()
+            #expect(cold.backgroundAutomaticEnabled == true && cold.foregroundAutomaticEnabled == false)
+            #expect(cold.jobs.map(\.stage) == [.paused] && cold.jobs.first?.attempts == 1)
+            #expect(fixture.server.counts == [0, 0] && fixture.controller.backgroundLastResult == false)
+        }
+    }
+}
+
 /// operation使用完全隔离的账号/数据库/磁盘/HTTP；错误及测试取消也必须退役任务并释放真实导出门。
 @MainActor private func withAutomaticBackupFixture(enabled: Bool, cloud: Bool = false, failingHTTP: Bool = false,
                                                    operation: @MainActor (AutomaticBackupFixture) async throws -> Void) async throws
@@ -637,6 +743,11 @@ struct PhotoBackupUnattemptedRecoveryTests {
     /// 记录实际新恢复任务，保证取消/超时也等待其Worker退役。
     func resumeUnattempted(using value: PhotoBackupController) -> Task<Void, Never>? {
         track(value.resumeUnattempted(using: manager))
+    }
+
+    /// 记录真实系统入口任务，纳入同一取消/导出门退役集合；nil代表产品门禁拒绝。
+    func runSystemBackground() -> Task<Void, Never>? {
+        track(controller.runSystemBackground(using: manager))
     }
 
     /// 原单项明确核查路径也使用真实Controller并进入相同清理集合。

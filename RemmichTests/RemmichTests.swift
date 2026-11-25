@@ -72,6 +72,42 @@ struct RemmichTests {
         #expect(controller.media.pipeline != nil)
     }
 
+    /// processing冷恢复只绑定已验证管理账号/路由；无需前台Media pipeline，也不因无后台同意访问照片。
+    @Test(.timeLimit(.minutes(1))) @MainActor
+    func headlessProcessingBindsManagementWithoutStartingForegroundMedia() async throws {
+        let endpoint = try #require(URL(string: "https://headless-backup-\(UUID().uuidString.lowercased()).invalid/api"))
+        let session = AccountSession(apiURL: endpoint, accessToken: "synthetic-headless", userID: UUID().uuidString,
+                                     userEmail: "synthetic@example.invalid", name: "Synthetic", isAdmin: false,
+                                     serverVersion: AccountSession.fixture.serverVersion)
+        let scope = MediaAccountScope(session: session)
+        let root = FileManager.default.temporaryDirectory.appending(path: "HeadlessBackup-\(UUID())", directoryHint: .isDirectory)
+        let suite = "HeadlessBackup-\(UUID())"
+        let preferences = try #require(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        let index = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        // 限定所有索引GET为合成空列表；不允许此冷会话回归访问真实服务。
+        let source = ImmichTimelineRepository(readLoader: { request, _ in
+            let url = try #require(request.url)
+            return try (Data("[]".utf8), #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                                                  headerFields: ["Content-Type": "application/json"])))
+        })
+        let controller = AppSessionController(transfers: nil, service: RouteRestoreService(reachableEndpoints: [endpoint]),
+                                              sessionStore: MemorySessionStore(session: session), profileStore: ConnectionProfileStore(suiteName: suite),
+                                              libraryIndexStore: index, libraryIndexPreferences: preferences, networkMonitoringEnabled: false, timeline: source)
+        #expect(controller.media.scope == nil && controller.media.pipeline == nil && controller.media.management.client == nil)
+        controller.handleBackgroundTransition()
+        let id = UUID()
+        _ = await controller.performBackgroundSync(id: id, kind: .processing)
+        controller.endBackgroundSync(id: id)
+        #expect(controller.media.management.backupScope == scope)
+        #expect(controller.media.management.client?.apiURL == endpoint && controller.activeRoute?.endpoint == endpoint)
+        #expect(controller.media.scope == nil && controller.media.pipeline == nil && !controller.foregroundResourcesReady)
+        #expect(!controller.media.photoBackups.backgroundAutomaticEnabled && !controller.media.photoBackups.running)
+        await controller.signOut(deleteLocalData: true)
+        // 后台同意头由原备份store读取；只清除此唯一合成namespace的空恢复目录。
+        try await SQLiteLibraryIndexStore().removeAccount(namespace: scope.cacheNamespace)
+    }
+
     @Test(arguments: LibraryBackgroundSyncKind.allCases) @MainActor
     func backgroundExpirationPreventsLateSessionRestorationFromStartingSync(kind: LibraryBackgroundSyncKind) async throws {
         let sessions = SuspendedBackgroundSessionStore()
