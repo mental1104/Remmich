@@ -994,3 +994,9 @@
 - Signed app/test build succeeded; v0.7.1 (5) installed and launched on iPhone 15 Pro. Eight offline contract groups and formatting lint passed. Device-focused run: 35 tests passed; one parameterized location route-change test failed (two assertions in its custom-endpoint case). New privacy/account-generation suites passed.
 - Fixed the regression: only cancel pending public-coordinate requests when withdrawing previously granted public-service consent, not on every unrelated place-endpoint configuration save. Full rerun of that fix is pending; do not mark all tests green. No additional phone tests will interrupt the user while they try the app.
 - Tests/build and remaining gaps are recorded in docs/fork-compatibility.md. Revert this feature commit and parent gitlink to roll back; no server data needs restoring.
+## 2026-11-25: Integrate native tags and colors into the complete management candidate
+
+- Source: codex/integrate-asset-tags-management fromc3cafb6. Traceable picks36a8500→ce09fe2 anddb35eb6→2aa483f include only tags/colors, no old40 metadata ancestry. Preserve current core29d, backupf13, dates/sharing/public075/partners756 and iPad/editor source; no upstream sync or new behavior outside the two slices.
+- Tags is reachable from real asset management, with keep/set/clear colors under the selected-tag form. Both document conflict sides are retained; per-method/source audit preserves all previous client methods, existing management paths and newer metadata Swift6 assertion repair alongside shared HTTP retirement handshakes.
+- Actual NAS full workflow formatting lint0/426,1 existing skip, bash/diff and independent exact-source/history/entry audit pass. No swiftc on NAS: compilation,47+41 scenarios, HTTP/UI/device acceptance remain UNVERIFIED for final acceptance. No new CI/push/dev/parent pin/production change. See docs/asset-tag-integration.md for source identities and rollback.
+

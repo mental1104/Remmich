@@ -1,5 +1,7 @@
 # Client and server maintenance
 
+Independent c3cafb6 integration traceably picks only36a8500/db35eb6 (ce09fe2/2aa483f), preserving current core/backup/date/shared/public/partner/iPad source. Real asset-management Tags and selected-tag color keep/set/clear entries are wired. Document blocks and newer root metadata assertion repair remain; full NAS lint0/426,1 existing skip, bash/diff and exact-source/history checks pass. Swift/HTTP/UI/device acceptance remains deferred; no new CI/push/parent pin/production. See [integration boundaries](asset-tag-integration.md).
+
 Management integration from265d622 normally merges7562797 and dependencies, retaining metadata-date/partner index consumption and the original automatic-backup notification in one observer. Shared client methods and dynamic/query fixtures remain present; the newer exact400 candidate decoder is retained. NAS0/412 lint with1 existing skip, diff and89-method/callback source audit pass. No new CI/push/dev/parent pin/production or runtime acceptance; see [integration record](management-development-integration.md).
 
 Backup/album integration normally combines29d5bf7 withf13f7e3 (includinge451) without product conflicts. Both documentation histories are retained; all product source equalsf13 and protected SDK/runner/project/UI/native fixture retain29d. NAS0/390 lint with1 existing skip and diff pass; Swift/service/device acceptance remains deferred to final unified acceptance. No new CI/push/dev merge/parent pin/production change. See [integration evidence](backup-album-integration.md).
