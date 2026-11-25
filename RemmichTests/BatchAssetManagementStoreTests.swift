@@ -40,7 +40,8 @@ struct BatchAssetManagementStoreTests {
             body = #"{"albumThumbnailAssetId":"\#(batchIDs[0])"}"#; status = 200
             response = #"{"id":"\#(batchAlbum.id)","ownerId":"owner","albumName":"Synthetic album"}"#
         }
-        let fixture = BatchHTTPFixture(exchanges: [.init(method: method, path: path, status: status, json: response)])
+        let preflight: [BatchHTTPExchange] = ["add", "remove", "cover"].contains(kind) ? [batchAlbumPreflight()] : []
+        let fixture = BatchHTTPFixture(exchanges: preflight + [.init(method: method, path: path, status: status, json: response)])
         defer { fixture.close() }
         let source = BatchReadFixture(pages: [[batchAsset(0)]])
         let store = BatchAssetManagementStore()
@@ -53,8 +54,11 @@ struct BatchAssetManagementStoreTests {
         #expect(!store.hasFreshData && !store.isWorking && !fixture.manager.busy)
         #expect(fixture.manager.revision == 1)
         let requests = await fixture.script.requests()
-        try #require(requests.count == 1)
-        try assertBatchRequest(requests[0], endpoint: fixture.endpoint, method: method, path: path, body: body)
+        try #require(requests.count == 1 + preflight.count)
+        if !preflight.isEmpty {
+            #expect(requests[0].method == "GET" && requests[0].body == nil && requests[0].url == fixture.endpoint.appending(path: "albums/\(batchAlbum.id)"))
+        }
+        try assertBatchRequest(requests[preflight.count], endpoint: fixture.endpoint, method: method, path: path, body: body)
         let query = try #require(await source.queries.first)
         #expect(query.albumID == batchAlbum.id && query.visibility == nil)
         #expect(!query.includesStacks && !query.includesPartners && query.includesTrashed == (kind == "restore"))
@@ -142,7 +146,9 @@ struct BatchAssetManagementStoreTests {
     /// 同一个相簿接口返回success=false不能确认成员变化，后续项必须停止而非整组显示成功。
     @Test @MainActor func unconfirmedMembershipStopsRemainingItems() async throws {
         let fixture = BatchHTTPFixture(exchanges: [
+            batchAlbumPreflight(),
             .init(method: "PUT", path: "albums/\(batchAlbum.id)/assets", status: 200, json: #"[{"id":"\#(batchIDs[0])","success":true}]"#),
+            batchAlbumPreflight(),
             .init(method: "PUT", path: "albums/\(batchAlbum.id)/assets", status: 200, json: #"[{"id":"\#(batchIDs[1])","success":false,"error":"no_permission"}]"#),
         ])
         defer { fixture.close() }
@@ -153,7 +159,7 @@ struct BatchAssetManagementStoreTests {
         let operation = try #require(store.start(plan, manager: fixture.manager))
         await operation.value
         #expect(store.results.map(\.state) == [.succeeded, .unconfirmed, .notAttempted])
-        #expect(await fixture.script.requests().count == 2)
+        #expect(await fixture.script.requests().count == 4)
     }
 
     /// 取消一个确实在途的第二项，首项成功仍保留，当前项未知、第三项未发送，且没有自动重放。
@@ -238,6 +244,12 @@ struct BatchAssetManagementStoreTests {
 /// 所有测试使用固定合法UUID和纯合成相簿，不关联真实媒体。
 private nonisolated let batchIDs = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"]
 private nonisolated let batchAlbum = BatchAlbumReference(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Synthetic album")
+
+/// 每个相簿成员/封面动作都重读真实权限；旧owner-only字节继续兼容，不给普通资源属性动作加GET。
+private nonisolated func batchAlbumPreflight() -> BatchHTTPExchange {
+    .init(method: "GET", path: "albums/\(batchAlbum.id)", status: 200,
+          json: #"{"id":"\#(batchAlbum.id)","ownerId":"owner","albumName":"Synthetic album"}"#)
+}
 
 /// index选择合法合成身份，owner决定权限反例；返回不包含原片路径/真实EXIF的时间线资产。
 private nonisolated func batchAsset(_ index: Int, owner: String = "owner") -> TimelineAssetSummary {

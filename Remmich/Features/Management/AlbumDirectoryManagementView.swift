@@ -74,7 +74,7 @@ struct AlbumDirectoryManagementView: View {
                         Text("Moving a group changes its category for your account, including all visible albums with that group name.")
                     }.disabled(!canWrite)
                     Section {
-                        ForEach(directory.albums.filter { $0.ownerId.lowercased() == controller.client?.userID.lowercased() }) { album in
+                        ForEach(directory.albums.filter { $0.access.allows(.update, userID: controller.client?.userID ?? "") }) { album in
                             LabeledContent {
                                 Button(album.groupName.isEmpty ? "Ungrouped" : album.groupName) {
                                     movingAlbum = album; groupName = album.groupName
@@ -82,7 +82,7 @@ struct AlbumDirectoryManagementView: View {
                             } label: { Text(album.albumName) }
                         }
                     } header: { Text("Move an owned album") } footer: {
-                        Text("Choose an existing group or enter a new name. Shared albums owned by someone else are excluded here.")
+                        Text("Choose an existing group or enter a new name. Any owner or editor can change this shared album property.")
                     }.disabled(!canWrite)
                     if let movingAlbum {
                         albumGroupEditor(movingAlbum, directory: directory)

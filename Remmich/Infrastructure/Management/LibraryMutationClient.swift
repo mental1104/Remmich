@@ -84,15 +84,17 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 }
 
-/// 相簿管理使用的最小身份投影；当前官方响应从albumUsers首个owner取得兼容ownerId，不推断其他成员的写权限。
+/// 相簿管理的身份与完整权限快照；ownerId保留旧展示投影，任何写许可必须读取独立access。
 nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+    let access: ManagedAlbumAccess
 
-    /// id/albumName/ownerId为已有调用方的显式快照构造；不增加网络请求或改变原管理权限判断。
-    init(id: String, albumName: String, ownerId: String) {
+    /// id/albumName/ownerId为既有显式旧版身份，access可提供完整成员；nil仅兼容原明确owner构造。
+    init(id: String, albumName: String, ownerId: String, access: ManagedAlbumAccess? = nil) {
         self.id = id; self.albumName = albumName; self.ownerId = ownerId
+        self.access = access ?? .init(legacyOwnerID: ownerId)
     }
 
     /// 保留原ownerId响应读取；该字段缺失/null时才按当前官方有序albumUsers核对首个owner。
@@ -101,13 +103,16 @@ nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
         albumName = try values.decode(String.self, forKey: .albumName)
+        let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId)
+        // 显式成员即权限权威；畸形旧附加字段仍可保留展示，但不能回退ownerId获取写许可。
+        let members = try? values.decode([ManagedAlbumMember].self, forKey: .albumUsers)
+        access = .init(members: members, hasExplicitMembers: values.contains(.albumUsers), legacyOwnerID: legacyOwner)
         // 已有ownerId合同原样保留，包括旧响应中不同形状的albumUsers附加信息。
-        if let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId) {
+        if let legacyOwner {
             ownerId = legacyOwner
             return
         }
-        let members = try values.decode([OwnerMember].self, forKey: .albumUsers)
-        guard let first = members.first, first.role == "owner", !first.user.id.isEmpty else {
+        guard let first = members?.first, first.role == "owner", !first.user.id.isEmpty else {
             throw DecodingError.dataCorruptedError(forKey: .albumUsers, in: values,
                                                    debugDescription: "Album users must begin with the owner.")
         }
@@ -116,15 +121,6 @@ nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
 
     /// 只读取实际管理投影字段；未知响应字段保持原Decodable兼容行为。
     private enum CodingKeys: String, CodingKey { case id, albumName, ownerId, albumUsers }
-
-    /// 当前AlbumUserResponse的公开嵌套形状；保留原顺序，只用首项确认兼容所有者身份。
-    private nonisolated struct OwnerMember: Decodable, Sendable {
-        let user: OwnerUser
-        let role: String
-    }
-
-    /// 只需要当前公开用户的ID，不要求姓名、邮箱、头像等与所有权无关的字段。
-    private nonisolated struct OwnerUser: Decodable, Sendable { let id: String }
 }
 
 nonisolated struct AssetEditList: Codable, Sendable {
@@ -568,6 +564,14 @@ final nonisolated class LibraryMutationClient: Sendable {
     func albums(containing assetID: String? = nil) async throws -> [ManagedAlbum] {
         let query = try assetID.map { try [URLQueryItem(name: "assetId", value: validID($0))] } ?? []
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
+    }
+
+    /// id是本次明确管理目标；每次真实GET200和相同UUID才返回完整角色，不能用列表/缓存授权后续写入。
+    func managementAlbum(_ id: String) async throws -> ManagedAlbum {
+        let id = try validID(id)
+        let value = try await JSONDecoder().decode(ManagedAlbum.self, from: send("GET", ["albums", id], expectedStatus: 200))
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
     }
 
     /// 组织目标仅当前自有相簿；名称不唯一，调用方必须明确保存UUID，不选择同名第一个。

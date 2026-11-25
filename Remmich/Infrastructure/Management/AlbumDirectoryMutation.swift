@@ -8,7 +8,9 @@ extension LibraryMutationClient {
         case let .renameCategory(id, name): _ = try await renameAlbumCategory(id, name: name)
         case let .deleteCategory(id): try await deleteAlbumCategory(id)
         case let .assignGroup(name, categoryID): try await assignAlbumGroup(name, categoryID: categoryID)
-        case let .moveAlbum(id, groupName): _ = try await setAlbumGroup(id, groupName: groupName)
+        case let .moveAlbum(id, groupName):
+            try await requireManagedAlbumPermission(id, permission: .update)
+            _ = try await setAlbumGroup(id, groupName: groupName)
         }
     }
 }

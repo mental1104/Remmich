@@ -5,6 +5,7 @@ cd "$(git rev-parse --show-toplevel)"
 build_directory=$(mktemp -d "${TMPDIR:-/tmp}/remmich-contracts.XXXXXX")
 swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/LibraryMutationClient.swift \
+  Remmich/Domain/Management/ManagedAlbumAccess.swift \
   Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
   Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \

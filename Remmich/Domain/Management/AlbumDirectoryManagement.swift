@@ -1,21 +1,24 @@
 import Foundation
 
-/// 目录管理的相簿投影；身份沿用ManagedAlbum的官方首owner兼容规则，不扩大目录写入权限。
+/// 目录管理的相簿投影；展示身份与完整成员权限分别沿用ManagedAlbum，个人目录映射不使用相簿写许可。
 nonisolated struct ManagedDirectoryAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+    let access: ManagedAlbumAccess
     let customGroupName: String?
 
-    /// id/albumName/ownerId为既有显式身份快照，customGroupName默认nil表示未分组；保留原调用方构造。
-    init(id: String, albumName: String, ownerId: String, customGroupName: String? = nil) {
+    /// id/albumName/ownerId为既有显式身份，customGroupName默认nil表示未分组；access提供完整角色，nil只兼容旧owner构造。
+    init(id: String, albumName: String, ownerId: String, customGroupName: String? = nil, access: ManagedAlbumAccess? = nil) {
         self.id = id; self.albumName = albumName; self.ownerId = ownerId; self.customGroupName = customGroupName
+        self.access = access ?? .init(legacyOwnerID: ownerId)
     }
 
     /// decoder为同一HTTP相簿响应；复用已验证的旧ownerId优先/首albumUsers owner回退，畸形身份仍抛解码错误。
     init(from decoder: any Decoder) throws {
         let identity = try ManagedAlbum(from: decoder)
         id = identity.id; albumName = identity.albumName; ownerId = identity.ownerId
+        access = identity.access
         let values = try decoder.container(keyedBy: CodingKeys.self)
         customGroupName = try values.decodeIfPresent(String.self, forKey: .customGroupName)
     }
@@ -79,7 +82,7 @@ nonisolated enum AlbumDirectoryManagementError: LocalizedError {
         case .reloadRequired: "Reload the directory before making another change."
         case .invalidCategoryName: "Enter a category name of 1 to 100 characters. The default category is reserved."
         case .invalidSelection: "This directory selection is no longer available. Reload the directory."
-        case .notOwned: "Only albums owned by this account can be moved here."
+        case .notOwned: "Only an album owner or editor can change its group. Reload the album roles."
         }
     }
 }

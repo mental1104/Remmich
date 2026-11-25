@@ -9,9 +9,9 @@ extension LibraryMutationClient {
         case let .archived(value): try await update(id, visibility: value ? "archive" : "timeline")
         case .trash: try await trash(id)
         case .restore: try await restore(id)
-        case let .addToAlbum(album): try await add(id, to: album.id)
-        case let .removeFromAlbum(album): try await remove(id, from: album.id)
-        case let .albumCover(album): _ = try await setAlbumCover(album.id, assetID: id)
+        case let .addToAlbum(album): try await performAlbumManagement(.add(id: album.id, assetID: id))
+        case let .removeFromAlbum(album): try await performAlbumManagement(.remove(id: album.id, assetID: id))
+        case let .albumCover(album): try await performAlbumManagement(.cover(id: album.id, assetID: id))
         }
     }
 }
