@@ -1,3 +1,10 @@
+## 2026-11-25: Integrate completed management and browsing development slices
+
+- Source: codex/integrate-asset-tags-management fromc3cafb6; traceable tag/color picksce09fe2/2aa483f and normal merges4f5c25d(51ccb1b),455ab5f(7dfffd3). Upstream672f02e unchanged, no sync. Retain current backup/date/shared/public075/partner/editor/iPad behavior; no old metadata ancestor or background WIP included.
+- Exact-source audit confirms52 delivered files and616 other root files, composes three shared sources by method, retains both documentation histories, one DEBUG entry and default chronological Viewer ordering. Real Library Stack/Scene/Steam and existing Tags/color entrances are connected. Full NAS lint passes0/451 with1 existing skip; bash/diff pass. See docs/management-browsing-integration.md.
+- The source review proves a remaining first-owner projection restriction in album CRUD/batch, directory album moves and single-asset album destinations despite server owner/editor access. This is explicitly assigned to an independent next fix; stage4 is not silently declared complete. Personal category mapping and separate role-aware sharing remain correctly scoped.
+- Swift/service/SQLite/device execution is UNVERIFIED and deferred to unified acceptance. No new CI/push/dev merge/parent pin/server/official-mobile/generated-SDK/production change. Revert independent merges without deleting journals or pretending server writes were undone.
+
 ## 2026-11-25: Integrate management and partner policy with backup development
 
 - Source: codex/integrate-remmich-management from265d622, normal merge7562797 and its metadata/date/sharing/public-link dependencies. Upstream672f02e unchanged, no sync. Resolve the three source conflicts by retaining the one combined date/partner/backup observer, every added client method and both dynamic/query fixture capabilities; retain the newer exact400 local-media candidate handling.
