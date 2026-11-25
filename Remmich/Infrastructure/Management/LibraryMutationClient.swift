@@ -491,6 +491,17 @@ final nonisolated class LibraryMutationClient: Sendable {
         return result
     }
 
+    /// tag来自fresh个人树，change只设置或明确清除颜色；PUT200回执不能改名称/层级/创建身份，keep不发HTTP。
+    func recolorManagedTag(_ tag: ManagedTag, change: AssetTagColorChange) async throws -> ManagedTag {
+        try ManagedTag.requireID(tag.id)
+        guard change != .keep else { throw AssetTagError.noChanges }
+        let data = try await send("PUT", ["tags", tag.id], body: JSONEncoder().encode(AssetTagColorPatch(change: change)), expectedStatus: 200)
+        let result = try JSONDecoder().decode(ManagedTag.self, from: data)
+        _ = try ManagedTag.catalog([result])
+        guard result.preservesDefinition(of: tag), change.matches(result) else { throw LibraryWriteError.malformedResponse }
+        return result
+    }
+
     /// id是已确认删除的个人标签；204只确认命令，调用方仍须fresh树验证整个后代闭包已移除；照片保留。
     func deleteManagedTag(_ id: String) async throws {
         try ManagedTag.requireID(id)

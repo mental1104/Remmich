@@ -33,6 +33,18 @@ TagRead/Update/Delete/Asset 都要求标签 owner；新增关系还要求 asset.
 
 NAS 已做 SwiftFormat 0.64.5 限定格式化/lint、shell 语法、15 个固定合成 JSON/模板检查及 diff 空白检查。**没有 Swift/Xcode，47 场景未编译/未执行；服务黑盒、数据库级联/sidecar、iPhone/iPad UI 与官方客户端共存未验**。前一元数据片 33 场景也仍待独立 macOS 验证。
 
-阶段 4 仍需：日期异步派生与历史同桶排序的 targeted refresh 联调，见 [元数据管理](asset-metadata-management.md)；共享相簿角色/成员管理；标签颜色/重父级（官方 UpdateTag 无该父级字段）、跨照片批量标签与更广元数据编辑另定范围。现有搜索标签候选会在其正常 fresh 读取时获取服务器新树，本片不宣称已验证所有已打开筛选器的同步效果。
+原标签切片之外的阶段 4 内容包括日期 targeted refresh、共享相簿、重父级（官方 UpdateTag 无该父级字段）和跨照片批量标签等，各独立分支状态另记。标签颜色的后续实现见下节；现有搜索标签候选在正常 fresh 读取时获得服务器新树，不宣称所有已打开筛选器已完成同步验收。
 
 回退本客户端提交可移除入口；已经完成的标签改名/删除和关系变更不会自动恢复。删除树没有客户端自动撤销；恢复需用户根据实际服务器状态重新建立标签/关联，不能仅切回客户端版本。
+
+## 独立后续：标签颜色
+
+`codex/feature-asset-tag-colors` 从 `36a8500` 接续，不重复标签树/关系或混入其旧 metadata 祖先。当前父 `4af6a3a3c` 的官方/main TagUpdate/controller/service 合同一致：`PUT /tags/:id` 精确 200；仅发送 color 即保留原 value，不触发改名的资产 EXIF/sidecar 路径。
+
+选中标签后新增默认“保留”的颜色意愿及原生 ColorPicker，支持透明度。设置支持官方 RGB/RGBA/RRGGBB/RRGGBBAA 并规范为六/八位 sRGB；无法表示的选色不开放提交。保留省略键且无写动作，设置只发字符串，清除只发 `color:null`。改色另有确认，说明该标签所有显示位置都会变化，名称、层级、其他颜色与照片关系保留。
+
+官方 mapTag 将数据库无颜色映射成 undefined，因此合法清除回执/后读可省略 color。新解码保留 hasColorField 区分缺键与显式 null，错误类型不降级成 nil；此已证响应映射不构成用户清除意愿。回执核 ID/name/value/parentId/createdAt，fresh 目录和照片后读再核颜色、其他标签及完整关系。复用原单命令预检/精确写/回读/账号与页面退休；未知结果重新读取，不自动重试。
+
+新增 9 函数/41 声明场景：颜色长度/alpha、三态 JSON、缺键/null/错误类型；真实 Store→manager→会话内 URLSession 的七请求闭环；预检改变、错误状态/身份/定义/颜色及额外关系影响；三个真实 HTTP 门内取消/换号。原 47 场景及 HTTP 夹具未改。NAS 实际 7 文件 SwiftFormat0.64.5 lint、bash/diff 和 Node 审计通过，后者解析 13 个实际 Swift JSON 片段、核 8 个独立 RGBA 向量与 9/41 声明矩阵，逐字核原传输/生命周期/测试和夹具未改。脚本 `/volume2/codex-home/mental1104/tmp/remmich-tag-color-source-audit-20261125.cjs` 只审源码，不是 Swift/HTTP 运行。
+
+颜色开发功能已接入口；Swift 编译、41 场景、原生选色器/透明度及真实服务/设备统一留到最后验收。本轮无新 CI/push/实服务验收/生产操作。回退本后续保留原标签管理，不自动撤销已确认的服务端颜色，无本机数据格式迁移。

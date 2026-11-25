@@ -172,7 +172,7 @@ final class AssetTagStore {
         guard !state.asset.isTrashed else { throw AssetTagError.trashed }
     }
 
-    /// plan只表达一个命令；返回创建/改名标签供后续验证，其他写入无虚构标签对象。
+    /// plan只表达一个命令；返回创建/改名/改色标签供后续验证，其他写入无虚构标签对象。
     private nonisolated static func write(_ plan: AssetTagPlan, client: LibraryMutationClient) async throws -> ManagedTag? {
         let tags = plan.baseline.tags
         switch plan.command {
@@ -180,6 +180,9 @@ final class AssetTagStore {
         case let .rename(id, name):
             guard let tag = tags.first(where: { $0.id == id }) else { throw AssetTagError.reloadRequired }
             return try await client.renameManagedTag(tag, name: name)
+        case let .color(id, change):
+            guard let tag = tags.first(where: { $0.id == id }) else { throw AssetTagError.reloadRequired }
+            return try await client.recolorManagedTag(tag, change: change)
         case let .delete(id): try await client.deleteManagedTag(id)
         case let .attach(id): try await client.setAssetTag(plan.baseline.asset.id, tagID: id, attached: true)
         case let .detach(id): try await client.setAssetTag(plan.baseline.asset.id, tagID: id, attached: false)
@@ -187,7 +190,7 @@ final class AssetTagStore {
         return nil
     }
 
-    /// result为已确认写回执，after为真实回读；验证明确目标及改名/删除的已知后代影响，不宣称sidecar全部完成。
+    /// result为已确认写回执，after为真实回读；核颜色专用不变项及改名/删除的后代影响，不宣称sidecar全部完成。
     private nonisolated static func isConfirmed(_ plan: AssetTagPlan, result: ManagedTag?, after: AssetTagState) -> Bool {
         switch plan.command {
         case .create:
@@ -199,6 +202,18 @@ final class AssetTagStore {
             return plan.baseline.tags.filter { affected.contains($0.id) }.allSatisfy { previous in
                 let expected = result.value + String(previous.value.dropFirst(old.value.count))
                 return after.tags.contains { $0.id == previous.id && $0.parentId == previous.parentId && $0.value == expected }
+            }
+        case let .color(id, change):
+            guard let result, change.matches(result), let target = after.tags.first(where: { $0.id == id }),
+                  target.preservesDefinition(of: result), change.matches(target),
+                  after.tags.count == plan.baseline.tags.count,
+                  after.asset.tags.map(\.id) == plan.baseline.asset.tags.map(\.id) else { return false }
+            // 只改色不能顺便改树或照片关系；目标可更新颜色/updatedAt，其余完整对象保持原样。
+            let catalogMatches = plan.baseline.tags.allSatisfy { old in
+                after.tags.contains { new in new.id == old.id && (old.id == id ? new.preservesDefinition(of: old) && change.matches(new) : new == old) }
+            }
+            return catalogMatches && plan.baseline.asset.tags.allSatisfy { old in
+                after.asset.tags.contains { new in new.id == old.id && (old.id == id ? new.preservesDefinition(of: old) && change.matches(new) : new == old) }
             }
         case let .delete(id): return plan.baseline.subtree(id).isDisjoint(with: Set(after.tags.map(\.id)))
         case let .attach(id): return after.asset.tags.contains { $0.id == id }

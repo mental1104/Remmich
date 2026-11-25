@@ -9,6 +9,24 @@ nonisolated struct ManagedTag: Decodable, Equatable, Identifiable, Sendable {
     let createdAt: String
     let updatedAt: String
     let color: String?
+    /// 保留wire缺键与显式null的区别；官方mapTag在无颜色时省略，不据此补发clear命令。
+    let hasColorField: Bool
+
+    private enum CodingKeys: String, CodingKey { case id, parentId, name, value, createdAt, updatedAt, color }
+
+    /// decoder来自完整标签对象；缺省颜色可正常读取，但错误类型不能降级成无颜色。
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id); parentId = try values.decodeIfPresent(String.self, forKey: .parentId)
+        name = try values.decode(String.self, forKey: .name); value = try values.decode(String.self, forKey: .value)
+        createdAt = try values.decode(String.self, forKey: .createdAt); updatedAt = try values.decode(String.self, forKey: .updatedAt)
+        color = try values.decodeIfPresent(String.self, forKey: .color); hasColorField = values.contains(.color)
+    }
+
+    /// other是同一标签旧定义；只允许颜色及更新时间变化，保留身份、名称、路径、父级和创建时间。
+    func preservesDefinition(of other: ManagedTag) -> Bool {
+        id == other.id && parentId == other.parentId && name == other.name && value == other.value && createdAt == other.createdAt
+    }
 
     /// value为真实UUID；官方标签接口要求v4/RFC变体，非法值不得进入路径或请求体。
     static func requireID(_ value: String) throws {
@@ -86,6 +104,7 @@ nonisolated struct AssetTagState: Equatable, Sendable {
 nonisolated enum AssetTagCommand: Sendable {
     case create(name: String, parentID: String?)
     case rename(tagID: String, name: String)
+    case color(tagID: String, change: AssetTagColorChange)
     case delete(tagID: String)
     case attach(tagID: String)
     case detach(tagID: String)
@@ -105,6 +124,9 @@ nonisolated enum AssetTagCommand: Sendable {
             guard leaf != tag.name else { throw AssetTagError.noChanges }
             let value = String(tag.value.dropLast(tag.name.count)) + leaf
             guard !state.tags.contains(where: { $0.id != id && $0.value == value }) else { throw AssetTagError.alreadyExists }
+        case let .color(id, change):
+            guard let tag = state.tags.first(where: { $0.id == id }) else { throw AssetTagError.reloadRequired }
+            guard change != .keep, !change.matches(tag) else { throw AssetTagError.noChanges }
         case let .delete(id), let .attach(id), let .detach(id):
             guard state.tags.contains(where: { $0.id == id }) else { throw AssetTagError.reloadRequired }
             let attached = state.asset.tags.contains { $0.id == id }
@@ -134,12 +156,13 @@ nonisolated enum AssetTagMembershipFailure: String, Decodable, Equatable, Sendab
 
 /// 标签页只显示稳定本地错误，不输出完整服务端正文/私人标签到日志。
 nonisolated enum AssetTagError: LocalizedError {
-    case invalidName, alreadyExists, noChanges, reloadRequired, changedRemotely, notOwned, trashed
+    case invalidName, invalidColor, alreadyExists, noChanges, reloadRequired, changedRemotely, notOwned, trashed
     case membership(AssetTagMembershipFailure)
 
     var errorDescription: String? {
         switch self {
         case .invalidName: "Enter one nonempty tag name without a slash."
+        case .invalidColor: "Choose a valid RGB or RGBA tag color."
         case .alreadyExists: "A tag with this complete path already exists."
         case .noChanges: "The selected tag or relationship has no change."
         case .reloadRequired: "Reload tags before reviewing another change."

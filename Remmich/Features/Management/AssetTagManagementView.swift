@@ -147,6 +147,8 @@ struct AssetTagManagementView: View {
                 TextField("New leaf name", text: $renameName)
                 Button("Review rename tag") { review(.rename(tagID: selected.id, name: renameName)) }
                     .disabled(renameName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || renameName == selected.name)
+                AssetTagColorEditor(tag: selected) { review(.color(tagID: selected.id, change: $0)) }
+                    .id(selected.id)
                 Button("Review delete tag", role: .destructive) { review(.delete(tagID: selected.id)) }
             }
         } header: { Text("Manage existing tag") } footer: {
@@ -170,6 +172,10 @@ struct AssetTagManagementView: View {
         case let .rename(id, name):
             let tag = state.tags.first { $0.id == id }
             return "Rename \(tag?.value ?? "tag") to leaf name \(name.trimmingCharacters(in: .whitespacesAndNewlines)). This changes \(state.subtree(id).count) known tag paths and their appearance on all affected assets. Photos remain."
+        case let .color(id, change):
+            let value = state.tags.first { $0.id == id }?.value ?? "tag"
+            let effect = switch change { case .keep: "Keep the current color"; case .clear: "Clear the color"; case let .set(color): "Set the color to \(color.hex)" }
+            return "\(effect) for \(value) everywhere. The name, hierarchy, other tag colors and photo relationships are kept."
         case let .delete(id):
             let tag = state.tags.first { $0.id == id }
             return "Delete \(tag?.value ?? "tag") and \(max(0, state.subtree(id).count - 1)) known descendants from your personal tag tree. Their links are removed from every affected asset. Photos and videos are kept."

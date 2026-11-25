@@ -10,6 +10,7 @@ swiftc -swift-version 6 \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
   Remmich/Domain/Management/AssetMetadata.swift \
   Remmich/Domain/Management/AssetTagManagement.swift \
+  Remmich/Domain/Management/AssetTagColor.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
   Remmich/Domain/Management/AlbumSharing.swift \
   Remmich/Domain/Management/AlbumPublicLink.swift \
