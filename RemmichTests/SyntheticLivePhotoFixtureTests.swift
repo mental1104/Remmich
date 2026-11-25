@@ -1,3 +1,4 @@
+import AVFoundation
 import CryptoKit
 import Foundation
 import Photos
@@ -57,4 +58,45 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: directory.path))
         try fixture.close()
     }
+
+    /// readiness存在跨轨依赖时仍完成全部真实供给回调；按audio→metadata→video逐轨等待会饿死后面的生产者。
+    /// blocked指定必须等待其他轨先供给的轨，断言样本/finish事件，不把本调度回归冒称真实PHLivePhoto验收。
+    @Test(.timeLimit(.minutes(1)), arguments: [SyntheticLivePhotoWriterTrack.Kind.audio, .metadata, .video])
+    func backpressureOnOneTrackDoesNotStarveTheOthers(_ blocked: SyntheticLivePhotoWriterTrack.Kind) async throws {
+        let observed = SyntheticWriterFeedObservation()
+        var tracks: [SyntheticLivePhotoWriterTrack] = []
+        for kind in [SyntheticLivePhotoWriterTrack.Kind.audio, .metadata, .video] {
+            tracks.append(.init(kind: kind, sampleCount: kind == .video ? 3 : 1, isReady: {
+                guard kind == blocked else { return true }
+                let prerequisite: SyntheticLivePhotoWriterTrack.Kind = kind == .video ? .audio : .video
+                return !(observed.samples[prerequisite] ?? []).isEmpty
+            }, append: { index in observed.samples[kind, default: []].append(index) }, finish: { observed.finished.append(kind) }))
+        }
+        try await SyntheticLivePhotoFixture.feedMovieTracks(tracks, deadline: ContinuousClock.now.advanced(by: .seconds(1)), status: { .writing }, failure: { nil })
+        #expect(observed.samples[.audio] == [0] && observed.samples[.metadata] == [0] && observed.samples[.video] == [0, 1, 2])
+        #expect(observed.finished.count == 3 && Set(observed.finished) == [.audio, .metadata, .video])
+    }
+
+    /// 停止状态即时失败，真正期限到达才报告timeout；两者都保留全部轨道进度和底层writer error类别。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func writerFailureAndBackpressureDeadlineHaveDistinctEvidence(_ deadline: Bool) async throws {
+        let tracks = [SyntheticLivePhotoWriterTrack.Kind.audio, .metadata, .video].map {
+            SyntheticLivePhotoWriterTrack(kind: $0, sampleCount: 1, isReady: { false }, append: { _ in Issue.record("Blocked input must not append") },
+                                          finish: { Issue.record("Blocked input must not finish") })
+        }
+        do {
+            try await SyntheticLivePhotoFixture.feedMovieTracks(tracks, deadline: ContinuousClock.now.advanced(by: .seconds(-1)), status: { deadline ? .writing : .failed },
+                                                                failure: { NSError(domain: "SyntheticWriter", code: 42) })
+            Issue.record("Writer feed must report a stopped writer or expired deadline")
+        } catch let LocalLivePhotoFixtureError.failed(message) {
+            #expect(message.contains(deadline ? "Writer readiness timeout" : "Writer stopped"))
+            #expect(message.contains("audio=0/1,metadata=0/1,video=0/1") && message.contains("error=SyntheticWriter:42"))
+        }
+    }
+}
+
+/// 同一MainActor记录真实供给回调；闭包只捕获此常量引用，不跨Sendable边界共享可变局部变量。
+@MainActor private final class SyntheticWriterFeedObservation {
+    var samples: [SyntheticLivePhotoWriterTrack.Kind: [Int]] = [:]
+    var finished: [SyntheticLivePhotoWriterTrack.Kind] = []
 }
