@@ -12,7 +12,11 @@ struct ContentView: View {
     var body: some View {
         #if DEBUG
             if SearchUIFixtureLaunch.isEnabled {
-                SearchUITestHost()
+                if ProcessInfo.processInfo.arguments.contains("-ui-testing-search-presets") {
+                    SavedSearchUITestHost()
+                } else {
+                    SearchUITestHost()
+                }
             } else {
                 RootView()
             }

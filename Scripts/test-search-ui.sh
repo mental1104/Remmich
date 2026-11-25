@@ -183,10 +183,11 @@ if [ "$REMMICH_UI_BOOTSTATUS_RESULT" -ne 0 ]; then
     fi
 fi
 
-# 串行执行避免两个UI runner同时旋转模拟器；构建模式保留代码生成和插件安全检查。
+# 串行执行原五项搜索和新增保存面板三项；构建模式保留代码生成和插件安全检查。
 xcodebuild "${REMMICH_UI_TEST_ACTION[@]}" \
     -destination "platform=iOS Simulator,id=$REMMICH_UI_UDID" \
     -resultBundlePath "$REMMICH_UI_OUTPUT/SearchUI.xcresult" \
     -only-testing:RemmichUITests/SearchAcceptanceUITests \
+    -only-testing:RemmichUITests/SavedSearchPanelAcceptanceUITests \
     -parallel-testing-enabled NO -jobs "${REMMICH_UI_BUILD_JOBS:-1}" \
     CODE_SIGNING_ALLOWED=NO 2>&1 | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log"
