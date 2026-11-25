@@ -1007,31 +1007,52 @@ final class AppSessionController {
         return indexed && backupSucceeded
     }
 
-    /// 在已认证processing会话内冷读独立同意和保存规则；等待真实任务，并将系统取消传递到原Worker。
-    /// 返回本次执行结果；无后台同意视为无需执行，不因旧队列/前台开关推断已授权。
+    /// 同一processing租约先等待原上传完全退役，再await独立已同意的相簿组织，不嵌套RunCoordinator。
+    /// 返回两者合并结果；无后台备份同意无需执行，不能由前台/相簿规则推断系统授权。
     private func performBackgroundPhotoBackup() async -> Bool {
         let backup = media.photoBackups
         let manager = media.management
-        guard !Task.isCancelled, case let .signedIn(session) = state,
-              routeStatus == .connected, let endpoint = activeRoute?.endpoint else { return false }
+        guard !Task.isCancelled, let leaseID = backgroundSyncID, backgroundSyncKind == .processing,
+              case let .signedIn(session) = state, routeStatus == .connected, let route = activeRoute,
+              validatedNetworkPathSignature == lastNetworkPathSignature else { return false }
+        let endpoint = route.endpoint, routeEpoch = routeGeneration, path = validatedNetworkPathSignature
         // headless恢复刻意不创建Media pipeline；仅给原管理通道绑定刚验证的账号/路由，不能依赖前台configure曾运行。
         manager.configure(session: session, endpoint: endpoint)
         guard !backup.running, !manager.busy else { return !backup.backgroundAutomaticEnabled }
+        guard let scope = manager.backupScope else { return false }
         let generation = manager.generation
-        let scope = manager.backupScope
-        do {
-            guard try await backup.refreshBackgroundConsent(using: manager) else { return true }
-        } catch { return false }
-        await backup.load(using: manager)
-        guard !Task.isCancelled, manager.generation == generation, scope != nil, manager.backupScope == scope else { return false }
-        guard backup.backgroundAutomaticEnabled else { return true }
-        guard let operation = backup.runSystemBackground(using: manager) else { return false }
-        await withTaskCancellationHandler {
-            await operation.value
-        } onCancel: {
-            operation.cancel()
+        // 闭包固定本次已验证路由及processing owner；同地址重验证、换号或新网络路径也不能沿用旧租约。
+        let validateContext: @MainActor () throws -> Void = {
+            try Task.checkCancellation()
+            guard self.backgroundSyncID == leaseID, self.backgroundSyncKind == .processing,
+                  manager.generation == generation, manager.backupScope == scope, manager.client?.apiURL == endpoint,
+                  self.routeStatus == .connected, self.activeRoute == route, self.routeGeneration == routeEpoch,
+                  self.validatedNetworkPathSignature == path, self.lastNetworkPathSignature == path,
+                  case let .signedIn(current) = self.state, current == session else { throw CancellationError() }
         }
-        return !Task.isCancelled && manager.generation == generation && backup.backgroundLastResult == true
+        let validateLease: @MainActor () throws -> Void = {
+            try validateContext()
+            guard backup.backgroundAutomaticEnabled else { throw CancellationError() }
+        }
+        do {
+            try validateContext()
+            guard try await backup.refreshBackgroundConsent(using: manager) else { return true }
+            try validateLease()
+            await backup.load(using: manager)
+            try validateLease()
+            guard let operation = backup.runSystemBackground(using: manager) else { return false }
+            await withTaskCancellationHandler {
+                await operation.value
+            } onCancel: {
+                operation.cancel()
+            }
+            // operation.value已包含Worker/manager及唯一Coordinator退出；只有确认的上传周期才接组织。
+            try validateLease()
+            guard backup.backgroundLastResult == true, try await backup.refreshBackgroundConsent(using: manager) else { return false }
+            try validateLease()
+            return try await PhotoBackupAlbumAutomation.performBackground(backup: backup, using: manager, scope: scope,
+                                                                          validateLease: validateLease)
+        } catch { return false }
     }
 
     func performTransferReconciliation(id: UUID, delivery: LibraryTransferDelivery) async -> Bool {

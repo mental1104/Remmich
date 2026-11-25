@@ -955,6 +955,43 @@ struct PhotoBackupAlbumSyncTests {
         }
     }
 
+    /// 路径/processing owner失效不一定取消父Task；真实GET/首PUT返回后仍须把租约撤销传进内部写门。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func revokedLeaseStopsInsideMemberTaskWithoutCancellingItsWaiter(_ afterPUT: Bool) async throws {
+        try await withAlbumSyncFixture(kind: .rawJPEG) { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+            let sync = fixture.makeController()
+            let driver = PhotoBackupAlbumAutomation(sync: sync, backup: fixture.backup, matching: fixture.matching, store: fixture.store,
+                                                    authorization: { .authorized }, observePhotos: false)
+            let lease = AlbumAutomationLease()
+            await fixture.server.setMode(afterPUT ? .heldAfterCommit : .heldPrimaryRead)
+            await fixture.server.beginObservedWork()
+            let work = Task { try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() }) }
+            let observed = Task { _ = await work.result; await fixture.server.workFinished() }
+            do {
+                try await withTaskCancellationHandler {
+                    try #require(await fixture.server.waitUntilHeld())
+                    lease.current = false
+                    #expect(!work.isCancelled && fixture.manager.backupScope == fixture.scope)
+                    await fixture.server.release()
+                    switch await work.result {
+                    case .success: Issue.record("A revoked processing lease must fail before later membership writes.")
+                    case let .failure(error): #expect(error is CancellationError)
+                    }
+                    let cold = try await fixture.coldState()
+                    #expect(cold.automaticEnabled && cold.operations.first?.phase == (afterPUT ? .sending : .queued))
+                    #expect(cold.operations.first?.confirmedAssetIDs.isEmpty == true)
+                    #expect(await fixture.server.putCount(albumSyncPrimary) == (afterPUT ? 1 : 0))
+                    #expect(await fixture.server.putCount(albumSyncJPEG) == 0)
+                } onCancel: { work.cancel(); Task { await fixture.server.abort() } }
+            } catch {
+                work.cancel(); await fixture.server.release(); _ = await work.result; await observed.value; throw error
+            }
+            await observed.value
+        }
+    }
+
     /// 真Worker/client对ABC原片判重→实际SQLite摘要→关闭匹配的headless自动组织，组织不再调用export或上传。
     @Test(.timeLimit(.minutes(1))) @MainActor func completedWorkerReceiptFeedsHeadlessAlbumOrganizationWithoutOriginalReads() async throws {
         try await withAlbumSyncFixture { fixture in
@@ -983,6 +1020,60 @@ struct PhotoBackupAlbumSyncTests {
                 #expect(await fixture.server.bulkCheckCount() == 1)
                 #expect(exporter.calls == 1 && fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
             }
+        }
+    }
+
+    /// 真系统入口完成Worker后才接同一lease组织；独立后台关闭或租约退役不能靠aux自动同意继续写。
+    @Test(.timeLimit(.minutes(1)), arguments: ["complete", "background-off", "expired"])
+    @MainActor func systemUploadRetiresBeforeAlbumOrganizationAndRetainsItsGrantBoundary(_ boundary: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            await fixture.matching.setEnabled(false, using: fixture.manager)?.value
+            await fixture.server.setPrimaryDigest("qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
+            _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
+            let exporter = AlbumAutomationExporter(directory: fixture.root.appending(path: "system-original"), expected: fixture.photos.source)
+            let background = PhotoBackupController(store: fixture.store, exporter: exporter, albumScanner: { try fixture.photos.albums($0) },
+                                                   authorizationStatus: { .authorized }, observeAutomaticPhotos: false)
+            await background.load(using: fixture.manager)
+            await background.setBackgroundAutomaticEnabled(true, using: fixture.manager)
+            let upload = try #require(background.runSystemBackground(using: fixture.manager))
+            await withTaskCancellationHandler { await upload.value } onCancel: { upload.cancel() }
+            try Task.checkCancellation()
+            #expect(background.backgroundLastResult == true && !background.running && !fixture.manager.busy)
+            let afterUpload = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            #expect(afterUpload.jobs.map(\.stage) == [.completed] && afterUpload.backgroundAutomaticEnabled == true)
+            #expect(afterUpload.jobs.first?.primaryChecksum == "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=")
+
+            let lease = AlbumAutomationLease(), owner = fixture.manager.generation
+            if boundary == "background-off" {
+                await background.setBackgroundAutomaticEnabled(false, using: fixture.manager)
+            } else if boundary == "expired" {
+                lease.current = false
+            }
+            let sync = fixture.makeController()
+            let driver = PhotoBackupAlbumAutomation(sync: sync, backup: background, matching: fixture.matching, store: fixture.store,
+                                                    authorization: { .authorized }, observePhotos: false)
+            var checks = 0
+            let validate: @MainActor () throws -> Void = {
+                checks += 1; try Task.checkCancellation(); try lease.check()
+                guard fixture.manager.generation == owner, fixture.manager.backupScope == fixture.scope,
+                      background.backgroundAutomaticEnabled else { throw CancellationError() }
+            }
+            do {
+                let result = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: validate)
+                #expect(boundary == "complete" && result)
+            } catch is CancellationError {
+                #expect(boundary != "complete")
+            }
+            #expect(checks > 0)
+            let final = try await fixture.coldState()
+            #expect(final.automaticEnabled && final.operations.count == (boundary == "complete" ? 1 : 0))
+            #expect(final.operations.first?.phase == (boundary == "complete" ? .confirmed : nil))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == (boundary == "complete" ? 1 : 0))
+            #expect(await fixture.server.originalCheckCount() == 1)
+            #expect(exporter.calls == 1 && exporter.cloudChoices == [true] && fixture.photos.authorizationRequests == 0)
+            #expect(!FileManager.default.fileExists(atPath: exporter.directory.path))
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.map(\.stage) == [.completed])
         }
     }
 

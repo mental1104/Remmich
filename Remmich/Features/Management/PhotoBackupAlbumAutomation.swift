@@ -156,7 +156,7 @@ import Photos
 
     /// 前台和processing复用唯一周期；只有保存同意、当前授权/配置/上下文成立才调真实prepare/synchronize。
     /// 返回true表示安全候选全部完成或当前无新关系；失败/部分不伪称完成，历史异常仍由计划门禁保留。
-    private func cycle(using manager: LibraryManagementController, scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws -> Bool {
+    private func cycle(using manager: LibraryManagementController, scope: MediaAccountScope, check: @escaping @MainActor () throws -> Void) async throws -> Bool {
         await backup.waitForCurrentWork(); try check()
         guard !backup.running, !backup.configuringAutomatic, !manager.busy, !matching.running, !sync.running, !sync.loading, !sync.prepared else { pending = true; return false }
         let saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
@@ -171,7 +171,7 @@ import Photos
         guard backup.hasCurrentSavedSelection(using: manager), !manager.busy else { pending = true; return false }
         running = true
         await sync.load(using: manager, backup: backup); try check()
-        guard let preparation = sync.prepare(using: manager, backup: backup, automatic: true) else { pending = true; return false }
+        guard let preparation = sync.prepare(using: manager, backup: backup, automatic: true, validateExternal: check) else { pending = true; return false }
         try await awaitOwned(preparation); try check()
         guard sync.prepared else { status = sync.status; return false }
         let planned = sync.previewCount
@@ -179,7 +179,7 @@ import Photos
             sync.cancel(); status = "本次没有安全的新相簿关系；失败/未知/取消及部分回执仍保留手动核查。"
             return true
         }
-        guard let work = sync.synchronize(using: manager, backup: backup, automatic: true) else { pending = true; return false }
+        guard let work = sync.synchronize(using: manager, backup: backup, automatic: true, validateExternal: check) else { pending = true; return false }
         try await awaitOwned(work); try check()
         status = sync.status
         return sync.processed == planned && sync.confirmed == planned

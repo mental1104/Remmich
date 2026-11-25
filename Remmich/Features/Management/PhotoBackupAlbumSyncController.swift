@@ -140,8 +140,11 @@ import Photos
     }
 
     /// 只建立组织计划；RAW无完整回执时仅哈希本机双原图，不上传/下载iCloud。automatic不能重排失败/未知/部分历史。
-    @discardableResult func prepare(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false) -> Task<Void, Never>? {
-        start(using: manager, backup: backup) { [self] client, scope, check in
+    /// validateExternal默认nil；processing调用方可把固定租约检查接入每个内部await，而非只在整Task完成后检查。
+    @discardableResult func prepare(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                    validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
+        start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
             var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
             guard !automatic || saved.automaticEnabled else { prepared = false; previewIDs = []; return }
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
@@ -201,10 +204,13 @@ import Photos
 
     /// 手动确认或automatic独立同意后重核源/metadata；自动路径每项实际发送与检查点还须fresh磁盘意愿。
     /// manager/backup绑定当前会话与保存选择；automatic默认false保留手动路径，返回实际任务或门禁拒绝时nil。
-    @discardableResult func synchronize(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false) -> Task<Void, Never>? {
+    /// validateExternal默认nil保留手动确认；系统租约变化必须在真实成员GET返回后及PUT前同步拒绝。
+    @discardableResult func synchronize(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                        validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
         guard prepared, !previewIDs.isEmpty, let selection = previewSelection else { return nil }
         let planned = previewIDs, mappings = state.mappings
-        return start(using: manager, backup: backup) { [self] client, scope, check in
+        return start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
             let saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
             guard !automatic || saved.automaticEnabled else { throw PhotoBackupAlbumAutomaticRevoked() }
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
@@ -263,7 +269,8 @@ import Photos
     }
 
     /// 所有明确写流程共用manager忙门和原Coordinator；先取得管理忙门，避免自动备份抢占新组织操作。
-    private func start(using manager: LibraryManagementController, backup: PhotoBackupController,
+    /// validateExternal是窄系统租约端口，默认nil；其撤销错误与原账号/Photos门一样阻止后续HTTP与checkpoint。
+    private func start(using manager: LibraryManagementController, backup: PhotoBackupController, validateExternal: (@MainActor () throws -> Void)? = nil,
                        operation: @escaping @MainActor (LibraryMutationClient, MediaAccountScope, @escaping @MainActor () throws -> Void) async throws -> Void) -> Task<Void, Never>?
     {
         guard !running, !loading, !backup.running, !manager.busy, let scope = manager.backupScope, loadedScope == scope,
@@ -281,7 +288,10 @@ import Photos
                 }
             }
             do {
-                let check: @MainActor () throws -> Void = { try self.validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access) }
+                let check: @MainActor () throws -> Void = {
+                    try self.validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+                    try validateExternal?()
+                }
                 try check()
                 try await manager.perform(publishChange: false) { client in
                     try await PhotoBackupRunCoordinator.perform(scope: scope) { try check(); try await operation(client, scope, check) }
