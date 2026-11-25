@@ -488,6 +488,57 @@ final nonisolated class LibraryMutationClient: Sendable {
         return value
     }
 
+    /// albumID为明确选择的相簿；官方过滤列表只返回当前创建者的链接，不能当作相簿所有公开链接清单。
+    func albumPublicLinks(_ albumID: String) async throws -> [AlbumPublicLink] {
+        let albumID = try validID(albumID)
+        let data = try await send("GET", ["shared-links"], query: [.init(name: "albumId", value: albumID)], expectedStatus: 200)
+        let values = try JSONDecoder().decode([AlbumPublicLink].self, from: data)
+        for value in values {
+            try value.validate(userID: userID, albumID: albumID)
+        }
+        guard Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values.sorted { $0.id.lowercased() < $1.id.lowercased() }
+    }
+
+    /// linkID/albumID固定当前创建者的相簿链接；精确200和fresh嵌套相簿身份共同确认，禁止复用列表缓存。
+    func albumPublicLink(_ linkID: String, albumID: String) async throws -> AlbumPublicLink {
+        let linkID = try validID(linkID); let albumID = try validID(albumID)
+        let data = try await send("GET", ["shared-links", linkID], expectedStatus: 200)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID)
+        guard value.id.lowercased() == linkID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 只由用户明确确认创建ALBUM链接；全部选项显式发送，POST201回执仍需调用者fresh详情确认所属相簿。
+    func createAlbumPublicLink(_ albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
+        let albumID = try validID(albumID); let options = try options.normalized()
+        guard var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(options)) as? [String: Any] else {
+            throw LibraryWriteError.malformedResponse
+        }
+        object["type"] = "ALBUM"; object["albumId"] = albumID
+        let data = try await send("POST", ["shared-links"], body: JSONSerialization.data(withJSONObject: object), expectedStatus: 201)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID, requiresAlbum: false)
+        guard value.options == options else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 只更新明确选中链接的一份完整选项；PATCH200不代表最终确认，省略/错误字段不能被补成请求值。
+    func updateAlbumPublicLink(_ linkID: String, albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
+        let linkID = try validID(linkID); let albumID = try validID(albumID); let options = try options.normalized()
+        let data = try await send("PATCH", ["shared-links", linkID], body: JSONEncoder().encode(options), expectedStatus: 200)
+        let value = try JSONDecoder().decode(AlbumPublicLink.self, from: data)
+        try value.validate(userID: userID, albumID: albumID, requiresAlbum: false)
+        guard value.id.lowercased() == linkID.lowercased(), value.options == options else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 仅撤销一个当前创建者的链接，照片/相簿不删除；精确204后仍由调用者fresh列表确认消失。
+    func revokeAlbumPublicLink(_ linkID: String) async throws {
+        _ = try await send("DELETE", ["shared-links", validID(linkID)], expectedStatus: 204)
+    }
+
     /// 只读取现有服务器账户供选择；不按email发邀请，不猜不可见账户，也不暴露管理用户API。
     func sharingUsers() async throws -> [AlbumSharingUser] {
         let values = try await JSONDecoder().decode([AlbumSharingUser].self, from: send("GET", ["users"], expectedStatus: 200))

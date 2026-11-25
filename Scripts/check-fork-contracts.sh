@@ -11,6 +11,7 @@ swiftc -swift-version 6 \
   Remmich/Domain/Management/AssetMetadata.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
   Remmich/Domain/Management/AlbumSharing.swift \
+  Remmich/Domain/Management/AlbumPublicLink.swift \
   Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
   Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
   Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \
