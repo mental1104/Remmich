@@ -21,6 +21,7 @@ struct SearchPresetsPanel: View {
             VStack(alignment: .leading, spacing: 12) {
                 Button(store.busy ? "Loading" : "Reload saved searches") { Task { conversionError = nil; await store.load(manager: manager) } }
                     .disabled(store.busy)
+                    .accessibilityIdentifier("saved-search-reload")
                 if store.supported == false {
                     Text("This server does not provide saved searches.").font(.caption)
                 }
@@ -30,6 +31,7 @@ struct SearchPresetsPanel: View {
                     HStack {
                         Button(editing == nil ? "Save current search" : "Save name") { Task { await save() } }
                             .disabled(store.busy || !store.hasFreshData || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("saved-search-save")
                         if editing != nil {
                             Button("Cancel rename") { editing = nil; name = "" }
                         }
@@ -38,6 +40,7 @@ struct SearchPresetsPanel: View {
                         HStack {
                             Button(preset.name) { apply(preset) }
                                 .accessibilityHint("Apply all saved search conditions")
+                                .accessibilityIdentifier("saved-search-apply-\(preset.id)")
                             Spacer()
                             Menu {
                                 Button("Rename") { editing = preset; name = preset.name }
@@ -46,11 +49,13 @@ struct SearchPresetsPanel: View {
                             } label: {
                                 Image(systemName: "ellipsis.circle")
                             }.accessibilityLabel("Manage \(preset.name)")
+                                .accessibilityIdentifier("saved-search-manage-\(preset.id)")
                         }.disabled(store.busy || !store.hasFreshData)
                     }
                 }
                 if let error = conversionError ?? store.error {
                     Text(error).font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("saved-search-error")
                 }
             }
         }
@@ -69,6 +74,7 @@ struct SearchPresetsPanel: View {
             switch action {
             case let .replace(preset, snapshot):
                 Button("Replace all conditions", role: .destructive) { Task { _ = await store.replace(preset, query: snapshot, manager: manager) } }
+                    .accessibilityIdentifier("saved-search-confirm-replace")
             case let .remove(preset):
                 Button("Delete saved search", role: .destructive) { Task {
                     if await store.remove(preset, manager: manager), editing?.id == preset.id {
@@ -76,6 +82,7 @@ struct SearchPresetsPanel: View {
                         name = ""
                     }
                 } }
+                .accessibilityIdentifier("saved-search-confirm-delete")
             }
         } message: { action in
             switch action {

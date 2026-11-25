@@ -166,6 +166,8 @@ run_case phone false '' '' 19 "$ci_phone"; expect_status "$actual" 19
 rg -q 'Simulator preparation:' "$current/output/xcodebuild.log"
 rg -q 'mock xcodebuild exit 19' "$current/output/xcodebuild.log"
 rg -q '^-only-testing:| -only-testing:RemmichUITests/SearchAcceptanceUITests ' "$current/calls"; passed
+# 两个真实UI类必须同时进入xcodebuild参数，避免新增面板用例只编进bundle却未运行。
+rg -q ' -only-testing:RemmichUITests/SavedSearchPanelAcceptanceUITests ' "$current/calls"; passed
 
 new_case ci-missing-id Booted Booted
 run_case tablet true '' '' 0 ''; expect_status "$actual" 2
