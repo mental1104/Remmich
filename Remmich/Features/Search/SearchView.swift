@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 真实搜索页，复用原生缩略图与查看器，不显示演示资源。
 struct SearchView: View {
@@ -11,6 +12,8 @@ struct SearchView: View {
         private var searchCompletion: ((NativeSearchQuery) -> Void)?
     #endif
     @State private var query = NativeSearchQuery()
+    /// 搜索展示与查询、请求分开持有；退出只恢复导航控件，不完成请求或切换账号。
+    @State private var isSearchPresented = false
     @State private var store = NativeSearchStore()
     @State private var selection: Selection?
     @State private var referencePreview: TimelineAssetSummary?
@@ -261,11 +264,12 @@ struct SearchView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .top, spacing: 0) { searchDismissalHeader }
         // 固定原生导航栏字段，避免自动底部搜索工具栏在横屏键盘动画中失去可访问性命中。
         .searchable(text: Binding(get: { query.text }, set: {
             query.useSearchText($0)
             referencePreview = nil
-        }), placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
+        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in
@@ -273,6 +277,7 @@ struct SearchView: View {
             selection = nil
             referencePreview = nil
             query = .init()
+            isSearchPresented = false
             people = []
             peopleError = nil
             tagChoices = []
@@ -298,6 +303,26 @@ struct SearchView: View {
                             visibilityChanged: { _ in })
         }
         .accessibilityIdentifier("search-root")
+    }
+
+    /// iPad原生搜索会遮住账号工具栏且可能没有关闭按钮；固定内容头使滚动后仍能正常退出搜索。
+    @ViewBuilder private var searchDismissalHeader: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad, isSearchPresented {
+            HStack {
+                Text("Search").font(.headline)
+                Spacer()
+                Button("Close") {
+                    // 只关闭原生搜索展示；查询、在途请求与账号入口继续由原来的流程处理。
+                    isSearchPresented = false
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .accessibilityIdentifier("search-dismiss")
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+            .background(.bar)
+        }
     }
 
     /// 防抖后按当前条件搜索；输入变化取消等待，不显示网络失败。
