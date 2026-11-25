@@ -390,7 +390,7 @@ extension PhotoBackupAlbumSyncController {
                                        scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws
     {
         guard let id = saved.creations[index].receiptID else { throw LibraryWriteError.unavailable }
-        let fresh = try await client.albumSyncTarget(id); try check()
+        let fresh = try await client.albumSyncTarget(id, ownerOnly: true); try check()
         guard fresh.albumName == saved.creations[index].name else { throw LibraryWriteError.malformedResponse }
         let localID = saved.creations[index].localAlbumID
         saved.mappings.removeAll { $0.localAlbumID == localID }
@@ -456,6 +456,8 @@ extension PhotoBackupAlbumSyncController {
                         return true
                     }
                 }
+                // 即使成员原本已存在，也须在提交本轮确认前重核当前角色，不能沿用较早的编辑权限。
+                _ = try await client.albumSyncTarget(operation.targetID); try check()
                 try verifySource(operation.source)
                 freshConfirmed.insert(asset.assetID)
                 operation.confirmedAssetIDs.insert(asset.assetID)

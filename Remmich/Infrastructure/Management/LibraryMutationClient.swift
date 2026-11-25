@@ -127,6 +127,37 @@ nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     private nonisolated struct OwnerUser: Decodable, Sendable { let id: String }
 }
 
+/// 组织目标的当前权限投影；复用ManagedAlbum身份解码，只按本人UUID查完整角色，不从成员位置猜权限。
+private nonisolated struct AlbumSyncTargetAccess: Decodable, Sendable {
+    let album: ManagedAlbum
+    let members: [Member]?
+    /// 只读权限必需的UUID/role，不要求与此写权限无关的姓名/邮箱字段。
+    struct Member: Decodable, Sendable { let user: User; let role: String }
+    /// 当前服务端用户的稳定UUID，不能以数组位置或名称代替本人身份。
+    struct User: Decodable, Sendable { let id: UUID }
+    private enum CodingKeys: String, CodingKey { case albumUsers }
+
+    /// 同一响应同时解码身份与可选完整成员；legacy无members只保留owner能力，坏members不当作缺省。
+    init(from decoder: any Decoder) throws {
+        album = try ManagedAlbum(from: decoder)
+        members = try decoder.container(keyedBy: CodingKeys.self).decodeIfPresent([Member].self, forKey: .albumUsers)
+    }
+
+    /// userID固定当前账户；完整成员含唯一合法UUID、首owner与已知角色才允许owner/editor。
+    /// members存在时不回退legacyownerId；旧响应缺成员只允许明确本人owner，不能猜共享编辑者。
+    func permitsAdding(userID: String, ownerOnly: Bool = false) throws -> Bool {
+        guard UUID(uuidString: album.id) != nil, let owner = UUID(uuidString: album.ownerId), let user = UUID(uuidString: userID) else { throw LibraryWriteError.malformedResponse }
+        guard let members else { return owner == user }
+        guard !members.isEmpty, members.first?.role == "owner", members.first?.user.id == owner,
+              Set(members.map(\.user.id)).count == members.count else { throw LibraryWriteError.malformedResponse }
+        guard members.allSatisfy({ ["owner", "editor", "viewer"].contains($0.role) }), let role = members.first(where: { $0.user.id == user })?.role else { return false }
+        if ownerOnly {
+            return role == "owner" && owner == user
+        }
+        return role == "owner" || role == "editor"
+    }
+}
+
 nonisolated struct AssetEditList: Codable, Sendable {
     var edits: [Edit]
 
@@ -470,13 +501,12 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
     }
 
-    /// 组织目标仅当前自有相簿；名称不唯一，调用方必须明确保存UUID，不选择同名第一个。
+    /// 组织目标仅当前owner/editor相簿；名称不唯一，必须明确保存UUID，不把viewer/未知角色提升为编辑者。
     func albumSyncTargets() async throws -> [ManagedAlbum] {
-        guard let owner = UUID(uuidString: userID) else { throw LibraryWriteError.invalidID }
         let data = try await send("GET", ["albums"], expectedStatus: 200)
-        let values = try JSONDecoder().decode([ManagedAlbum].self, from: data)
-        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
-        return values.filter { UUID(uuidString: $0.ownerId) == owner }
+        let values = try JSONDecoder().decode([AlbumSyncTargetAccess].self, from: data)
+        guard Set(values.map { $0.album.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return try values.filter { try $0.permitsAdding(userID: userID) }.map(\.album)
     }
 
     /// 仅明确创建空相簿；精确201和本次owner/name/UUID回执才返回，网络/坏回执不得重试或同名认领。
@@ -489,12 +519,13 @@ final nonisolated class LibraryMutationClient: Sendable {
         return value
     }
 
-    /// 开始/恢复与成员写入后均fresh验证同一目标及owner；编辑者目标留后续，不以缓存角色推测许可。
-    func albumSyncTarget(_ id: UUID) async throws -> ManagedAlbum {
+    /// 开始/恢复与写后fresh核同一目标及本人角色；ownerOnly仅用于本次201创建身份，不以旧缓存角色授权。
+    func albumSyncTarget(_ id: UUID, ownerOnly: Bool = false) async throws -> ManagedAlbum {
         let data = try await send("GET", ["albums", id.uuidString], expectedStatus: 200)
-        let value = try JSONDecoder().decode(ManagedAlbum.self, from: data)
-        guard UUID(uuidString: value.id) == id, let owner = UUID(uuidString: value.ownerId), owner == UUID(uuidString: userID) else { throw LibraryWriteError.malformedResponse }
-        return value
+        let value = try JSONDecoder().decode(AlbumSyncTargetAccess.self, from: data)
+        guard UUID(uuidString: value.album.id) == id else { throw LibraryWriteError.malformedResponse }
+        guard try value.permitsAdding(userID: userID, ownerOnly: ownerOnly) else { throw LibraryWriteError.http(403) }
+        return value.album
     }
 
     /// 只读当前资产metadata，不请求原片/预览；锁定资产不可因存在本机关联而被分享进相簿。

@@ -418,6 +418,81 @@ struct PhotoBackupAlbumSyncTests {
             #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
         }
     }
+
+    /// 本人第三项editor也可组织自有照片；无members旧响应只保留明确本人owner能力，不改已有账户格式。
+    @Test(.timeLimit(.minutes(1)), arguments: ["editor", "legacyOwner"])
+    @MainActor func freshEditorAndLegacyOwnerTargetsCanReceiveMatchedAssets(_ role: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setSharedRole(role)
+            await fixture.sync.load(using: fixture.manager, backup: fixture.backup)
+            #expect(fixture.sync.targets.contains { UUID(uuidString: $0.id) == albumSyncTarget2 })
+            try await fixture.mapAndPrepare()
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+        }
+    }
+
+    /// viewer、缺本人/未知角色/重复本人及无members的他人目标均不授权；不能拿旧ownerId或第二成员猜editor。
+    @Test(.timeLimit(.minutes(1)), arguments: ["viewer", "missing", "future", "duplicate", "legacy"])
+    @MainActor func unreadableOrUnprovenEditorRoleCannotAuthorizeMapping(_ role: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setSharedRole(role)
+            await fixture.sync.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().mappings.isEmpty)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2) == false)
+        }
+    }
+
+    /// 角色在确认前或实际PUT后撤销均不能落整组成功；恢复editor后只fresh补缺失，不重复已加入关系。
+    @Test(.timeLimit(.minutes(1)), arguments: ["before", "after", "existing"])
+    @MainActor func editorRevocationBeforeOrAfterPUTRequiresFreshRecovery(_ timing: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setSharedRole("editor")
+            await fixture.sync.load(using: fixture.manager, backup: fixture.backup)
+            try await fixture.mapAndPrepare()
+            if timing == "existing" {
+                await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+                try await fixture.mapAndPrepare(saveMapping: false)
+                await fixture.server.setMode(.downgradeAfterContains)
+            } else if timing == "after" {
+                await fixture.server.setMode(.downgradeAfterMember)
+            } else {
+                await fixture.server.setSharedRole("viewer")
+            }
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == (timing == "before" ? 0 : 1))
+            await fixture.server.setMode(.normal); await fixture.server.setSharedRole("editor")
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+        }
+    }
+
+    /// 创建恢复仍要求本次UUID当前本人owner；仅剩editor不能冒充创建owner身份，原201回执保留且不重POST。
+    @Test(.timeLimit(.minutes(1))) @MainActor func creationIdentityDoesNotBecomeAnEditorPermissionClaim() async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Created", using: fixture.manager, backup: fixture.backup))
+            let preview = try await fixture.coldState()
+            let id = try #require(preview.creations.first?.id)
+            await fixture.server.setMode(.createReadFailure)
+            await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().creations.first?.phase == .received)
+            await fixture.server.setMode(.normal); await fixture.server.setSharedRole("createdEditor")
+            await fixture.run(fixture.sync.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().mappings.isEmpty)
+            #expect(try await fixture.coldState().creations.first?.phase == .received)
+            #expect(await fixture.server.creationCount() == 1)
+        }
+    }
 }
 
 /// 真实URLSession请求的有限值快照；读取实际JSON或stream，不在替身中补造客户端正文。
@@ -456,6 +531,7 @@ private actor AlbumSyncHTTPServer {
     /// 模拟逐项回执、提交后失联以及真实读取/写入等待门，不改变客户端控制流。
     enum Mode: String, Sendable { case normal, duplicate, errorAfterCommit, missingAfterSuccess, denyJPEG, heldAfterCommit, heldJPEGRead
         case createErrorAfterCommit, createWrongStatus, createMalformed, createRejected, heldCreateAfterCommit, createReadFailure
+        case downgradeAfterMember, downgradeAfterContains
     }
 
     /// 交付给真实URLProtocol的HTTP状态与JSON字节。
@@ -476,6 +552,7 @@ private actor AlbumSyncHTTPServer {
     private var idleObservers: [CheckedContinuation<Void, Never>] = []
     private var created: [UUID: String] = [:]
     private var creates = 0
+    private var sharedRole: String?
 
     /// endpoint与kind固定本例公开请求/媒体类型；全部资产与身份都为合成值。
     init(endpoint: URL, kind: PhotoBackupSource.Kind) {
@@ -490,6 +567,11 @@ private actor AlbumSyncHTTPServer {
     /// 仅改变外部fresh证据，用于检验旧关联不能授权当前关系写入。
     func setMismatch(_ value: String) {
         mismatch = value
+    }
+
+    /// 第二目标改为共享目标；本人刻意位于第三项，不让客户端依赖数组位置提升权限。
+    func setSharedRole(_ role: String) {
+        sharedRole = role
     }
 
     /// 查询HTTP服务实际关系，不能用Controller内存列表当作服务已写入。
@@ -529,7 +611,20 @@ private actor AlbumSyncHTTPServer {
 
     /// 官方当前相簿投影，两个同名目标靠UUID区分；owner来自有序albumUsers。
     private func album(_ id: UUID) -> [String: Any] {
-        ["id": id.uuidString, "albumName": created[id] ?? "同名目标", "albumUsers": [["role": "owner", "user": ["id": mismatch == "target" ? albumSyncPrimary.uuidString : albumSyncOwner]]]]
+        if let sharedRole, id == albumSyncTarget2 || (created[id] != nil && sharedRole == "createdEditor") {
+            if sharedRole == "legacy" || sharedRole == "legacyOwner" {
+                return ["id": id.uuidString, "albumName": "同名目标", "ownerId": sharedRole == "legacyOwner" ? albumSyncOwner : albumSyncMotion.uuidString]
+            }
+            var members: [[String: Any]] = [["role": "owner", "user": ["id": albumSyncMotion.uuidString]], ["role": "editor", "user": ["id": albumSyncTarget1.uuidString]]]
+            if sharedRole != "missing" {
+                members.append(["role": ["duplicate", "createdEditor"].contains(sharedRole) ? "editor" : sharedRole, "user": ["id": albumSyncOwner]])
+            }
+            if sharedRole == "duplicate" {
+                members.append(["role": "viewer", "user": ["id": albumSyncOwner]])
+            }
+            return ["id": id.uuidString, "albumName": created[id] ?? "同名目标", "albumUsers": members]
+        }
+        return ["id": id.uuidString, "albumName": created[id] ?? "同名目标", "albumUsers": [["role": "owner", "user": ["id": mismatch == "target" ? albumSyncPrimary.uuidString : albumSyncOwner]]]]
     }
 
     /// 将有限合成响应转为真正HTTP字节，不直接返回客户端业务DTO。
@@ -571,7 +666,11 @@ private actor AlbumSyncHTTPServer {
                 return try json(targets.map { album($0) })
             }
             guard query.count == 1, query.first?.name == "assetId", let text = query.first?.value, let asset = UUID(uuidString: text) else { throw URLError(.badURL) }
-            return try json(targets.filter { members.contains(key(asset, $0)) }.map { album($0) })
+            let response = try json(targets.filter { members.contains(key(asset, $0)) }.map { album($0) })
+            if mode == .downgradeAfterContains {
+                sharedRole = "viewer"
+            }
+            return response
         }
         if request.method == "GET", let target = targets.first(where: { path == "/api/albums/" + $0.uuidString }) {
             if mode == .createReadFailure, created[target] != nil {
@@ -602,6 +701,9 @@ private actor AlbumSyncHTTPServer {
             let object = try #require(decodedObject as? [String: Any])
             guard Set(object.keys) == ["ids"], decoded.ids.count == 1, let id = decoded.ids.first, [albumSyncPrimary, albumSyncJPEG].contains(id) else { throw URLError(.cannotDecodeContentData) }
             puts[id, default: 0] += 1
+            if target == albumSyncTarget2, let sharedRole, !["editor", "legacyOwner"].contains(sharedRole) {
+                return try json([["id": id.uuidString, "success": false, "error": "no_permission"]])
+            }
             if mode == .denyJPEG, id == albumSyncJPEG {
                 return try json([["id": id.uuidString, "success": false, "error": "no_permission"]])
             }
@@ -616,6 +718,9 @@ private actor AlbumSyncHTTPServer {
             }
             if mode == .duplicate {
                 return try json([["id": id.uuidString, "success": false, "error": "duplicate"]])
+            }
+            if mode == .downgradeAfterMember, target == albumSyncTarget2 {
+                sharedRole = "viewer"
             }
             return try json([["id": id.uuidString, "success": true]])
         }
