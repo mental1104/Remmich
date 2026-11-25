@@ -432,6 +432,52 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try await JSONDecoder().decode([ManagedAlbum].self, from: send("GET", ["albums"], query: query))
     }
 
+    /// 真实读取所有可见相簿及完整有序成员；不要求不存在的ownerId，也不将缺成员降成空列表。
+    func sharingAlbums() async throws -> [AlbumSharingSnapshot] {
+        let values = try await JSONDecoder().decode([AlbumSharingSnapshot].self, from: send("GET", ["albums"], expectedStatus: 200))
+        for value in values {
+            try value.validate()
+        }
+        guard Set(values.map { $0.id.lowercased() }).count == values.count else { throw LibraryWriteError.malformedResponse }
+        return values
+    }
+
+    /// id为当前明确选择的相簿；强制fresh200与匹配UUID，不复用列表或索引缓存做写前预检。
+    func sharingAlbum(_ id: String) async throws -> AlbumSharingSnapshot {
+        let id = try validID(id)
+        let value = try await JSONDecoder().decode(AlbumSharingSnapshot.self, from: send("GET", ["albums", id], expectedStatus: 200))
+        try value.validate()
+        guard value.id.lowercased() == id.lowercased() else { throw LibraryWriteError.malformedResponse }
+        return value
+    }
+
+    /// 只读取现有服务器账户供选择；不按email发邀请，不猜不可见账户，也不暴露管理用户API。
+    func sharingUsers() async throws -> [AlbumSharingUser] {
+        let values = try await JSONDecoder().decode([AlbumSharingUser].self, from: send("GET", ["users"], expectedStatus: 200))
+        guard values.allSatisfy({ UUID(uuidString: $0.id) != nil }), Set(values.map { $0.id.lowercased() }).count == values.count else {
+            throw LibraryWriteError.malformedResponse
+        }
+        return values
+    }
+
+    /// 仅提交一个明确成员，沿官方PUT200/角色PUT204/DELETE204；无重试、无owner提升或批量部分写推断。
+    func changeAlbumSharing(_ command: AlbumSharingCommand, albumID: String) async throws {
+        let albumID = try validID(albumID); let userID = try validID(command.userID)
+        switch command {
+        case let .add(_, role):
+            struct Body: Encodable { struct Member: Encodable { let userId: String; let role: String }; let albumUsers: [Member] }
+            let data = try await send("PUT", ["albums", albumID, "users"], body: JSONEncoder().encode(Body(albumUsers: [.init(userId: userID, role: role.rawValue)])), expectedStatus: 200)
+            let value = try JSONDecoder().decode(AlbumSharingSnapshot.self, from: data)
+            try value.validate()
+            guard value.id.lowercased() == albumID.lowercased() else { throw LibraryWriteError.malformedResponse }
+        case let .role(_, role):
+            struct Body: Encodable { let role: String }
+            _ = try await send("PUT", ["albums", albumID, "user", userID], body: JSONEncoder().encode(Body(role: role.rawValue)), expectedStatus: 204)
+        case .remove:
+            _ = try await send("DELETE", ["albums", albumID, "user", userID], expectedStatus: 204)
+        }
+    }
+
     /// id为当前查看照片；精确200、匹配的assetId及可完整保留的编辑文档才允许进入编辑器。
     func edits(_ id: String) async throws -> AssetEditList {
         let id = try validID(id)
