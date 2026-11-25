@@ -18,3 +18,13 @@
 NAS 已跑四个受影响 Swift 文件的 SwiftFormat 0.64.5 scoped lint 和 diff 检查。NAS 无 Swift/Xcode，以上测试、硬件焦点、指针、VoiceOver、Dynamic Type 与实际 Stage Manager/横竖屏交互仍未执行，等待统一 macOS CI 与 iPhone 15 Pro/iPad Pro 2022 11 英寸验收。查看器后续已接有限刷新，但真实派生 ready 确认和全应用多任务/键盘/指针验收仍未完成。
 
 回退本切片只改变输入方式和拖动连续性，保留原图、已保存编辑和离线资源，不需要数据回滚。
+
+## 后续：窗口切换与连续捏合
+
+独立分支 `codex/fix-editor-window-continuity` 从 `795fd39` 接续，保留先前编辑与 iPad 分支。修复两处可直接从原实现证明的交互缺口：760 点阈值/辅助字号切换时，原 if/HStack/VStack 会替换 Canvas 结构身份；视口变化清除 pinchStart 后，下一累积倍率又作用于当前裁剪，已按1.25从400缩到320的宽度会被1.30再缩到246。
+
+预览改用 [AnyLayout](https://developer.apple.com/documentation/swiftui/anylayout)，保留同一 Canvas/结果子树、FocusState/草稿和原高度/间距规则，只改变横排/纵排策略。实际 MagnificationGesture 接入像素域 session：初次、换视口或外部精确调整的首事件保留当前范围并重锚，此后只用累计倍率之比；不会恢复旧框或重复缩放。按1.30重锚后，后续1.625应把320缩为256。双指期间单指平移不再重复消费输入。
+
+[GestureState](https://developer.apple.com/documentation/swiftui/gesturestate) 的非活动复位也退休捏合/拖动锚点，覆盖系统取消未正常触发 onEnded 的路径；离开 Canvas 同样清理，像素草稿不变。原一/十像素键盘、VoiceOver、原图对照、坐标算法、加载/账号/官方PUT保存与取消确认完整保留；不改变服务器参数或覆盖原片。
+
+新增4函数/7声明场景覆盖变视口、外部修改/取消、坏倍率/几何及来源尺寸变化，调用产品实际使用的 session。NAS实际4文件 SwiftFormat0.64.5 lint、diff及 Node 边界/6独立倍率算术检查通过；原保存生命周期、渲染、坐标与键盘/拖动源码逐字保留。脚本 `/volume2/codex-home/mental1104/tmp/remmich-editor-continuity-source-audit-20261125.cjs` 不执行 Swift/UIKit。Swift编译、7场景、实际硬件捏合/焦点/窗口取消仍留统一验收；没有新CI/push/实服务/生产操作。回退本后续无需数据迁移。

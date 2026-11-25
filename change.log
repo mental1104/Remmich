@@ -1,3 +1,9 @@
+## 2026-11-25: Preserve visual editor state and pinch continuity across window resizing
+
+- Source: independent codex/fix-editor-window-continuity from795fd39; upstream remains672f02e, no sync. Replace width/Dynamic-Type conditional Canvas trees with AnyLayout and identical child order/heights/spacing, preserving crop focus and interaction identity.
+- Fix cumulative pinch being reapplied after viewport reset: preserve the current pixels at the first new viewport/external-change event, then consume only the ratio from that new scale anchor. Connect the actual MagnificationGesture, prevent simultaneous single-finger consumption, and retire anchors through GestureState cancellation/end/disappearance. Original coordinates, preview rendering, keyboard/VoiceOver and official load/save/account/cancel semantics remain unchanged.
+- Add4 functions/7 declared functional regression cases. Actual NAS4-file lint/diff and independent source-boundary/6-scale arithmetic checks pass; Swift compilation/runtime, actual gestures/focus/multitasking/device acceptance remain UNVERIFIED for the final phase. No new CI/push/production/API/media rewrite. Revert only this interaction patch without migration. See docs/ipad-editor-interaction.md.
+
 ## 2026-11-24: Bound the viewer modifier chain's type-checking expressions
 
 - Source: codex/fix-viewer-modifier-boundaries from exact2ff5b8c. CI45383819035 ended failure19:36 with the sole source diagnostic moved to onAppear/beginOpeningAnimation; extracting cleanup alone did not solve the enclosing generic expression. Upstream remains672f02e; no feature/API/data/production/workflow change, push or CI trigger.

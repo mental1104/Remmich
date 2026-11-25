@@ -151,14 +151,14 @@ struct AssetEditingView: View {
                 Text("原图对照").tag(true)
             }.pickerStyle(.segmented).accessibilityIdentifier("asset-editor-comparison")
             if draft.crop != nil {
-                if size.width >= 760, !dynamicTypeSize.isAccessibilitySize {
-                    HStack(alignment: .top, spacing: 14) {
-                        cropCanvas(image, draft: draft).frame(maxWidth: .infinity)
-                        resultPreview(image, draft: draft).frame(maxWidth: .infinity)
-                    }.frame(height: min(440, max(260, size.height * 0.6)))
-                } else {
-                    cropCanvas(image, draft: draft).frame(height: min(340, max(220, size.height * 0.42)))
-                    resultPreview(image, draft: draft).frame(height: min(300, max(180, size.height * 0.32)))
+                let horizontal = size.width >= 760 && !dynamicTypeSize.isAccessibilitySize
+                let layout = horizontal ? AnyLayout(HStackLayout(alignment: .top, spacing: 14)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
+                let canvasHeight = horizontal ? min(440, max(260, size.height * 0.6)) : min(340, max(220, size.height * 0.42))
+                let resultHeight = horizontal ? canvasHeight : min(300, max(180, size.height * 0.32))
+                // 只换布局策略，不换Canvas结构身份，窗口/Dynamic Type变化保留焦点、手势和当前草稿。
+                layout {
+                    cropCanvas(image, draft: draft).frame(maxWidth: .infinity).frame(height: canvasHeight)
+                    resultPreview(image, draft: draft).frame(maxWidth: .infinity).frame(height: resultHeight)
                 }
                 Text("拖动选框或四角，双指捏合调整取景范围。左侧／上方选框使用原图坐标，先裁剪再应用旋转与镜像。")
                     .font(.caption).foregroundStyle(.secondary)
