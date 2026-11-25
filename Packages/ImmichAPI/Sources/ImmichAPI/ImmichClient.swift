@@ -280,16 +280,18 @@ public actor ImmichClient {
         } catch { throw Self.map(error) }
     }
 
+    /// response为官方完整相簿DTO；首owner展示投影保持兼容，所有明确owner身份另存供本人相簿筛选。
     private static func album(from response: Components.Schemas.AlbumResponseDto) throws -> ImmichAlbum {
         guard !response.id.isEmpty, response.assetCount >= 0 else { throw ImmichAPIError.invalidResponse }
-        let owner = response.albumUsers.first { $0.role == .owner }?.user
+        let owners = response.albumUsers.filter { $0.role == .owner }.map(\.user)
+        let owner = owners.first
         return ImmichAlbum(id: response.id, name: response.albumName, description: response.description,
                            thumbnailAssetID: response.albumThumbnailAssetId, assetCount: response.assetCount,
                            updatedAt: response.updatedAt, createdAt: response.createdAt,
                            startDate: response.startDate, endDate: response.endDate,
                            lastModifiedAssetTimestamp: response.lastModifiedAssetTimestamp,
                            isShared: response.shared || response.hasSharedLink,
-                           ownerName: owner?.name, ownerID: owner?.id)
+                           ownerName: owner?.name, ownerID: owner?.id, ownerIDs: owners.map(\.id))
     }
 
     public func timelineBuckets(

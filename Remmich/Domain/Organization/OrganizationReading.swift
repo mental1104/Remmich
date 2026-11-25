@@ -13,11 +13,11 @@ nonisolated enum PendingAlbumSelection {
     static let groupName = "待整理"
 
     /// albums是当前账户可读列表，directory是已规范化的服务器分组，ownerID必须来自会话身份。
-    /// 返回去重、最近更新优先的本人相簿；缺失ownerID的相簿不被猜测为本人所有。
+    /// 返回去重、最近更新优先的本人相簿；fresh任意owner匹配，旧摘要缺全owner字段时才兼容原ownerID。
     static func select(_ albums: [AlbumSummary], directory: ForkAlbumDirectory, ownerID: String) -> [AlbumSummary] {
         var seen = Set<String>()
         return albums.filter {
-            $0.ownerID == ownerID && directory.includes(albumID: $0.id, category: nil, group: groupName)
+            $0.isOwned(by: ownerID) && directory.includes(albumID: $0.id, category: nil, group: groupName)
                 && seen.insert($0.id).inserted
         }.sorted {
             if $0.updatedAt != $1.updatedAt {

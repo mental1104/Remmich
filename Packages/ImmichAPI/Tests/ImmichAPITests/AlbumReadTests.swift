@@ -21,6 +21,7 @@ struct AlbumReadTests {
         #expect(album.name == "Park")
         #expect(album.thumbnailAssetID == nil)
         #expect(album.ownerName == "Owner")
+        #expect(album.ownerID == "owner-1" && album.ownerIDs == ["owner-1"])
         #expect(album.isShared)
         #expect(album.createdAt < album.updatedAt)
         #expect(album.startDate == nil)
