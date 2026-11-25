@@ -134,6 +134,8 @@ final class LibraryIndexController {
     private var endpoint: URL?
     private var accessToken: String?
     private var task: Task<Void, Never>?
+    private var pendingMetadataDates: [String: AssetMetadataDateProjection] = [:]
+    @ObservationIgnored private weak var metadataDateManager: LibraryManagementController?
     private var bootstrapCatalogTask: Task<Void, Never>?
     private var localMaintenanceTask: Task<Void, Never>?
     private var warmingTask: Task<Void, Never>?
@@ -636,6 +638,23 @@ final class LibraryIndexController {
         requestIndexSync(fullReconciliation: false)
     }
 
+    /// metadataDates为当前管理账号已核对的日期投影；活跃同步只接管需求，完成后补一轮，不丢旧月同桶刷新。
+    /// manager只验证账号/路由生命周期，索引仍由既有source/store与单一run写入，不建立第二个索引worker。
+    func syncNow(metadataDates: [AssetMetadataDateProjection], manager: LibraryManagementController) {
+        guard !metadataDates.isEmpty else { syncNow(); return }
+        guard let scope, manager.backupScope == scope, manager.client?.apiURL == endpoint else { return }
+        let current = metadataDates.filter {
+            $0.accountGeneration == manager.generation && $0.ownerID.lowercased() == manager.client?.userID.lowercased()
+                && $0.visibility == "timeline"
+        }
+        guard !current.isEmpty else { return }
+        metadataDateManager = manager
+        for projection in current {
+            pendingMetadataDates[projection.assetID.lowercased()] = projection
+        }
+        requestIndexSync(fullReconciliation: false)
+    }
+
     func fullSyncAndVerify() {
         requestIndexSync(fullReconciliation: true)
     }
@@ -996,6 +1015,7 @@ final class LibraryIndexController {
         suspend(cancelBootstrapCatalogs: true)
     }
 
+    /// 停止当前网络run及日期意图；cancelBootstrapCatalogs为true时也取消分组构建，保留已接受数据供离线使用。
     private func suspend(cancelBootstrapCatalogs: Bool) {
         albumIndex.suspend()
         collections.suspend()
@@ -1005,6 +1025,9 @@ final class LibraryIndexController {
             completedElapsed = startedAt.map { Date().timeIntervalSince($0) }
         }
         runID &+= 1
+        // 路由/账号/显式暂停网络工作退休旧日期意图；用户可从元数据页重新核对，不能移到新上下文。
+        pendingMetadataDates.removeAll()
+        metadataDateManager = nil
         task?.cancel()
         task = nil
         localMaintenanceTask?.cancel()
@@ -1183,8 +1206,14 @@ final class LibraryIndexController {
         }
     }
 
+    /// 启动唯一索引run并接管本轮日期需求；fullReconciliation/restartTransferPass控制原重建/传输重启语义。
+    /// resumedElapsed沿用暂停前计时；在途到达的日期仅补下一轮，已消费失败需求必须由用户重新核对。
     private func run(fullReconciliation: Bool, restartTransferPass: Bool = false, resumedElapsed: TimeInterval? = nil) {
         guard let scope, task == nil, !indexPaused else { return }
+        let metadataDates = Array(pendingMetadataDates.values)
+        pendingMetadataDates.removeAll()
+        let dateManager = metadataDateManager
+        let dateEndpoint = endpoint
         let resetTransfers = restartTransferPass || fullReconciliation
         let continuesRun = indexContinuationPending && !resetTransfers
         indexContinuationPending = false
@@ -1195,6 +1224,15 @@ final class LibraryIndexController {
         preferences.removeObject(forKey: successKey(scope))
         runID &+= 1
         let currentRunID = runID
+        let validateDateContext: (@Sendable () async throws -> Void)? = if metadataDates.isEmpty {
+            nil
+        } else {
+            { [weak self, weak dateManager] in
+                guard let self else { throw CancellationError() }
+                try await requireMetadataDateContext(scope: scope, endpoint: dateEndpoint, run: currentRunID,
+                                                     manager: dateManager, projections: metadataDates)
+            }
+        }
         if let resumedElapsed {
             startedAt = Date().addingTimeInterval(-resumedElapsed)
         } else if !continuesRun {
@@ -1237,15 +1275,19 @@ final class LibraryIndexController {
                     await self?.publish(progress, expectedRunID: currentRunID)
                 }
                 var result = if fullReconciliation {
-                    try await synchronizer.fullSyncAndVerify(scope: scope, progress: progress)
+                    try await synchronizer.fullSyncAndVerify(scope: scope, dateProjections: metadataDates,
+                                                             validateContext: validateDateContext, progress: progress)
                 } else {
-                    try await synchronizer.synchronizeRecent(scope: scope, recentOnly: refreshOnly, progress: progress)
+                    try await synchronizer.synchronizeRecent(scope: scope, recentOnly: refreshOnly, dateProjections: metadataDates,
+                                                             validateContext: validateDateContext, progress: progress)
                 }
+                try await validateDateContext?()
                 guard currentRunID == runID else { return }
                 publish(result, force: false)
                 while result.hasMoreHistory, !Task.isCancelled, !refreshOnly {
                     await Task.yield()
                     result = try await synchronizer.resumeHistorical(scope: scope, progress: progress)
+                    try await validateDateContext?()
                     guard currentRunID == runID else { return }
                     publish(result, force: false)
                 }
@@ -1339,8 +1381,22 @@ final class LibraryIndexController {
             }
             if currentRunID == runID {
                 task = nil
+                // 活跃run期间到达的日期需求从未被消费，完成/失败后只补这一轮；失败的已消费需求不自动重试。
+                if !pendingMetadataDates.isEmpty, !indexPaused {
+                    run(fullReconciliation: false, restartTransferPass: true)
+                }
             }
         }
+    }
+
+    /// 日期同步每个异步边界核对run/namespace/路由与管理账号代际；旧账号或仅端点切换都不能发布旧意图。
+    private func requireMetadataDateContext(scope expectedScope: MediaAccountScope, endpoint expectedEndpoint: URL?, run expectedRun: UInt64,
+                                            manager: LibraryManagementController?, projections: [AssetMetadataDateProjection]) throws
+    {
+        try Task.checkCancellation()
+        guard runID == expectedRun, scope == expectedScope, endpoint == expectedEndpoint,
+              let manager, manager.backupScope == expectedScope, manager.client?.apiURL == expectedEndpoint,
+              projections.allSatisfy({ $0.accountGeneration == manager.generation }) else { throw CancellationError() }
     }
 
     private func publishAcceptedBootstrapIfNeeded(

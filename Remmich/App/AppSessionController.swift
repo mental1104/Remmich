@@ -185,6 +185,8 @@ final class AppSessionController {
             photos.promoteBootstrapGroupedCatalogs(bootstrap.photos)
             videos.promoteBootstrapGroupedCatalogs(bootstrap.videos)
         }
+        // 真正接受索引与AppShell revision桥接均存在后，才允许元数据页发出日期定向刷新需求。
+        media.management.metadataDateRefreshAvailable = true
     }
 
     func start() async {

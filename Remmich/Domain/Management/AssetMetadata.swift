@@ -213,6 +213,7 @@ nonisolated struct AssetMetadataPlan: Identifiable, Sendable {
 /// 元数据页的安全本地错误，不携带原片路径、坐标或服务器正文。
 nonisolated enum AssetMetadataError: LocalizedError {
     case noChanges, invalidDate, invalidLocation, invalidRating, notOwned, unavailable, reloadRequired, changedRemotely, trashed
+    case dateRefreshUnavailable, dateProjectionChanged, dateAssetNotVisible
 
     var errorDescription: String? {
         switch self {
@@ -225,6 +226,9 @@ nonisolated enum AssetMetadataError: LocalizedError {
         case .reloadRequired: "Reload the asset before reviewing another change."
         case .changedRemotely: "The asset changed since it was loaded. Reload and review your changes again."
         case .trashed: "Restore this asset from trash before changing metadata."
+        case .dateRefreshUnavailable: "A fresh timeline reader is unavailable for this account. Retry from the connected library."
+        case .dateProjectionChanged: "The server timeline date changed or its month is incomplete. Refresh metadata and retry."
+        case .dateAssetNotVisible: "This asset is not present in the current main timeline. Refresh metadata before retrying; stacked or hidden members are not inserted."
         }
     }
 }
