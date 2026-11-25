@@ -6,6 +6,7 @@ struct PhotoBackupView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var backup: PhotoBackupController
+    @State private var albumSync: PhotoBackupAlbumSyncController
     @State private var loadingQueue = false
     @State private var queueReadTask: Task<Void, Never>?
     @State private var confirmsResume = false
@@ -14,9 +15,10 @@ struct PhotoBackupView: View {
     @State private var confirmationOwner: UUID?
 
     /// controller提供当前鉴权通道，backup由Media统一持有，页面草稿/手动任务与前台自动化共享同一持久队列事实。
-    init(controller: LibraryManagementController, backup: PhotoBackupController) {
+    init(controller: LibraryManagementController, backup: PhotoBackupController, matching: LocalMediaMatchController) {
         self.controller = controller
         _backup = State(initialValue: backup)
+        _albumSync = State(initialValue: PhotoBackupAlbumSyncController(matching: matching))
     }
 
     var body: some View {
@@ -90,6 +92,9 @@ struct PhotoBackupView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
+                if !backup.running {
+                    PhotoBackupAlbumSyncSection(sync: albumSync, manager: controller, backup: backup)
+                }
                 if !backup.running, !backup.jobs.isEmpty {
                     Section("当前账户队列（\(backup.jobs.count) 项）") {
                         ForEach(Array(backup.jobs.enumerated()), id: \.element.id) { index, job in
@@ -133,15 +138,19 @@ struct PhotoBackupView: View {
                 }
             }
             .task { await reloadBackupQueue() }
-            .onChange(of: controller.generation) { _, _ in queueReadTask?.cancel(); backup.cancelPageWork(); dismiss() }
+            .onChange(of: controller.generation) { _, _ in queueReadTask?.cancel(); backup.cancelPageWork(); albumSync.cancel(); dismiss() }
             .onChange(of: scenePhase) {
-                _, phase in if phase == .background {
+                _, phase in if phase != .active {
+                    albumSync.cancel()
+                    if phase != .background {
+                        return
+                    }
                     queueReadTask?.cancel()
                     backup.automaticConditionsChanged(using: controller, scope: controller.backupScope, active: false)
                     backup.cancel()
                 }
             }
-            .onDisappear { queueReadTask?.cancel(); backup.cancelPageWork() }
+            .onDisappear { queueReadTask?.cancel(); backup.cancelPageWork(); albumSync.cancel() }
         }
         .interactiveDismissDisabled(backup.running && !backup.automaticRunning)
     }
@@ -153,6 +162,7 @@ struct PhotoBackupView: View {
         loadingQueue = true
         defer { loadingQueue = false }
         await backup.load(using: controller)
+        await albumSync.load(using: controller, backup: backup)
     }
 
     /// 只根据成功读取的当前授权列表判断缺项；按钮仅调整页面选择，下一次扫描前不能继续或重试旧队列。

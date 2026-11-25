@@ -62,6 +62,11 @@ import Photos
         .init(jobs: jobs)
     }
 
+    /// 只暴露当前已加载、无草稿且没有备份/配置写入的门禁，不向组织页面传递账号凭据或私有存储。
+    func hasCurrentSavedSelection(using manager: LibraryManagementController) -> Bool {
+        configurationScope == manager.backupScope && configurationScope != nil && !requiresSelectionScan && !running && !configuringAutomatic
+    }
+
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let exporter: any PhotoBackupResourceExporting
@@ -233,7 +238,7 @@ import Photos
     /// ids为包含与排除相簿的并集；先重新确认每个集合可访问，避免旧PHAssetCollection消失被当作空排除。
     /// 返回仅含授权源版本/日期的快照；不导出文件、不下载iCloud，集合缺失或前后权限等级变化时在队列写入前抛错。
     /// 这是本轮可见成员的冻结选择，不宣称跨集合原子快照或后续limited成员变化通知；执行前仍由exporter核对当前源。
-    private static func albumSnapshots(for ids: Set<String>) throws -> [PhotoBackupAlbumSnapshot] {
+    static func albumSnapshots(for ids: Set<String>) throws -> [PhotoBackupAlbumSnapshot] {
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { throw AlbumReadError.permission }
         let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: ids.sorted(), options: nil)

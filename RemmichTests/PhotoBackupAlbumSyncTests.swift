@@ -1,0 +1,745 @@
+import Foundation
+import Photos
+import Synchronization
+import Testing
+@testable import Remmich
+
+/// 真实匹配Controller冷恢复→当前GET metadata证明→组织Controller/SQLite→HTTP；系统边界和服务响应为合成值。
+@Suite("Explicit linked backup albums")
+struct PhotoBackupAlbumSyncTests {
+    /// 服务端已有交集没有上传任务；两种匹配provenance都能补入，metadata不要求本机hash，重复预览只核查不重加。
+    @Test(.timeLimit(.minutes(1)), arguments: [LocalMediaAssociation.Source.mobileMetadata, .checksum], [PhotoBackupSource.Kind.photo, .video])
+    @MainActor func serverExistingAssetsUseFreshCurrentAssociations(_ provenance: LocalMediaAssociation.Source, kind: PhotoBackupSource.Kind) async throws {
+        try await withAlbumSyncFixture(kind: kind, provenance: provenance) { fixture in
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.isEmpty)
+            try await fixture.mapAndPrepare()
+            #expect(fixture.sync.targets.count == 2 && fixture.sync.previewCount == 1)
+            #expect(fixture.sync.state.operations.first?.assets.first?.proof == (provenance == .mobileMetadata ? .metadataAssociation : .checksumAssociation))
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            let cold = try await fixture.coldState()
+            #expect(cold.operations.first?.phase == .confirmed && cold.mappings.first?.targetID == albumSyncTarget2)
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget1) == false)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            try await fixture.mapAndPrepare(saveMapping: false)
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+            #expect(await fixture.server.onlyMetadataAndMembershipRoutes())
+        }
+    }
+
+    /// 改变当前metadata/remote revision/owner/checksum均不能靠旧UUID入组；当前source版本不等也失效。
+    @Test(.timeLimit(.minutes(1)), arguments: ["metadata", "revision", "owner", "checksum", "source"])
+    @MainActor func staleAssociationCannotAuthorizeOrganization(_ mode: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setMismatch(mode)
+            if mode == "source" {
+                fixture.photos.modified = Date(timeIntervalSince1970: 101)
+            }
+            try await fixture.mapAndPrepare()
+            #expect(fixture.sync.previewCount == 0 && fixture.sync.unmatched == 1)
+            #expect(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup) == nil)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+            #expect(fixture.photos.hashReads == 0)
+        }
+    }
+
+    /// 当前照片同时在已保存排除相簿，即使服务器已存在且本机已匹配，也不能自动补入任何映射目标。
+    @Test(.timeLimit(.minutes(1))) @MainActor func exclusionAlsoAppliesToServerExistingAssets() async throws {
+        try await withAlbumSyncFixture { fixture in
+            fixture.photos.excluded = true
+            try await fixture.mapAndPrepare()
+            #expect(fixture.sync.previewCount == 0 && fixture.sync.state.operations.isEmpty)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+        }
+    }
+
+    /// 同一已存在照片保留两本地相簿的成员关系；两个明确映射均需实际PUT和独立确认，不能全库去重后丢掉第二关系。
+    @Test(.timeLimit(.minutes(1))) @MainActor func sharedLocalMemberIsAddedToBothExplicitTargets() async throws {
+        try await withAlbumSyncFixture(includeSecond: true) { fixture in
+            await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget1, using: fixture.manager, backup: fixture.backup))
+            await fixture.run(fixture.sync.setMapping(localID: "include2", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
+            await fixture.run(fixture.sync.prepare(using: fixture.manager, backup: fixture.backup))
+            #expect(fixture.sync.previewCount == 2)
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            let cold = try await fixture.coldState()
+            #expect(cold.operations.count == 2 && cold.operations.allSatisfy { $0.phase == .confirmed })
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget1))
+            #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 2)
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.isEmpty)
+            #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
+        }
+    }
+
+    /// 用户确认前服务端/本地证据变更也须重核；不能因预览曾合法便用旧计划写关系。
+    @Test(.timeLimit(.minutes(1)), arguments: ["metadata", "revision", "owner", "checksum", "source", "target", "locked", "offline", "trashed"])
+    @MainActor func previewDoesNotAuthorizeLaterChangedEvidence(_ mode: String) async throws {
+        try await withAlbumSyncFixture { fixture in
+            try await fixture.mapAndPrepare()
+            #expect(fixture.sync.previewCount == 1)
+            await fixture.server.setMismatch(mode)
+            if mode == "source" {
+                fixture.photos.modified = Date(timeIntervalSince1970: 101)
+            }
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            #expect(fixture.photos.hashReads == 0)
+        }
+    }
+
+    /// Live按逻辑PhotoKit源使用still一UUID，motion没有成员写入；组织确认不冒充原片/配对备份完成。
+    @Test(.timeLimit(.minutes(1))) @MainActor func livePhotoOnlyAddsItsStill() async throws {
+        try await withAlbumSyncFixture(kind: .livePhoto) { fixture in
+            try await fixture.mapAndPrepare()
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(await fixture.server.putCount(albumSyncMotion) == 0)
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.isEmpty)
+            #expect(fixture.photos.hashReads == 0)
+        }
+    }
+
+    /// 双原图第二份无权限只保留第一份组织回执；冷恢复先核成员再补JPEG，不重加RAW，也不改上传完成。
+    @Test(.timeLimit(.minutes(1))) @MainActor func rawJPEGPartialOrganizationResumesWithoutReaddingRAW() async throws {
+        try await withAlbumSyncFixture(kind: .rawJPEG) { fixture in
+            await fixture.server.setMode(.denyJPEG)
+            try await fixture.mapAndPrepare()
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            let partial = try await fixture.coldState()
+            #expect(partial.operations.first?.phase == .failed && partial.operations.first?.confirmedAssetIDs == [albumSyncPrimary])
+            #expect(fixture.sync.confirmed == 0 && fixture.sync.previewCount == 1)
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.first?.stage == .completed)
+            await fixture.server.setMode(.normal)
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(await fixture.server.putCount(albumSyncJPEG) == 2)
+            #expect(restored.confirmed == 1 && fixture.photos.hashReads == 0)
+        }
+    }
+
+    /// 历史双确认不能代替本轮重核：第二份fresh GET真正挂起时取消，冷账本不得在只核过RAW后提前再次confirmed。
+    @Test(.timeLimit(.minutes(1))) @MainActor func historicalPairReceiptsCannotCompleteHalfOfAFreshPass() async throws {
+        try await withAlbumSyncFixture(kind: .rawJPEG) { fixture in
+            try await fixture.mapAndPrepare()
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            await fixture.server.removeMember(albumSyncJPEG, target: albumSyncTarget2)
+            try await fixture.mapAndPrepare(saveMapping: false)
+            await fixture.server.setMode(.heldJPEGRead)
+            await fixture.server.beginObservedWork()
+            let old = try #require(fixture.track(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup)))
+            try #require(await fixture.server.waitUntilHeld())
+            let held = try await fixture.coldState()
+            #expect(held.operations.first?.phase == .queued)
+            #expect(held.operations.first?.confirmedAssetIDs == [albumSyncPrimary, albumSyncJPEG])
+            fixture.sync.cancel()
+            await fixture.server.release()
+            await old.value
+            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            #expect(await fixture.server.putCount(albumSyncJPEG) == 1)
+            await fixture.server.setMode(.normal)
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(await fixture.server.putCount(albumSyncJPEG) == 2)
+        }
+    }
+
+    /// duplicate与响应丢失但实际已加入都须fresh核成员；成功HTTP却未入组保留unknown，不能用200冒充成功。
+    @Test(.timeLimit(.minutes(1)), arguments: [AlbumSyncHTTPServer.Mode.duplicate, .errorAfterCommit, .missingAfterSuccess])
+    @MainActor private func acknowledgementsAndUnknownOutcomesRequireFreshMembership(_ mode: AlbumSyncHTTPServer.Mode) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setMode(mode)
+            try await fixture.mapAndPrepare()
+            await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
+            let cold = try await fixture.coldState()
+            #expect(cold.operations.first?.phase == (mode == .missingAfterSuccess ? .unknown : .confirmed))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            await fixture.server.setMode(.normal)
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == (mode == .missingAfterSuccess ? 2 : 1))
+        }
+    }
+
+    /// HTTP已发送后真正取消/换号；旧回调不落成功，sending可冷读为unknown，再恢复先查实际成员而非重放PUT。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func lateHTTPCannotPublishAfterCancellationOrAccountRetirement(_ account: Bool) async throws {
+        try await withAlbumSyncFixture { fixture in
+            await fixture.server.setMode(.heldAfterCommit)
+            try await fixture.mapAndPrepare()
+            await fixture.server.beginObservedWork()
+            let old = try #require(fixture.track(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup)))
+            try #require(await fixture.server.waitUntilHeld())
+            let other = AccountSession(apiURL: fixture.endpoint, accessToken: "album-sync-fixture", userID: albumSyncTarget1.uuidString,
+                                       userEmail: "other@example.invalid", name: "Other", isAdmin: false, serverVersion: fixture.session.serverVersion)
+            let otherScope = MediaAccountScope(session: other)
+            if account {
+                try await fixture.store.prepare(scope: otherScope)
+                try await fixture.store.savePhotoBackups(.init(namespace: otherScope.cacheNamespace), scope: otherScope)
+                try await fixture.store.savePhotoBackupAlbumSyncPlan(.init(namespace: otherScope.cacheNamespace), scope: otherScope)
+                fixture.manager.configure(session: other, endpoint: fixture.endpoint)
+                fixture.matching.configure(using: fixture.manager, scope: otherScope)
+                await fixture.backup.load(using: fixture.manager)
+            }
+            fixture.sync.cancel()
+            await fixture.server.release()
+            await old.value
+            #expect(try await fixture.coldState().operations.first?.phase == .sending)
+            if account {
+                #expect(fixture.backup.selected.isEmpty && fixture.backup.jobs.isEmpty)
+                #expect(try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).operations.isEmpty)
+            }
+            await fixture.restoreAccount()
+            let restored = fixture.makeController()
+            await restored.load(using: fixture.manager, backup: fixture.backup)
+            #expect(restored.state.operations.first?.phase == .unknown)
+            await fixture.server.setMode(.normal)
+            await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
+            await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
+            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+        }
+    }
+
+    /// 未保存草稿和Photos权限撤销阻断组织入口；不会把页面选择偷偷写入保存规则。
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    @MainActor func draftAndPermissionCannotBeSavedAsOrganizationConsent(_ denied: Bool) async throws {
+        try await withAlbumSyncFixture { fixture in
+            try await fixture.mapAndPrepare()
+            if denied {
+                fixture.photos.authorization = .denied
+            } else {
+                fixture.backup.excluded = ["draft"]
+            }
+            #expect(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup) == nil)
+            #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
+            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).excludedAlbumIDs == ["exclude"])
+        }
+    }
+
+    /// 完整计划不能丢弃已有未知记录，热写不能改主体身份；失败后通过新SQLite核原恢复资料仍在。
+    @Test(.timeLimit(.minutes(1))) @MainActor func ledgerRejectsHistoryLossAndIdentityReplacement() async throws {
+        try await withAlbumSyncFixture { fixture in
+            try await fixture.mapAndPrepare()
+            let initial = try await fixture.coldState()
+            let empty = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, mappings: initial.mappings)
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(empty, scope: fixture.scope) }
+            let old = try #require(initial.operations.first)
+            let replacement = PhotoBackupAlbumSyncOperation(id: old.id, localAlbumID: old.localAlbumID, targetID: albumSyncTarget1, source: old.source, assets: old.assets)
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncOperation(replacement, scope: fixture.scope) }
+            #expect(try await fixture.coldState().operations.first?.targetID == albumSyncTarget2)
+            let future = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, version: 2)
+            await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(future, scope: fixture.scope) }
+            #expect(try await fixture.coldState().operations.count == 1)
+        }
+    }
+}
+
+/// 真实URLSession请求的有限值快照；读取实际JSON或stream，不在替身中补造客户端正文。
+private nonisolated struct AlbumSyncRequest: Sendable {
+    let url: URL
+    let method: String
+    let authorization: String?
+    let body: Data?
+    /// request来自本例私有会话；正文最多64KiB，任何媒体/未知路由将由服务器拒绝。
+    init(_ request: URLRequest) throws {
+        guard let url = request.url else { throw URLError(.badURL) }
+        self.url = url; method = request.httpMethod ?? ""; authorization = request.value(forHTTPHeaderField: "Authorization")
+        if let data = request.httpBody {
+            body = data
+        } else if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var data = Data(), buffer = [UInt8](repeating: 0, count: 1024)
+            while true {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count >= 0 else { throw URLError(.cannotDecodeRawData) }
+                if count == 0 {
+                    break
+                }
+                data.append(contentsOf: buffer.prefix(count))
+                guard data.count <= 65536 else { throw URLError(.dataLengthExceedsMaximum) }
+            }
+            body = data
+        } else {
+            body = nil
+        }
+    }
+}
+
+/// JSON成员服务的逐项故障/恢复边界；只接受既有GET/PUT，不提供上传、媒体下载、POST创建或删除接口。
+private actor AlbumSyncHTTPServer {
+    /// 模拟逐项回执、提交后失联以及真实读取/写入等待门，不改变客户端控制流。
+    enum Mode: String, Sendable { case normal, duplicate, errorAfterCommit, missingAfterSuccess, denyJPEG, heldAfterCommit, heldJPEGRead }
+    /// 交付给真实URLProtocol的HTTP状态与JSON字节。
+    struct Reply: Sendable { let status: Int; let data: Data }
+    let endpoint: URL
+    let kind: PhotoBackupSource.Kind
+    private var mode = Mode.normal
+    private var mismatch = ""
+    private var members: Set<String> = []
+    private var puts: [UUID: Int] = [:]
+    private var events: [(String, String)] = []
+    private var held = false
+    private var workEnded = false
+    private var aborted = false
+    private var gate: CheckedContinuation<Void, Never>?
+    private var heldObservers: [CheckedContinuation<Bool, Never>] = []
+    private var active = 0
+    private var idleObservers: [CheckedContinuation<Void, Never>] = []
+
+    /// endpoint与kind固定本例公开请求/媒体类型；全部资产与身份都为合成值。
+    init(endpoint: URL, kind: PhotoBackupSource.Kind) {
+        self.endpoint = endpoint; self.kind = kind
+    }
+
+    /// 故障只影响隔离HTTP响应，不写生产controller/store字段。
+    func setMode(_ value: Mode) {
+        mode = value
+    }
+
+    /// 仅改变外部fresh证据，用于检验旧关联不能授权当前关系写入。
+    func setMismatch(_ value: String) {
+        mismatch = value
+    }
+
+    /// 查询HTTP服务实际关系，不能用Controller内存列表当作服务已写入。
+    func member(_ asset: UUID, target: UUID) -> Bool {
+        members.contains(key(asset, target))
+    }
+
+    /// 模拟独立客户端移除一条既有关系；下一次组织必须重新核查，不能拿历史确认跳过。
+    func removeMember(_ asset: UUID, target: UUID) {
+        members.remove(key(asset, target))
+    }
+
+    /// 实际PUT次数区分核查恢复与盲目重发。
+    func putCount(_ id: UUID) -> Int {
+        puts[id] ?? 0
+    }
+
+    /// 组织过程不得使用创建、上传、原片/预览下载或删除接口。
+    func onlyMetadataAndMembershipRoutes() -> Bool {
+        events.allSatisfy { $0.0 == "GET" || ($0.0 == "PUT" && $0.1.hasSuffix("/assets")) }
+    }
+
+    /// 同目标/资产UUID唯一关系；名称与数组顺序不参与身份。
+    private func key(_ asset: UUID, _ target: UUID) -> String {
+        target.uuidString + "/" + asset.uuidString
+    }
+
+    /// 官方当前相簿投影，两个同名目标靠UUID区分；owner来自有序albumUsers。
+    private func album(_ id: UUID) -> [String: Any] {
+        ["id": id.uuidString, "albumName": "同名目标", "albumUsers": [["role": "owner", "user": ["id": mismatch == "target" ? albumSyncPrimary.uuidString : albumSyncOwner]]]]
+    }
+
+    /// 将有限合成响应转为真正HTTP字节，不直接返回客户端业务DTO。
+    private func json(_ object: Any) throws -> Reply {
+        try .init(status: 200, data: JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+    }
+
+    /// 真实请求鉴权/路径/JSON经过有限路由；PUT未知结果/取消可在server已写关系后发生。
+    func response(_ request: AlbumSyncRequest) async throws -> Reply {
+        active += 1
+        guard !aborted, request.authorization == "Bearer album-sync-fixture", request.url.host == endpoint.host else { throw URLError(.userAuthenticationRequired) }
+        events.append((request.method, request.url.path))
+        let path = request.url.path
+        if request.method == "GET", path == "/api/albums" {
+            let query = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if query.isEmpty {
+                return try json([album(albumSyncTarget1), album(albumSyncTarget2)])
+            }
+            guard query.count == 1, query.first?.name == "assetId", let text = query.first?.value, let asset = UUID(uuidString: text) else { throw URLError(.badURL) }
+            return try json([albumSyncTarget1, albumSyncTarget2].filter { members.contains(key(asset, $0)) }.map { album($0) })
+        }
+        if request.method == "GET", let target = [albumSyncTarget1, albumSyncTarget2].first(where: { path == "/api/albums/" + $0.uuidString }) {
+            return try json(album(target))
+        }
+        if request.method == "GET", path == "/api/assets/" + albumSyncPrimary.uuidString + "/metadata/mobile-app" {
+            return try json(["key": "mobile-app", "updatedAt": albumSyncRevision.ISO8601Format(), "value": ["iCloudId": "synthetic-cloud-id", "createdAt": Date(timeIntervalSince1970: mismatch == "metadata" ? 51 : 50).ISO8601Format()]])
+        }
+        if request.method == "GET", let asset = [albumSyncPrimary, albumSyncJPEG].first(where: { path == "/api/assets/" + $0.uuidString }) {
+            if mode == .heldJPEGRead, asset == albumSyncJPEG {
+                await holdResponse()
+            }
+            return try json(["id": asset.uuidString, "ownerId": mismatch == "owner" ? albumSyncTarget1.uuidString : albumSyncOwner,
+                             "type": kind == .video ? "VIDEO" : "IMAGE", "visibility": mismatch == "locked" ? "locked" : "timeline", "isTrashed": mismatch == "trashed", "isOffline": mismatch == "offline", "isEdited": false,
+                             "isFavorite": false, "originalFileName": asset == albumSyncJPEG ? "synthetic.jpg" : "synthetic.dng",
+                             "checksum": mismatch == "checksum" ? albumSyncJPEGDigest : asset == albumSyncJPEG ? albumSyncJPEGDigest : albumSyncDigest,
+                             "updatedAt": albumSyncRevision.addingTimeInterval(mismatch == "revision" ? 1 : 0).ISO8601Format(),
+                             "livePhotoVideoId": kind == .livePhoto ? albumSyncMotion.uuidString : NSNull(), "exifInfo": NSNull()])
+        }
+        if request.method == "PUT", let target = [albumSyncTarget1, albumSyncTarget2].first(where: { path == "/api/albums/" + $0.uuidString + "/assets" }) {
+            // 解码真正客户端请求，未知字段或批量身份均拒绝。
+            struct Body: Decodable { let ids: [UUID] }
+            guard let body = request.body else { throw URLError(.cannotDecodeRawData) }
+            let decoded = try JSONDecoder().decode(Body.self, from: body)
+            let decodedObject = try JSONSerialization.jsonObject(with: body)
+            let object = try #require(decodedObject as? [String: Any])
+            guard Set(object.keys) == ["ids"], decoded.ids.count == 1, let id = decoded.ids.first, [albumSyncPrimary, albumSyncJPEG].contains(id) else { throw URLError(.cannotDecodeContentData) }
+            puts[id, default: 0] += 1
+            if mode == .denyJPEG, id == albumSyncJPEG {
+                return try json([["id": id.uuidString, "success": false, "error": "no_permission"]])
+            }
+            if mode != .missingAfterSuccess {
+                members.insert(key(id, target))
+            }
+            if mode == .heldAfterCommit {
+                await holdResponse()
+            }
+            if mode == .errorAfterCommit {
+                throw URLError(.networkConnectionLost)
+            }
+            if mode == .duplicate {
+                return try json([["id": id.uuidString, "success": false, "error": "duplicate"]])
+            }
+            return try json([["id": id.uuidString, "success": true]])
+        }
+        throw URLError(.unsupportedURL)
+    }
+
+    /// 已到达真实请求才打开观察门；取消由close/release解除，不用sleep假造请求进度。
+    private func holdResponse() async {
+        await withCheckedContinuation { continuation in
+            gate = continuation; held = true; let pending = heldObservers; heldObservers = []; pending.forEach { $0.resume(returning: true) }
+        }
+    }
+
+    /// Protocol响应已交付或丢弃后才减少活动数，清理不遗留仍等待的服务任务。
+    func responseExited() {
+        active -= 1
+        if active == 0 {
+            let pending = idleObservers; idleObservers = []; pending.forEach { $0.resume() }
+        }
+    }
+
+    /// 等真实PUT进入取消门；业务提前失败则返回false，不能靠sleep猜已发送。
+    func waitUntilHeld() async -> Bool {
+        if held {
+            return true
+        }; if workEnded || aborted {
+            return false
+        }
+        return await withCheckedContinuation { heldObservers.append($0) }
+    }
+
+    /// HTTP旧响应明确释放，不修改controller或SQLite成功状态。
+    func release() {
+        gate?.resume(); gate = nil
+    }
+
+    /// 提前业务结束唤醒门观察者，防回归失败悬挂。
+    func workFinished() {
+        workEnded = true; let pending = heldObservers; heldObservers = []; pending.forEach { $0.resume(returning: false) }
+    }
+
+    /// 前次业务/观察已退役后开始新门观察；只有实际PUT到达才能发布true。
+    func beginObservedWork() {
+        workEnded = false
+    }
+
+    /// 失败/超时释放全部门，未来请求直接失败。
+    func abort() {
+        aborted = true; release(); workFinished()
+    }
+
+    /// 等待已进入服务的协议响应完成清理。
+    func waitForIdle() async {
+        if active == 0 {
+            return
+        }; await withCheckedContinuation { idleObservers.append($0) }
+    }
+}
+
+/// 私有URLProtocol完整拦截本例会话；Mutex处理取消与响应Task安装竞争，取消后不交付迟到字节。
+private final nonisolated class AlbumSyncURLProtocol: URLProtocol, @unchecked Sendable {
+    /// 一个请求的取消事实与响应Task安装在同一锁内，防止先取消后安装的竞态。
+    private struct Loading: Sendable { var stopped = false; var task: Task<Void, Never>? }
+    private static let servers = Mutex<[String: AlbumSyncHTTPServer]>([:])
+    private let loading = Mutex(Loading())
+    /// 每例随机host注册，不使用进程全局URLProtocol注册。
+    static func install(_ server: AlbumSyncHTTPServer, endpoint: URL) {
+        servers.withLock { $0[endpoint.host!] = server }
+    }
+
+    /// 实际业务/响应退役后只移除本例host。
+    static func remove(endpoint: URL) {
+        _ = servers.withLock { $0.removeValue(forKey: endpoint.host!) }
+    }
+
+    /// 未知host也拦截并失败，不流入真实网络。
+    override class func canInit(with _: URLRequest) -> Bool {
+        true
+    }
+
+    /// 不修补或重建客户端URL/JSON。
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    /// 异步服务处理真实请求快照，任何退出路径都通知响应退役。
+    override func startLoading() {
+        do {
+            let captured = try AlbumSyncRequest(request)
+            guard let server = Self.servers.withLock({ $0[captured.url.host ?? ""] }) else { throw URLError(.badURL) }
+            let task = Task { @Sendable [weak self, captured, server] in
+                do {
+                    let reply = try await server.response(captured)
+                    if let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) {
+                        guard let response = HTTPURLResponse(url: captured.url, statusCode: reply.status, httpVersion: nil, headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
+                        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed); client?.urlProtocol(self, didLoad: reply.data); client?.urlProtocolDidFinishLoading(self)
+                    }
+                } catch {
+                    if let self, !Task.isCancelled, !loading.withLock({ $0.stopped }) {
+                        client?.urlProtocol(self, didFailWithError: error)
+                    }
+                }
+                await server.responseExited()
+            }
+            loading.withLock {
+                $0.task = task; if $0.stopped {
+                    task.cancel()
+                }
+            }
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+
+    /// URLSession取消会取消真正响应Task，server已提交关系仍由后续fresh核查发现。
+    override func stopLoading() {
+        loading.withLock { $0.stopped = true; return $0.task }?.cancel()
+    }
+}
+
+private nonisolated let albumSyncPrimary = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+private nonisolated let albumSyncJPEG = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+private nonisolated let albumSyncMotion = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+private nonisolated let albumSyncTarget1 = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+private nonisolated let albumSyncTarget2 = UUID(uuidString: "55555555-5555-4555-8555-555555555555")!
+private nonisolated let albumSyncOwner = "99999999-9999-4999-8999-999999999999"
+private nonisolated let albumSyncDigest = Data(repeating: 1, count: 20).base64EncodedString()
+private nonisolated let albumSyncJPEGDigest = Data(repeating: 2, count: 20).base64EncodedString()
+private nonisolated let albumSyncRevision = Date(timeIntervalSince1970: 300)
+
+/// kind/provenance选择合成媒体与冷匹配依据，includeSecond在两个本地相簿共享同一源；operation执行真实Controller路径。
+/// 每例完整清理实际业务/HTTP门；所有媒体身份/摘要均为合成，未读相机图库或原片。
+@MainActor private func withAlbumSyncFixture(kind: PhotoBackupSource.Kind = .photo, provenance: LocalMediaAssociation.Source = .mobileMetadata,
+                                             includeSecond: Bool = false,
+                                             operation: @MainActor (AlbumSyncFixture) async throws -> Void) async throws
+{
+    let fixture = try await AlbumSyncFixture(kind: kind, provenance: provenance, includeSecond: includeSecond)
+    do { try await withTaskCancellationHandler { try await operation(fixture) } onCancel: { Task { @MainActor in await fixture.close() } } }
+    catch { await fixture.close(); throw error }
+    await fixture.close()
+}
+
+/// 一个系统metadata端口同时供真实匹配Controller与组织Controller观察；checksum方法若被调用会立即失败。
+@MainActor private final class AlbumSyncPhotoPort: LocalPhotoInventoryReading, LocalPhotoMetadataReading, LocalPhotoChecksumReading {
+    var authorization = LocalPhotoLibraryAccess.full
+    var modified = Date(timeIntervalSince1970: 100)
+    var excluded = false
+    var hashReads = 0
+    var authorizationRequests = 0
+    let kind: PhotoBackupSource.Kind
+    let pair: PhotoBackupRawJPEGSource?
+    let includeSecond: Bool
+
+    /// kind决定合成Photos逻辑对象，includeSecond增加第二个包含关系；RAW/JPEG完整资源描述由真实领域模型校验。
+    init(kind: PhotoBackupSource.Kind, includeSecond: Bool) throws {
+        self.kind = kind; self.includeSecond = includeSecond
+        if kind == .rawJPEG {
+            pair = try .init(originals: [.init(kind: .alternatePhoto, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 3, pixelHeight: 2),
+                                         .init(kind: .photo, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 3, pixelHeight: 2)], hasAdjustments: false, adjustmentTime: nil)
+        } else {
+            pair = nil
+        }
+    }
+
+    /// 当前源版本来自同一可改变系统快照，测试不修改生产Controller字段伪造已匹配。
+    var source: PhotoBackupSource {
+        .init(localID: "synthetic-local", modifiedAt: modified, kind: kind, rawJPEG: pair)
+    }
+
+    /// 当前metadata只携带公开元数据与opaque cloudID，不携带字节摘要或文件路径。
+    var snapshot: LocalPhotoSnapshot {
+        .init(identity: .init(localIdentifier: source.localID, modificationDate: modified, mediaKind: kind == .video ? .video : kind == .livePhoto ? .livePhoto : .image),
+              creationDate: Date(timeIntervalSince1970: 50), adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil,
+              pixelWidth: 3, pixelHeight: 2, duration: 0, mediaSubtypes: 0, resources: [], cloudIdentity: .resolved("synthetic-cloud-id"))
+    }
+
+    /// 组织不应请求权限；保留计数以证明未触发。
+    func requestAuthorization() async -> LocalPhotoLibraryAccess {
+        authorizationRequests += 1; return authorization
+    }
+
+    /// 仅供既有匹配Controller端口契约，返回当前合成身份。
+    func localIdentifiers(validateContext: @MainActor () throws -> Void) async throws -> [String] {
+        try validateContext(); return [source.localID]
+    }
+
+    /// 真实metadata reader接口；只返回当前请求对象且遵循外层账号/取消检查。
+    func snapshots(for ids: [String], validateContext: @MainActor () throws -> Void) async throws -> [LocalPhotoSnapshot] {
+        try validateContext(); return ids.contains(source.localID) ? [snapshot] : []
+    }
+
+    /// 原片/本机hash不可用于组织；调用即失败，不能让测试悄悄读取媒体来补证明。
+    func checksum(for _: LocalPhotoSnapshot, validateContext: @MainActor () throws -> Void) async throws -> LocalPhotoChecksumOutcome {
+        try validateContext(); hashReads += 1; throw LocalPhotoChecksumError.readFailed
+    }
+
+    /// 完整包含/排除集合缺失失败；同一逻辑对象可同时在排除相簿。
+    func albums(_ ids: Set<String>) throws -> [PhotoBackupAlbumSnapshot] {
+        guard ids == (includeSecond ? ["include", "include2", "exclude"] : ["include", "exclude"]) else { throw PhotoBackupAlbumSelectionError.unavailableAlbum }
+        var snapshots: [PhotoBackupAlbumSnapshot] = [.init(id: "include", assets: [.init(source: source, capturedAt: nil)]), .init(id: "exclude", assets: excluded ? [.init(source: source, capturedAt: nil)] : [])]
+        if includeSecond {
+            snapshots.append(.init(id: "include2", assets: [.init(source: source, capturedAt: nil)]))
+        }
+        return snapshots
+    }
+}
+
+/// 实际SQLite、匹配冷恢复和管理HTTP通道；没有上传Worker，服务端已有交集由真实当前metadata/asset GET重新确认。
+@MainActor private final class AlbumSyncFixture {
+    let root: URL
+    let database: URL
+    let endpoint: URL
+    let session: AccountSession
+    let scope: MediaAccountScope
+    let store: SQLiteLibraryIndexStore
+    let manager: LibraryManagementController
+    let matching: LocalMediaMatchController
+    let photos: AlbumSyncPhotoPort
+    let backup: PhotoBackupController
+    let sync: PhotoBackupAlbumSyncController
+    let server: AlbumSyncHTTPServer
+    private var tasks: [Task<Void, Never>] = []
+    private var observers: [Task<Void, Never>] = []
+    private var closeTask: Task<Void, Never>?
+
+    /// kind/provenance选择媒体和真实冷恢复依据，includeSecond扩展已保存包含规则；读写与fresh证明均由生产Controller完成。
+    init(kind: PhotoBackupSource.Kind, provenance: LocalMediaAssociation.Source, includeSecond: Bool) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "AlbumSync-\(UUID())", directoryHint: .isDirectory)
+        let endpoint = URL(string: "https://album-sync-\(UUID().uuidString.lowercased()).invalid/api")!
+        let session = AccountSession(apiURL: endpoint, accessToken: "album-sync-fixture", userID: albumSyncOwner,
+                                     userEmail: "synthetic@example.invalid", name: "Synthetic", isAdmin: false,
+                                     serverVersion: .init(major: 3, minor: 4, patch: 2, prerelease: nil))
+        let scope = MediaAccountScope(session: session), database = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: database), photos = try AlbumSyncPhotoPort(kind: kind, includeSecond: includeSecond)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        let selection = try PhotoBackupAlbumSelection(included: includeSecond ? ["include", "include2"] : ["include"], excluded: ["exclude"])
+        let snapshots = try photos.albums(selection.included.union(selection.excluded)).map { PhotoBackupAlbumSnapshot(id: $0.id, assets: []) }
+        try journal.applyAlbumScan(selection.scan(snapshots), allowCloud: true)
+        if kind == .rawJPEG {
+            try journal.enqueue([photos.source]); let id = journal.jobs[0].id
+            try journal.update(id) { try $0.begin(); try $0.exported(); try $0.recordImage(.init(assetID: albumSyncPrimary, checksum: albumSyncDigest, duplicate: true), role: .raw)
+                try $0.recordImage(.init(assetID: albumSyncJPEG, checksum: albumSyncJPEGDigest, duplicate: true), role: .jpeg); try $0.imagesUploaded(); try $0.confirmVerifiedImages()
+            }
+        }
+        try await store.prepare(scope: scope); try await store.savePhotoBackups(journal, scope: scope)
+        let persistence = LocalMediaAssociationStore(directory: root.appending(path: "matches"))
+        let values: [LocalMediaAssociation] = kind == .rawJPEG ? [] : [.init(remoteID: albumSyncPrimary, remoteRevision: albumSyncRevision,
+                                                                             localIdentity: photos.snapshot.identity, checksum: albumSyncDigest, source: provenance)]
+        _ = try await persistence.save(.init(scope: scope, enabled: true, access: .full, associations: values), scope: scope, permit: LocalMediaSavePermit())
+        let manager = LibraryManagementController(configurationFactory: Self.configuration)
+        let matching = LocalMediaMatchController(inventory: photos, metadata: photos, checksum: photos, persistence: persistence, observeChanges: false)
+        manager.configure(session: session, endpoint: nil)
+        await matching.restoreAndRefresh(using: manager, scope: scope)?.value
+        let server = AlbumSyncHTTPServer(endpoint: endpoint, kind: kind)
+        AlbumSyncURLProtocol.install(server, endpoint: endpoint)
+        manager.configure(session: session, endpoint: endpoint); matching.configure(using: manager, scope: scope)
+        let backup = PhotoBackupController(store: store, albumScanner: { try photos.albums($0) }, authorizationStatus: { photos.authorization == .full ? .authorized : .denied }, observeAutomaticPhotos: false)
+        await backup.load(using: manager)
+        let sync = Self.controller(matching: matching, photos: photos, database: database)
+        self.root = root; self.database = database; self.endpoint = endpoint; self.session = session; self.scope = scope; self.store = store
+        self.manager = manager; self.matching = matching; self.photos = photos; self.backup = backup; self.sync = sync; self.server = server
+        await sync.load(using: manager, backup: backup)
+    }
+
+    /// 一个私有URLSession，无全局协议注册或真实网络后备。
+    private nonisolated static func configuration() -> URLSessionConfiguration {
+        let value = URLSessionConfiguration.ephemeral; value.protocolClasses = [AlbumSyncURLProtocol.self]; return value
+    }
+
+    /// 系统源端口可替换，持久化/规划/HTTP保持生产实现。
+    private static func controller(matching: LocalMediaMatchController, photos: AlbumSyncPhotoPort, database: URL) -> PhotoBackupAlbumSyncController {
+        .init(matching: matching, store: SQLiteLibraryIndexStore(databaseURL: database), scanner: { try photos.albums($0) },
+              names: { _ in ["include": "手机相簿", "include2": "第二本地相簿", "exclude": "排除相簿"] }, verifySource: { guard $0 == photos.source else { throw LocalMediaMetadataError.sourceChanged } },
+              authorization: { photos.authorization == .full ? .authorized : .denied }, observeChanges: false)
+    }
+
+    /// 新Controller与新SQLite连接真实冷恢复，不能沿用旧Controller内存完成状态。
+    func makeController() -> PhotoBackupAlbumSyncController {
+        Self.controller(matching: matching, photos: photos, database: database)
+    }
+
+    /// 记录真正业务Task并在早退时唤醒HTTP门观察者。
+    @discardableResult func track(_ task: Task<Void, Never>?) -> Task<Void, Never>? {
+        guard let task else { Issue.record("Expected an actual album organization task."); return nil }
+        tasks.append(task); observers.append(Task { await task.value; await server.workFinished() }); return task
+    }
+
+    /// 返回的Task实际由Controller/Coordinator/管理通道执行，不使用测试自建完成标志。
+    func run(_ task: Task<Void, Never>?) async {
+        let current = track(task)
+        let observer = current == nil ? nil : observers.last
+        await current?.value
+        await observer?.value
+    }
+
+    /// 明确选择第二个同名目标；重复组织可保留现有映射，不发创建或改名。
+    func mapAndPrepare(saveMapping: Bool = true) async throws {
+        if saveMapping {
+            await run(sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: manager, backup: backup))
+        }
+        await run(sync.prepare(using: manager, backup: backup))
+    }
+
+    /// 独立SQLite actor读取真实磁盘组织账本。
+    func coldState() async throws -> PhotoBackupAlbumSyncState {
+        try await SQLiteLibraryIndexStore(databaseURL: database).loadPhotoBackupAlbumSync(scope: scope)
+    }
+
+    /// 按实际冷恢复顺序重建本机匹配：先离线加载同账号文档，再接当前端点；不借自动扫描补入原片hash。
+    func restoreAccount() async {
+        manager.configure(session: session, endpoint: nil)
+        await matching.restoreAndRefresh(using: manager, scope: scope)?.value
+        manager.configure(session: session, endpoint: endpoint); matching.configure(using: manager, scope: scope)
+        await backup.load(using: manager)
+    }
+
+    /// 取消/超时共用一个清理Task；旧HTTP可能已提交，先解除所有门再等待真实业务/协议退出。
+    func close() async {
+        if let closeTask {
+            await closeTask.value; return
+        }
+        let cleanup = Task { await closeOnce() }; closeTask = cleanup; await cleanup.value
+    }
+
+    /// 只移除本例合成账号和HTTP映射；无设备图库或生产服务操作。
+    private func closeOnce() async {
+        sync.cancel(); tasks.forEach { $0.cancel() }; manager.configure(session: nil, endpoint: nil); matching.configure(using: manager, scope: nil)
+        await server.abort()
+        for task in tasks {
+            await task.value
+        }
+        for task in observers {
+            await task.value
+        }
+        await server.waitForIdle()
+        AlbumSyncURLProtocol.remove(endpoint: endpoint)
+        try? FileManager.default.removeItem(at: root)
+    }
+}
