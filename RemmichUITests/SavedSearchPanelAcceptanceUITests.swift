@@ -101,7 +101,7 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         capture("saved-search-conflict-keeps-draft", app: app)
         tap("saved-search-reload", in: app)
         assertLabel("GET=2 POST=1 PATCH=0 DELETE=0", identifier: "saved-search-test-request-counts", in: app)
-        waitUntilEnabled(save)
+        waitUntilEnabled("saved-search-save", in: app)
         XCTAssertEqual(element("saved-search-name", in: app).value as? String, "Unique")
         tap("saved-search-save", in: app)
         assertLabel("GET=2 POST=2 PATCH=0 DELETE=0", identifier: "saved-search-test-request-counts", in: app)
@@ -145,7 +145,7 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
             disclosure.tap()
         }
         tap("saved-search-reload", in: app)
-        waitUntilEnabled(element("saved-search-name", in: app))
+        waitUntilEnabled("saved-search-name", in: app)
         assertLabel("GET=1 POST=0 PATCH=0 DELETE=0", identifier: "saved-search-test-request-counts", in: app)
     }
 
@@ -326,9 +326,12 @@ final class SavedSearchPanelAcceptanceUITests: XCTestCase {
         return item
     }
 
-    /// item为已经出现的名称框或保存按钮；只有可用后才继续操作，不跳过fresh-list门禁。
-    @MainActor private func waitUntilEnabled(_ item: XCUIElement) {
-        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: item)], timeout: 10)
+    /// identifier为名称框或保存按钮的AX身份，app为当前场景；同一远程查询要求节点可用，不跳过fresh-list门禁。
+    /// 查询结果只等待exists，沿用原10秒，避免分别读取exists和enabled产生第二次远程快照。
+    @MainActor private func waitUntilEnabled(_ identifier: String, in app: XCUIApplication) {
+        let item = app.descendants(matching: .any).matching(identifier: identifier)
+            .matching(NSPredicate(format: "enabled == true")).firstMatch
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true"), object: item)], timeout: 10)
     }
 
     /// item为已取消对话框或已删除行；要求真实AX节点移除，不能只验证请求计数。

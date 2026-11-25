@@ -1,5 +1,7 @@
 # 保存搜索面板的下一串行验证候选
 
+最终范围已固定：核心bda的CI45551432185完整success；本候选保留该历史，并把名称框/Save的enabled等待也合并为单次远程查询，原10秒、3流程、31断言/解包语句、41动作保持。下一次仅运行本最终搜索头：API/App及手机、平板各8项UI（原5+保存面板3）；通过后正常合dev一次，完成现有App scheme的Build→Tests及同提交收据，再推广父gitlink。未运行的新增UI不能借核心绿色收据；没有追加功能或后续阶段切片。真机/真实Photos/生产部署继续单列未验，不自动执行。
+
 最新本地跟进：8d9b2e9已正常合入核心修复bda，只有两份记录冲突且双方原行保留。保存面板的精确label、错误及HTTP JSON等待也改为查询端一次匹配全部label条件，再以原10秒只等exists；保存条件同名替换不能只等名称，而要等新query/favorite/media。独立audit-remmich-saved-panel-waits-20261125.cjs验证3场景、31断言/解包语句和41用户动作保持；应用/SDK/脚本/原核心UI与genuine夹具源保持bda。全工作流范围376文件格式过、1skip，diff过；Swift和新增UI尚未运行。此跟进仅本地提交，PR10保持草稿，等待核心链收口再发布/就绪；以下是原f791集成快照。
 
 从手机准备修复73dda3df890057a754d7a0f6dfece379c48213a2正常合并保存面板418752c3deb05bf66c063e3aa5dd5c36efe2e02b，保留两父历史。仅change.log和fork-compatibility.md冲突，已独立验证双方全部原行按原序保留。没有混入备份、日期、共享、官方堆叠或Scene切片。

@@ -1,3 +1,10 @@
+## 2026-11-25: Finish the single search acceptance candidate
+
+- Source: codex/test-search-final-candidate from1fb369d. Core repairbda834f now has complete successful CI45551432185; this final candidate already retains that history. Upstream672f02e unchanged, no sync.
+- Resolve enabled name/save controls in one remote query as well as labels, keeping the original10-second bound. Both affected calls, all3 UI flows,31 assertion/unwrap statements and41 user-action statements remain intact. No product/search/API/SDK/workflow changes or new feature scope.
+- Final gates are fixed: this head must execute all existing API/App checks and8 UI methods per device, then one normal dev merge and its App-scheme Build→Tests receipt chain, followed by the parent gitlink. No separate intermediate dev promotion is needed for the already included core repair.
+- Scoped formatting/diff/source preservation checks pass; final Swift/UI execution remains pending. DraftPR11 and all later features remain separate. No production/signing/device result is claimed.
+
 ## 2026-11-25: Keep saved-panel label waits in one remote AX query
 
 - Source: codex/test-search-final-candidate from8d9b2e9 after normal merge of current core repairbda834f. Upstream672f02e unchanged; no sync. Current core CI stays separate and this candidate remains draft.
