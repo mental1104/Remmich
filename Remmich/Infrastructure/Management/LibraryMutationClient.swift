@@ -629,9 +629,10 @@ final nonisolated class LibraryMutationClient: Sendable {
         return value
     }
 
-    /// 只由用户明确确认创建ALBUM链接；全部选项显式发送，POST201回执仍需调用者fresh详情确认所属相簿。
+    /// albumID为用户明确选择且已fresh核权的相簿；options是确认后的完整七字段，创建时应用POST下载规范化。
+    /// 返回201回执；回执可能缺所属相簿，调用者仍须fresh详情/列表确认，状态或字段异常抛错。
     func createAlbumPublicLink(_ albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
-        let albumID = try validID(albumID); let options = try options.normalized()
+        let albumID = try validID(albumID); let options = try options.normalized(forCreation: true)
         guard var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(options)) as? [String: Any] else {
             throw LibraryWriteError.malformedResponse
         }
@@ -643,7 +644,8 @@ final nonisolated class LibraryMutationClient: Sendable {
         return value
     }
 
-    /// 只更新明确选中链接的一份完整选项；PATCH200不代表最终确认，省略/错误字段不能被补成请求值。
+    /// linkID/albumID为当前明确选择的链接与所属相簿；options为完整修改选项，保留合法既有权限组合。
+    /// 返回PATCH200回执，状态或字段异常抛错；调用者必须fresh确认，省略/错误字段不能补成请求值。
     func updateAlbumPublicLink(_ linkID: String, albumID: String, options: AlbumPublicLinkOptions) async throws -> AlbumPublicLink {
         let linkID = try validID(linkID); let albumID = try validID(albumID); let options = try options.normalized()
         let data = try await send("PATCH", ["shared-links", linkID], body: JSONEncoder().encode(options), expectedStatus: 200)

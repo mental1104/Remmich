@@ -236,11 +236,12 @@ private struct AlbumPublicLinkEditor: View {
         }
     }
 
-    /// 与官方Web一致：隐藏元数据时禁止下载；上传权限独立可见，默认新建不允许上传。
+    /// 新建或用户主动隐藏元数据时保留禁下载联动；既有合法组合原样显示，并允许明确关闭已有下载。
+    /// 上传权限独立可见，默认新建不允许上传；编辑其他字段不隐式收窄现有权限。
     private var permissionSection: some View {
         Section("公开访问权限") {
             Toggle("显示照片元数据", isOn: $showMetadata)
-            Toggle("允许下载", isOn: $allowDownload).disabled(!showMetadata)
+            Toggle("允许下载", isOn: $allowDownload).disabled(!showMetadata && !allowDownload)
             Toggle("允许上传到此相簿", isOn: $allowUpload)
         }
     }
