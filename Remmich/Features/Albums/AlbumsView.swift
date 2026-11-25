@@ -153,18 +153,17 @@ struct AlbumsView: View {
 
     /// metrics提供当前窗口实际内容宽度；标题分行后的高度同时进入内容、滚动指示和原有锚定计算。
     private func topClearance(for metrics: AlbumReflowMetrics) -> CGFloat {
-        windowTopInset + headerLayout(for: metrics).height + 16
+        headerLayout(for: metrics).contentTopClearance(windowTopInset: windowTopInset)
     }
 
     /// 控件行至少44点，并为当前文字行保留完整高度；不把动态字号塞回固定44高的UIKit分段框。
     private var headerRowHeight: CGFloat {
-        max(headerControlSize, max(headerTextHeight + 12, ceil(UIFont.systemFont(ofSize: scopeFontSize, weight: .medium).lineHeight + 16)))
+        AlbumOverviewHeaderLayout.controlRowHeight(fontSize: scopeFontSize, textHeight: headerTextHeight)
     }
 
     /// 只按窗口与当前字号生成几何，不缓存旧宽度或改变搜索/排序/相簿卡片的身份。
     private func headerLayout(for metrics: AlbumReflowMetrics) -> AlbumOverviewHeaderLayout {
-        .init(availableWidth: metrics.width, scopeWidth: AlbumScopeControl.requiredWidth(fontSize: scopeFontSize),
-              rowHeight: headerRowHeight, searchExpanded: isSearchExpanded)
+        .init(availableWidth: metrics.width, fontSize: scopeFontSize, textHeight: headerTextHeight, searchExpanded: isSearchExpanded)
     }
 
     /// 快捷键只属于可交互的相簿根页；保留的旧导航树、其他tab、查看器或管理sheet不能响应后方命令。
@@ -437,9 +436,7 @@ struct AlbumsView: View {
             albumOptions(metrics: metrics)
         }
         .disabled(!headerInteractionsEnabled)
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .padding(.top, windowTopInset)
+        .modifier(AlbumOverviewHeaderInsets(windowTopInset: windowTopInset))
         .background {
             ZStack {
                 TimelineMemoryGradientBackdrop(visible: true, extended: true, reduceMotion: reduceMotion)

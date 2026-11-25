@@ -165,12 +165,11 @@ private struct AlbumHeaderFixtureHost: View {
     @ScaledMetric(relativeTo: .subheadline) private var fontSize: CGFloat = 13
     @ScaledMetric(relativeTo: .body) private var textHeight: CGFloat = 24
     var body: some View {
-        let row = max(44, max(textHeight + 12, ceil(UIFont.systemFont(ofSize: fontSize, weight: .medium).lineHeight + 16)))
-        let layout = AlbumOverviewHeaderLayout(availableWidth: state.width, scopeWidth: AlbumScopeControl.requiredWidth(fontSize: fontSize), rowHeight: row, searchExpanded: false)
+        let layout = AlbumOverviewHeaderLayout(availableWidth: state.width, fontSize: fontSize, textHeight: textHeight, searchExpanded: false)
         AlbumOverviewHeader(layout: layout, scope: $state.scope, fontSize: fontSize) {
-            Button("Search") {}.frame(width: layout.searchFrame.width, height: row)
+            Button("Search") {}.frame(width: layout.searchFrame.width, height: layout.searchFrame.height)
         } options: {
-            Button("Options") {}.frame(width: layout.optionsFrame.width, height: row)
+            Button("Options") {}.frame(width: layout.optionsFrame.width, height: layout.optionsFrame.height)
         }
     }
 }

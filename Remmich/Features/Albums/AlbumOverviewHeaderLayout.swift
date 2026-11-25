@@ -1,4 +1,5 @@
 import CoreGraphics
+import UIKit
 
 /// 相簿总览标题栏的点坐标；按可用窗口宽度与实际文字需求分行，和卡片布局/相簿身份保持独立。
 nonisolated struct AlbumOverviewHeaderLayout: Equatable, Sendable {
@@ -10,6 +11,22 @@ nonisolated struct AlbumOverviewHeaderLayout: Equatable, Sendable {
     let scopeVisible: Bool
     let stacked: Bool
     let scopeUsesMenu: Bool
+
+    /// availableWidth为当前内容点宽，fontSize/textHeight来自真实SwiftUI缩放；复用产品实测文字与同一行高，不缓存容器尺寸。
+    @MainActor init(availableWidth: CGFloat, fontSize: CGFloat, textHeight: CGFloat, searchExpanded: Bool) {
+        self.init(availableWidth: availableWidth, scopeWidth: AlbumScopeControl.requiredWidth(fontSize: fontSize),
+                  rowHeight: Self.controlRowHeight(fontSize: fontSize, textHeight: textHeight), searchExpanded: searchExpanded)
+    }
+
+    /// fontSize为当前scope字号，textHeight为搜索正文缩放高度，单位均为点；返回至少44点且容纳文字的控件行高。
+    @MainActor static func controlRowHeight(fontSize: CGFloat, textHeight: CGFloat) -> CGFloat {
+        max(44, max(textHeight + 12, ceil(UIFont.systemFont(ofSize: fontSize, weight: .medium).lineHeight + 16)))
+    }
+
+    /// windowTopInset为当前宿主顶部安全留白；返回与AlbumOverviewHeaderInsets实际上下padding一致的内容顶部留白。
+    func contentTopClearance(windowTopInset: CGFloat) -> CGFloat {
+        windowTopInset + height + 16
+    }
 
     /// availableWidth为扣除外侧padding的点数，scopeWidth为当前字号两段文字所需宽度，rowHeight为完整文字行高度。
     /// searchExpanded仅控制搜索宽度；分行时保留独立scope行，避免开关搜索重排滚动留白。

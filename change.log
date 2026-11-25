@@ -1,3 +1,9 @@
+## 2026-11-25: Exercise the album header through actual UIKit container resizing
+
+- Source: independent codex/test-ipad-album-container-resize from89fc8e5; upstream remains672f02e, no sync. Reuse the product header's original text/row measurement, clearance and padding through narrow helpers. Preserve the original layout algorithm, scope control identity/actions, album state/sort/search/navigation/scroll paths and all previous32 declared scenarios.
+- Add one test function/two initial selections using a non-key UIWindow, child hosting controller and actual Auto Layout constraints. Resize real bounds through wide/narrow/landscape shapes, propagate UIKit size-class/content-size traits, and check measured entry frames, header/clearance, native identity, retained query/selection and deterministic window cleanup. This is a container test, not physical rotation/Stage Manager or a full AlbumsView scrolling acceptance.
+- Actual NAS checks: SwiftFormat0.64.5 lint0/5, diff and independent Node source-boundary/declaration audit pass. Swift compilation, both new UIKit cases, existing32 cases, full scroll/indicator/transition behavior and device/keyboard/pointer/accessibility acceptance remain UNVERIFIED. No API/server/backup/media/persistence/production/workflow change, push or CI trigger. Revert this local helper/test patch without a data migration. See docs/ipad-album-header.md.
+
 ## 2026-11-24: Adapt the native Albums header to iPad windows and text size
 
 - Source: independent codex/feature-ipad-library-layout from795fd39; upstream remains672f02e, no sync. Tonight's candidate stays frozen; no Viewer/AssetManagement/Library route, server/API/schema/data/production/workflow change, push or CI trigger.
