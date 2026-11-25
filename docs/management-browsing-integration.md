@@ -1,5 +1,7 @@
 # 管理与浏览开发候选整合
 
+**后续已解决**：下文是 e531 时代的整合快照。明确列出的首 owner 权限漏入口已由 `3de0d86 → e6d521a` 补全，详 [完整角色管理](management-album-roles.md)；最终组合范围与未验收项见 [前五阶段候选](first-five-development-candidate.md)。保留下文作为发现与修复依据，不把历史缺口误报为当前仍未开发。
+
 基线为 `c3cafb6`，已含核心29d、备份f13、日期/共享/公链075/伙伴756、可视编辑与iPad布局。标签仅追溯择取 `36a8500 → ce09fe2`、`db35eb6 → 2aa483f`，保留旧metadata祖先不进入的边界。随后正常合并 `51ccb1b → 4f5c25d` 与 `7dfffd3 → 455ab5f`：前者未合链只有24e人物fresh、982共享测试会话merge、ed0随机、51co-owner待整理；后者只有d5官方stack、2dc场景、7dSteam。没有取旧WIP或背景备份分支。
 
 源码没有冲突。历史文档逐块保留双方原文，不覆盖整份文件。独立只读审计实际核对52份交付源码/测试/说明与原片逐字相同，616份其他根文件字节不变；共享三个源按方法边界复核：SDK客户端仅组合全owner投影与Stack/Scene方法，AppSession仅新增Photos sceneSource，Repo保留伙伴policy/持久GET退休/原GET路径及全owner映射，再添加独立Stack写lane与Scene只读lane。原DEBUG宿主入口保持唯一，Steam复用既有同源筛选；随机只在自己的冻结Selection显式sourceOrder，普通Viewer默认chronological不变。

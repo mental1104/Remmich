@@ -140,8 +140,11 @@ import Photos
     }
 
     /// 只建立组织计划；RAW无完整回执时仅哈希本机双原图，不上传/下载iCloud。automatic不能重排失败/未知/部分历史。
-    @discardableResult func prepare(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false) -> Task<Void, Never>? {
-        start(using: manager, backup: backup) { [self] client, scope, check in
+    /// validateExternal默认nil；processing调用方可把固定租约检查接入每个内部await，而非只在整Task完成后检查。
+    @discardableResult func prepare(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                    validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
+        start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
             var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
             guard !automatic || saved.automaticEnabled else { prepared = false; previewIDs = []; return }
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
@@ -199,12 +202,17 @@ import Photos
         }
     }
 
-    /// 用户确认后重新核源/当前metadata证据，再逐组fresh检查成员；未知发送绝不直接重放。
-    @discardableResult func synchronize(using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+    /// 手动确认或automatic独立同意后重核源/metadata；自动路径每项实际发送与检查点还须fresh磁盘意愿。
+    /// manager/backup绑定当前会话与保存选择；automatic默认false保留手动路径，返回实际任务或门禁拒绝时nil。
+    /// validateExternal默认nil保留手动确认；系统租约变化必须在真实成员GET返回后及PUT前同步拒绝。
+    @discardableResult func synchronize(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                        validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
         guard prepared, !previewIDs.isEmpty, let selection = previewSelection else { return nil }
         let planned = previewIDs, mappings = state.mappings
-        return start(using: manager, backup: backup) { [self] client, scope, check in
+        return start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
             let saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            guard !automatic || saved.automaticEnabled else { throw PhotoBackupAlbumAutomaticRevoked() }
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             guard Selection(journal) == selection, saved.mappings == mappings else { throw LocalMediaMetadataError.sourceChanged }
             let completed = Dictionary(grouping: journal.jobs.filter { $0.stage == .completed }, by: \.source)
@@ -231,12 +239,12 @@ import Photos
                 guard eligible, currentAssets == operation.assets
                 else {
                     operation.phase = .failed; operation.failure = .sourceChanged
-                    try await checkpoint(operation, scope: scope, check: freshCheck)
+                    try await checkpoint(operation, scope: scope, check: freshCheck, automatic: automatic)
                     processed += 1
                     continue
                 }
                 try verifySource(operation.source)
-                let stop = try await synchronizeOperation(&operation, client: client, scope: scope, check: freshCheck)
+                let stop = try await synchronizeOperation(&operation, client: client, scope: scope, check: freshCheck, automatic: automatic)
                 processed += 1
                 if operation.phase == .confirmed {
                     confirmed += 1
@@ -261,7 +269,8 @@ import Photos
     }
 
     /// 所有明确写流程共用manager忙门和原Coordinator；先取得管理忙门，避免自动备份抢占新组织操作。
-    private func start(using manager: LibraryManagementController, backup: PhotoBackupController,
+    /// validateExternal是窄系统租约端口，默认nil；其撤销错误与原账号/Photos门一样阻止后续HTTP与checkpoint。
+    private func start(using manager: LibraryManagementController, backup: PhotoBackupController, validateExternal: (@MainActor () throws -> Void)? = nil,
                        operation: @escaping @MainActor (LibraryMutationClient, MediaAccountScope, @escaping @MainActor () throws -> Void) async throws -> Void) -> Task<Void, Never>?
     {
         guard !running, !loading, !backup.running, !manager.busy, let scope = manager.backupScope, loadedScope == scope,
@@ -279,7 +288,10 @@ import Photos
                 }
             }
             do {
-                let check: @MainActor () throws -> Void = { try self.validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access) }
+                let check: @MainActor () throws -> Void = {
+                    try self.validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+                    try validateExternal?()
+                }
                 try check()
                 try await manager.perform(publishChange: false) { client in
                     try await PhotoBackupRunCoordinator.perform(scope: scope) { try check(); try await operation(client, scope, check) }
@@ -475,64 +487,77 @@ extension PhotoBackupAlbumSyncController {
 /// 组织账本保存失败必须退出，不得再以网络/权限错误覆盖未确认恢复资料。
 private nonisolated struct PhotoBackupAlbumSyncStorageError: Error { let underlying: any Error }
 
+/// 自动意愿在另一实例中已关闭；只退役当前自动操作，不将其改为成功或用错误处理继续写检查点。
+private nonisolated struct PhotoBackupAlbumAutomaticRevoked: Error {}
+
 extension PhotoBackupAlbumSyncController {
-    /// operation可包含两份RAW/JPEG；每份都先核当前身份/成员，发送前保存sending，独立fresh存在才确认。
+    /// operation可包含两份RAW/JPEG；client/scope/check绑定当前账号，automatic要求每次fresh读取保存同意。
+    /// 每份都先核当前身份/成员，发送前保存sending，独立fresh存在才确认。
     /// 返回true表示未知/连接问题，停止后续组；下一次明确恢复仍先查成员，绝不盲目重发。
     private func synchronizeOperation(_ operation: inout PhotoBackupAlbumSyncOperation, client: LibraryMutationClient,
-                                      scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws -> Bool
+                                      scope: MediaAccountScope, check: @escaping @MainActor () throws -> Void, automatic: Bool) async throws -> Bool
     {
         // 旧逐项回执保留作恢复资料；本轮只有重新fresh核过全部主体才可再次记整组confirmed。
         var freshConfirmed = Set<UUID>()
+        let consent: @MainActor () async throws -> Void = {
+            try check()
+            if automatic {
+                let enabled = try await self.store.photoBackupAlbumSyncAutomaticEnabled(scope: scope)
+                try check()
+                guard enabled else { throw PhotoBackupAlbumAutomaticRevoked() }
+            }
+        }
         do {
             for asset in operation.assets {
-                try check(); try verifySource(operation.source)
-                _ = try await client.albumSyncTarget(operation.targetID); try check()
-                let before = try await client.albumSyncAsset(asset.assetID); try check()
+                try await consent(); try verifySource(operation.source)
+                _ = try await client.albumSyncTarget(operation.targetID); try await consent()
+                let before = try await client.albumSyncAsset(asset.assetID); try await consent()
                 try verifyRemote(before, proof: asset, source: operation.source, owner: scope.userID)
-                let present = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try check()
+                let present = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try await consent()
                 if !present {
                     operation.confirmedAssetIDs.remove(asset.assetID); operation.phase = .sending; operation.failure = nil
-                    try await checkpoint(operation, scope: scope, check: check)
+                    try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+                    try await consent()
                     try verifySource(operation.source)
                     let receipt: PhotoBackupAlbumMemberReceipt?
                     do { receipt = try await client.albumSyncAdd(asset.assetID, target: operation.targetID) }
                     catch { try check(); receipt = nil }
-                    try check()
+                    try await consent()
                     if case .denied = receipt {
                         operation.phase = .failed; operation.failure = .permission
-                        try await checkpoint(operation, scope: scope, check: check)
+                        try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
                         return false
                     }
                     // success、duplicate或响应未知都fresh核实际期望状态；不会因HTTP200/旧回执直接记完成。
                     try verifySource(operation.source)
-                    _ = try await client.albumSyncTarget(operation.targetID); try check()
-                    let after = try await client.albumSyncAsset(asset.assetID); try check()
+                    _ = try await client.albumSyncTarget(operation.targetID); try await consent()
+                    let after = try await client.albumSyncAsset(asset.assetID); try await consent()
                     try verifyRemote(after, proof: asset, source: operation.source, owner: scope.userID)
-                    let confirmed = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try check()
+                    let confirmed = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try await consent()
                     guard confirmed else {
                         operation.phase = .unknown; operation.failure = .unconfirmed
-                        try await checkpoint(operation, scope: scope, check: check)
+                        try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
                         return true
                     }
                 }
                 // 即使成员原本已存在，也须在提交本轮确认前重核当前角色，不能沿用较早的编辑权限。
-                _ = try await client.albumSyncTarget(operation.targetID); try check()
+                _ = try await client.albumSyncTarget(operation.targetID); try await consent()
                 try verifySource(operation.source)
                 freshConfirmed.insert(asset.assetID)
                 operation.confirmedAssetIDs.insert(asset.assetID)
                 operation.phase = freshConfirmed.count == operation.assets.count ? .confirmed : .queued
                 operation.failure = nil
-                try await checkpoint(operation, scope: scope, check: check)
+                try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
             }
             return false
         } catch {
             try check()
-            if error is PhotoBackupAlbumSyncStorageError {
+            if error is PhotoBackupAlbumSyncStorageError || error is PhotoBackupAlbumAutomaticRevoked {
                 throw error
             }
             operation.phase = operation.phase == .sending ? .unknown : .failed
             operation.failure = operation.phase == .unknown ? .unconfirmed : .unavailable
-            try await checkpoint(operation, scope: scope, check: check)
+            try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
             return true
         }
     }
@@ -545,9 +570,10 @@ extension PhotoBackupAlbumSyncController {
     }
 
     /// 逐组热写之前/之后都核上下文；磁盘失败不能被后续错误处理抹成另一种成功/失败事实。
-    private func checkpoint(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws {
+    /// operation/scope/check绑定当前计划与账号；automatic默认false，true要求同一SQL事务内意愿仍开启。
+    private func checkpoint(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope, check: @MainActor () throws -> Void, automatic: Bool = false) async throws {
         try check()
-        do { try await store.savePhotoBackupAlbumSyncOperation(operation, scope: scope) }
+        do { try await store.savePhotoBackupAlbumSyncOperation(operation, scope: scope, requiresAutomaticConsent: automatic) }
         catch { throw PhotoBackupAlbumSyncStorageError(underlying: error) }
         try check()
     }

@@ -5,6 +5,7 @@ struct PhotoBackupAlbumSyncSection: View {
     let sync: PhotoBackupAlbumSyncController
     let manager: LibraryManagementController
     let backup: PhotoBackupController
+    let automatic: PhotoBackupAlbumAutomation
     /// 两种写入共用一个确认宿主，避免并列confirmationDialog互相遮蔽；目标ID来自已保存预览。
     private enum Confirmation { case members, create(UUID) }
     @State private var confirmation: Confirmation?
@@ -25,14 +26,24 @@ struct PhotoBackupAlbumSyncSection: View {
 
     var body: some View {
         Section("相簿同步 · 手动增量补入") {
-            Text(sync.status)
-            Text("将当前包含且未排除的本地相簿，明确选择自有或具有编辑权限的共享相簿，或单独确认新建空相簿。只补入已确认照片的缺失成员关系；不上传或下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
+            Toggle("自动相簿同步（本账户）", isOn: Binding(get: { automatic.enabled }, set: { value in Task { await automatic.setEnabled(value, using: manager) } }))
+                .disabled(automatic.configuring || (!automatic.enabled && (manager.client == nil || backup.requiresSelectionScan || backup.running || backup.configuringAutomatic || sync.state.mappings.isEmpty)))
+            Text(automatic.status).font(.footnote).foregroundStyle(.secondary)
+            Text("默认关闭。开启后在前台，或已开启系统后台备份的有效租约内，将安全新项目补入已映射目标。使用保存包含/排除，不创建相簿，不重放未知/失败/取消项，不为组织上传或下载原片。")
                 .font(.footnote).foregroundStyle(.secondary)
-            Text("普通照片、视频及Live Photo主体需先开启本机照片匹配。RAW+JPEG需先具备两份完整原图回执；待匹配项目本次跳过，不会转为上传。")
+            Text(sync.status)
+            Text("将当前包含且未排除的本地相簿，明确选择自有或具有编辑权限的共享相簿，或单独确认新建空相簿。只补入已确认照片的缺失成员关系；不上传、不从iCloud或Immich下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
+                .font(.footnote).foregroundStyle(.secondary)
+            Text("普通照片、视频及Live主体可用当前匹配，或同源完整备份记录的原片摘要；RAW+JPEG可用双回执，或本机可用且未编辑的双原图摘要分别核对已有服务器原图。未完整证明项目跳过，不转为上传，不为组织下载iCloud。")
                 .font(.footnote).foregroundStyle(.secondary)
             if sync.running {
                 ProgressView("已核对 \(sync.processed) 组，完整确认 \(sync.confirmed) 组")
-                Button("停止相簿组织", role: .destructive) { sync.cancel() }
+                Button(automatic.enabled ? "停止并关闭自动相簿同步" : "停止相簿组织", role: .destructive) {
+                    sync.cancel()
+                    if automatic.enabled || automatic.running {
+                        Task { await automatic.setEnabled(false, using: manager) }
+                    }
+                }
             } else {
                 if sync.loading {
                     ProgressView("读取当前目标")
