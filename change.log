@@ -1,3 +1,9 @@
+## 2026-11-25: Resolve exact search labels in one UI query
+
+- Source: codex/fix-search-ui-label-query directly from fixed73dda3d; no new upstream sync or unrelated random/SavedUI/Scene/Stack source. PR9run45544821063 phone executed5 methods,4 passed; pagination Retry failed only at the10-second label wait.
+- Raw xcresult runner AX independently contains search-loaded-count=Loaded2items at04:37:39.241. Old existence query consumed7.393s, then a second label query was interrupted by the outer waiter. Combine identifier+exact label into one remote query and wait for existence, retaining10seconds, all5 methods/32 originalXCTAssert sites and screenshots. No pagination business/fixture change, sleep, test retry or relaxed condition.
+- NAS scoped SwiftFormat/lint, source-preservation and diff checks recorded; Swift/Xcode/new phone/tablet execution remains UNVERIFIED. Original4/5 cannot approve this repair. No push/CI/dev/server/API/SDK/production/official-client change. See docs/search-phone-73-pagination-ci-diagnosis.md; revert only the test helper if disproven by actual Xcode execution.
+
 ## 2026-11-25: Bound CI phone bootstatus recovery to the selected simulator
 
 - Source: codex/fix-ci-phone-boot-timeout from888e944ef4304ec1f5187139663749ffd8e8ab84. Upstream remains672f02e; no upstream sync. Independent from SavedUI418752c; retain original5 UI cases/32 assertions, both schemes and Swift business source unchanged. No workflow/trigger/runner/job-budget/timeout change.
