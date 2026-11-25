@@ -87,6 +87,31 @@ import Testing
         #expect(requests.map(\.method) == ["GET", "GET", "GET", "GET", "PATCH", "GET", "GET"])
     }
 
+    /// 服务端PATCH允许隐藏元数据但保留下载；只改描述时真实Store和客户端都不能套用POST规范化收窄权限。
+    @Test func descriptionOnlyEditPreservesExistingHiddenMetadataDownload() async throws {
+        let baselineOptions = #"{"description":"Baseline","password":"synthetic original","slug":"old-slug","expiresAt":null,"allowUpload":true,"allowDownload":true,"showMetadata":false}"#
+        let expectedOptions = #"{"description":"Updated description","password":"synthetic original","slug":"old-slug","expiresAt":null,"allowUpload":true,"allowDownload":true,"showMetadata":false}"#
+        let baseline = try publicLinkJSON(options: baselineOptions)
+        let receipt = try publicLinkJSON(options: expectedOptions, album: false)
+        let confirmed = try publicLinkJSON(options: expectedOptions)
+        let fixture = ChecksumLookupHTTPFixture(exchanges: publicReads(album: publicAlbumJSON(role: "viewer"), links: "[\(baseline)]") + [
+            publicDetail(baseline), .init(method: "PATCH", path: "shared-links/\(publicLinkID)", status: 200, json: receipt),
+            publicDetail(confirmed), publicList("[\(confirmed)]"),
+        ])
+        defer { fixture.close() }
+        let store = AlbumPublicLinkStore(); await store.reload(manager: fixture.manager)?.value
+        try #require(store.hasFreshData)
+        let link = try #require(store.links.first)
+        var options = link.options; options.description = "Updated description"
+        let plan = try store.prepare(.update(link, options), manager: fixture.manager)
+        let operation = try #require(store.start(plan, manager: fixture.manager)); await operation.value
+        #expect(store.hasFreshData && store.notice != nil && store.error == nil && fixture.manager.revision == 1)
+        #expect(store.links.first?.options.allowDownload == true && store.links.first?.options.showMetadata == false)
+        let requests = await fixture.script.requests(); try #require(requests.count == 7)
+        try assertPublicBody(requests[4], expected: expectedOptions, creating: false)
+        #expect(requests.map(\.method) == ["GET", "GET", "GET", "GET", "PATCH", "GET", "GET"])
+    }
+
     /// 撤销204后要求成功的fresh列表确实不含链接；列表仍含/失败不会当已撤销，照片与相簿无DELETE。
     @Test(arguments: ["absent", "present", "unavailable"])
     func revokesOnlyWithFreshAbsence(_ result: String) async throws {

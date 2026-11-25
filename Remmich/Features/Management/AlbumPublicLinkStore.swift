@@ -67,7 +67,7 @@ import Observation
         switch command {
         case let .create(options):
             guard album.canManage(client.userID) else { throw AlbumPublicLinkError.permission }
-            normalized = try .create(options.normalized())
+            normalized = try .create(options.normalized(forCreation: true))
         case let .update(link, options):
             try requireOwned(link, userID: client.userID, albumID: album.id)
             normalized = try .update(link, options.normalized())

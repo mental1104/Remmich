@@ -10,8 +10,9 @@ nonisolated struct AlbumPublicLinkOptions: Encodable, Equatable, Sendable {
     var allowDownload: Bool
     var showMetadata: Bool
 
-    /// 按官方创建/Web行为规范化空值、毫秒日期及隐藏元数据时的下载限制；不裁剪非空密码或slug。
-    func normalized() throws -> Self {
+    /// 规范化空值和毫秒日期；forCreation仅在POST时应用服务端的隐藏元数据/下载联动。
+    /// 默认更新保留合法既有权限组合，不因修改描述而隐式关闭下载；返回新副本，不裁剪非空密码或slug。
+    func normalized(forCreation: Bool = false) throws -> Self {
         var result = self
         if result.description?.isEmpty == true {
             result.description = nil
@@ -26,7 +27,7 @@ nonisolated struct AlbumPublicLinkOptions: Encodable, Equatable, Sendable {
             guard expiresAt.timeIntervalSince1970.isFinite else { throw AlbumPublicLinkError.invalidOptions }
             result.expiresAt = try AlbumPublicLink.date(AlbumPublicLink.dateString(expiresAt))
         }
-        if !showMetadata {
+        if forCreation, !showMetadata {
             result.allowDownload = false
         }
         return result
