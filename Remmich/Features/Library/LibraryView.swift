@@ -111,6 +111,13 @@ struct LibraryView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("library-scene-stacks")
+                                LibraryHubLink {
+                                    LibrarySteamScenesView(source: collectionSource, ownerID: session.userID, media: media, assetDetails: assetDetails)
+                                } label: {
+                                    LibraryCollectionCard(title: "Steam screenshots", symbol: "gamecontroller", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-steam-scenes")
                                 if preferences?.memoriesEnabled == true, !opening.memories.isConfirmedEmpty {
                                     LibraryMemoriesCard(source: collectionSource, media: media, assetDetails: assetDetails,
                                                         context: collectionNavigation, catalog: opening.memories,
