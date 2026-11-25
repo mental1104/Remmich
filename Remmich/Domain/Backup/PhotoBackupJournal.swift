@@ -2,10 +2,16 @@ import Foundation
 
 /// 备份源的稳定快照；localID只在当前手机照片库内有效，修改版本变化后必须成为新的任务。
 nonisolated struct PhotoBackupSource: Codable, Hashable, Sendable {
-    enum Kind: String, Codable, Sendable { case photo, video, livePhoto }
+    enum Kind: String, Codable, Sendable { case photo, video, livePhoto, rawJPEG }
     let localID: String
     let modifiedAt: Date?
     let kind: Kind
+    let rawJPEG: PhotoBackupRawJPEGSource?
+
+    /// rawJPEG仅用于已明确识别的双原始静态图；默认nil保留旧照片/视频/Live Photo构造及解码兼容。
+    init(localID: String, modifiedAt: Date?, kind: Kind, rawJPEG: PhotoBackupRawJPEGSource? = nil) {
+        self.localID = localID; self.modifiedAt = modifiedAt; self.kind = kind; self.rawJPEG = rawJPEG
+    }
 }
 
 /// 备份失败的可持久化原因，不保存token、原始HTTP响应或私人文件路径。
@@ -57,6 +63,8 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     private(set) var primaryAssetID: UUID?
     private(set) var primaryWasDuplicate: Bool
     private(set) var failure: PhotoBackupFailure?
+    private(set) var rawReceipt: PhotoBackupImageReceipt?
+    private(set) var jpegReceipt: PhotoBackupImageReceipt?
 
     /// source为用户明确选中的当前版本；id为本地任务身份，不作为服务端资产ID使用。
     init(source: PhotoBackupSource, id: UUID = UUID()) {
@@ -69,9 +77,18 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
 
     /// 只验证当前任务的持久化不变量，供单项检查点使用；不把回执存在等同于已完成服务器验证。
     func validate() throws {
+        if source.kind == .rawJPEG {
+            guard let pair = source.rawJPEG, let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
+                  primaryAssetID == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
+            try pair.validate(); try rawReceipt?.validate(); try jpegReceipt?.validate()
+            guard stage != .completed || (rawReceipt != nil && jpegReceipt != nil && rawReceipt?.assetID != jpegReceipt?.assetID)
+            else { throw PhotoBackupStateError.invalidJournal }
+        } else {
+            guard source.rawJPEG == nil, rawReceipt == nil, jpegReceipt == nil else { throw PhotoBackupStateError.invalidJournal }
+        }
         guard !source.localID.isEmpty, attempts >= 0,
               motionAssetID == nil || source.kind == .livePhoto,
-              stage != .completed || (primaryAssetID != nil && (source.kind != .livePhoto || motionAssetID != nil))
+              stage != .completed || source.kind == .rawJPEG || (primaryAssetID != nil && (source.kind != .livePhoto || motionAssetID != nil))
         else { throw PhotoBackupStateError.invalidJournal }
     }
 
@@ -98,7 +115,7 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
 
     /// assetID/duplicate为已确认主体回执；尚不代表Live Photo配对已核对。
     mutating func recordPrimary(_ assetID: UUID, duplicate: Bool) throws {
-        guard stage == .uploadingPrimary, source.kind != .livePhoto || motionAssetID != nil else { throw PhotoBackupStateError.invalidTransition }
+        guard source.kind != .rawJPEG, stage == .uploadingPrimary, source.kind != .livePhoto || motionAssetID != nil else { throw PhotoBackupStateError.invalidTransition }
         primaryAssetID = assetID
         primaryWasDuplicate = duplicate
         stage = .verifying
@@ -106,10 +123,39 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
 
     /// 调用者已通过真实上传回执及必要的静态帧关联读取确认完整性；单独动态资源永不算完成。
     mutating func confirmVerifiedReceipt() throws {
-        guard stage == .verifying, primaryAssetID != nil,
+        guard source.kind != .rawJPEG, stage == .verifying, primaryAssetID != nil,
               source.kind != .livePhoto || motionAssetID != nil else { throw PhotoBackupStateError.invalidTransition }
         stage = .completed
         failure = nil
+    }
+
+    /// receipt已由本轮完整文件与fresh远端信息核对；逐份落盘，重试仍须重导出和查重，旧回执不是跳过依据。
+    mutating func recordImage(_ receipt: PhotoBackupImageReceipt, role: PhotoBackupImageRole) throws {
+        guard source.kind == .rawJPEG, stage == .uploadingPrimary else { throw PhotoBackupStateError.invalidTransition }
+        try receipt.validate()
+        if role == .raw {
+            rawReceipt = receipt
+        } else {
+            jpegReceipt = receipt
+        }
+    }
+
+    /// 本轮两份都已重新确认后进入最终核对；旧的部分回执不能通过此方法直接变成完成。
+    mutating func imagesUploaded() throws {
+        guard source.kind == .rawJPEG, stage == .uploadingPrimary, rawReceipt != nil, jpegReceipt != nil else {
+            throw PhotoBackupStateError.invalidTransition
+        }
+        stage = .verifying
+    }
+
+    /// 调用者完成两份独立fresh回读；要求不同远端资产，双原图作为一个完整逻辑任务计数。
+    mutating func confirmVerifiedImages() throws {
+        guard source.kind == .rawJPEG, stage == .verifying, let rawReceipt, let jpegReceipt,
+              rawReceipt.assetID != jpegReceipt.assetID, rawReceipt.checksum != jpegReceipt.checksum
+        else {
+            throw PhotoBackupStateError.invalidTransition
+        }
+        stage = .completed; failure = nil
     }
 
     /// 暂停未完成任务并保留所有已确认回执；完成/取消历史不因页面退出被改写。
@@ -157,14 +203,16 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let selectedAlbumIDs: [String]
         let allowCloud: Bool
         let excludedAlbumIDs: [String]?
+        let rawJPEGVersion: Int?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
-        init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil) {
+        init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil) {
             self.version = version
             self.namespace = namespace
             self.selectedAlbumIDs = selectedAlbumIDs
             self.allowCloud = allowCloud
             self.excludedAlbumIDs = excludedAlbumIDs
+            self.rawJPEGVersion = rawJPEGVersion
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -172,7 +220,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             let exclusions = excludedAlbumIDs ?? []
             let validIncludes = !selectedAlbumIDs.isEmpty && selectedAlbumIDs.allSatisfy { !$0.isEmpty }
                 && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
-            guard [1, 2].contains(version), namespace == expected,
+            guard [1, 2, 3].contains(version), namespace == expected,
+                  version == 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
                   exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
                   version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
         }
@@ -184,6 +233,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     var allowCloud: Bool
     private(set) var excludedAlbumIDs: [String]?
     private(set) var jobs: [PhotoBackupJob]
+    private(set) var rawJPEGVersion: Int?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -193,6 +243,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         allowCloud = false
         excludedAlbumIDs = nil
         jobs = []
+        rawJPEGVersion = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -203,11 +254,12 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         allowCloud = header.allowCloud
         excludedAlbumIDs = header.excludedAlbumIDs
         self.jobs = jobs
+        rawJPEGVersion = header.rawJPEGVersion
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
-        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs)
+        .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs, rawJPEGVersion: rawJPEGVersion)
     }
 
     /// scan已验证完整包含/排除集合，allowCloud来自本轮用户选择；原子保存前取消不再属于本轮选择的未完成项。
@@ -219,7 +271,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             throw PhotoBackupStateError.invalidJournal
         }
         selectedAlbumIDs = scan.selection.included.sorted()
-        if !scan.selection.excluded.isEmpty {
+        if !scan.selection.excluded.isEmpty, version < 2 {
             version = 2
         }
         excludedAlbumIDs = version == 1 ? nil : scan.selection.excluded.sorted()
@@ -238,6 +290,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
               Set(jobs.map(\.source)).count == jobs.count else { throw PhotoBackupStateError.invalidJournal }
         for job in jobs {
             try job.validate()
+            guard version == 3 || job.source.kind != .rawJPEG else { throw PhotoBackupStateError.invalidJournal }
         }
     }
 
@@ -246,6 +299,10 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     @discardableResult mutating func enqueue(_ sources: [PhotoBackupSource]) throws -> Int {
         let groups = Dictionary(grouping: sources, by: \.localID)
         guard groups.allSatisfy({ !$0.key.isEmpty && Set($0.value).count == 1 }) else { throw PhotoBackupStateError.invalidJournal }
+        // 包含双原图的明确扫描原子升级格式；旧读取器必须先拒绝header，不能漏掉JPEG后继续上传。
+        if sources.contains(where: { $0.kind == .rawJPEG }) {
+            version = 3; rawJPEGVersion = 1; excludedAlbumIDs = excludedAlbumIDs ?? []
+        }
         var indexesByLocalID: [String: [Int]] = [:]
         var indexBySource: [PhotoBackupSource: Int] = [:]
         for (index, job) in jobs.enumerated() {

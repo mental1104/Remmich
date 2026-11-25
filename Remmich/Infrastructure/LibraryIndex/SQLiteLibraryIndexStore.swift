@@ -60,6 +60,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             if let previous = try photoBackupHeader(scope: scope, database: db) {
+                guard previous.version < 3 || journal.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
                 // 整体替换仅用于扫描/冷快照；先验证已有恢复资料，不能用新空快照覆盖损坏任务行。
                 let saved = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? ORDER BY position",
                                          [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupJob)
@@ -77,7 +78,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         try job.validate()
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
-            guard try photoBackupHeader(scope: scope, database: db) != nil,
+            guard let header = try photoBackupHeader(scope: scope, database: db),
+                  job.source.kind != .rawJPEG || header.version == 3,
                   let saved = try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND job_id=?",
                                               [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
                   saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }

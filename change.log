@@ -1,3 +1,8 @@
+## 2026-11-25: Define complete RAW+JPEG backup recovery
+
+- Source: codex/feature-backup-raw-jpeg from59cd836; no upstream sync, baseline remains672f02e. Add public type/UTI-based order-independent RAW+JPEG descriptors, dedicated per-image UUID/SHA1/duplicate receipts, and journal3/rawJPEGVersion1 for pair-containing scans. Retain old v1/v2 reads and Live Photo fields/stages; new documents cannot downgrade to an old reader that ignores JPEG.
+- SQLite full/hot writes retain account/source/format boundaries with no table-schema change. Model/policy and real SQLite cold-recovery/anti-downgrade scenarios are added. This first model commit does not yet implement export/worker wiring; it is not complete support. Scoped SwiftFormat/diff checks pass on NAS; Swift/Xcode and PhotoKit/device execution remain unverified. No API/SDK/official-mobile/workflow/push/production/private-media change. Rollback preserves new recovery data and uses a compatible reader; do not overwrite it with an old empty queue.
+
 ## 2026-11-25: Continue local matching after a precisely identified inaccessible candidate
 
 - Source: independent codex/fix-local-match-inaccessible-candidates from51e5d1099a60f90f3111e1d69d975b33fdecb24a; upstream remains672f02e, no sync. Do not integrate the older conditional404 branch: current NAS access denial is400. No server/API/SDK/official-mobile/workflow/production or original-media change; no push/CI/dev merge.

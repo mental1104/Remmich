@@ -1,0 +1,11 @@
+# RAW+JPEG original backup
+
+Independent branch `codex/feature-backup-raw-jpeg` starts from `59cd836`. The first commit defines the resource and recovery contract; actual PhotoKit export/worker execution is a subsequent part of this same slice and is **not yet complete**. No CI, push, production/media mutation or API change is included.
+
+The accepted group is one original `.photo` and one `.alternatePhoto`, publicly classified by UTI as one RAW and one JPEG, with positive dimensions and names. Their array order and the association of RAW with `.photo` are irrelevant. Adjustments, unknown/extra resources and absent source modification versions cannot become complete groups. The source snapshot stores both canonical descriptors. Single-image, video and Live Photo behavior remains separate.
+
+`PhotoBackupJob` adds distinct `rawReceipt` and `jpegReceipt` (remote UUID, actual-byte canonical Base64 SHA1, duplicate status), without repurposing Live Photo's motion/primary fields. Each component must be independently re-exported/checked on every explicit attempt; retained receipts are recovery history, not permission to skip server validation. Both distinct assets must be verified before one logical task completes. The worker will use existing official checksum/precheck/upload/fresh contracts; no automatic Stack or device-ID scheme is introduced.
+
+The first scan containing a RAW+JPEG source atomically upgrades journal/header to version3 with `rawJPEGVersion=1` and an explicit exclusion list. Old v1/v2 remain readable. Existing unknown-version3 documents without the marker remain invalid. Version3 never silently downgrades on later scans; bulk/hot SQLite writes reject incompatible replacement. A pre-v3 reader rejects the header, rather than ignoring the second still and completing a partial backup. Existing account database schema is unchanged.
+
+Initial tests cover resource order/role permutations, invalid/adjusted combinations, actual SQLite scan/cold recovery/anti-downgrade and old/new header contracts. NAS SwiftFormat/diff checks are available, but Swift/Xcode execution is **unverified**. Actual original bytes, PhotoKit/iCloud and real devices remain unverified. Preserve version3 recovery files when rolling back; an old client must not overwrite them or treat refusal as an empty queue.
