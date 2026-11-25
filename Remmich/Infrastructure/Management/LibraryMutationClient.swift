@@ -1,6 +1,11 @@
 import CryptoKit
 import Foundation
 
+/// 仅候选详情GET的精确服务端拒绝可产生此错误；不代表所有400或其他读取/写入失败都是未匹配。
+nonisolated enum LocalMediaCandidateError: Error, Sendable {
+    case inaccessible
+}
+
 /// 显式管理通道的安全错误；目录名称校验和HTTP/账号状态保留独立语义，不自动重试写请求。
 nonisolated enum LibraryWriteError: LocalizedError {
     case invalidID, unavailable, changedAccount, busy, malformedResponse, trashedDuplicate, invalidPresetName, invalidDirectoryName
@@ -35,6 +40,7 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     let projectionType: String?
     let updatedAt: String?
     let checksum: String?
+    let isOffline: Bool?
 
     /// 原始EXIF尺寸和方向，缺字段保持nil；旋转后的编辑坐标由领域层按服务端规则计算。
     struct Exif: Decodable, Sendable {
@@ -53,10 +59,11 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
     }
 
     /// id/ownerId为资源与拥有者身份，收藏/可见性/回收站值来自服务器；type/filename/livePhoto关联保持原值。
-    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum缺省nil以兼容旧构造，存在时仍由Decodable真实解码。
+    /// exifInfo为可选原始信息；projectionType/updatedAt/checksum/isOffline缺省nil兼容旧构造，存在时仍真实解码。
+    /// isOffline缺失保持未知，新的双原图完整确认不能把nil推断为在线。
     init(id: String, ownerId: String, isFavorite: Bool, visibility: String, isTrashed: Bool, type: String,
          originalFileName: String, livePhotoVideoId: String?, exifInfo: Exif?,
-         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil)
+         projectionType: String? = nil, updatedAt: String? = nil, checksum: String? = nil, isOffline: Bool? = nil)
     {
         self.id = id
         self.ownerId = ownerId
@@ -70,13 +77,51 @@ nonisolated struct ManagedAsset: Decodable, Sendable {
         self.projectionType = projectionType
         self.updatedAt = updatedAt
         self.checksum = checksum
+        self.isOffline = isOffline
     }
 }
 
+/// 相簿管理使用的最小身份投影；当前官方响应从albumUsers首个owner取得兼容ownerId，不推断其他成员的写权限。
 nonisolated struct ManagedAlbum: Decodable, Identifiable, Sendable {
     let id: String
     let albumName: String
     let ownerId: String
+
+    /// id/albumName/ownerId为已有调用方的显式快照构造；不增加网络请求或改变原管理权限判断。
+    init(id: String, albumName: String, ownerId: String) {
+        self.id = id; self.albumName = albumName; self.ownerId = ownerId
+    }
+
+    /// 保留原ownerId响应读取；该字段缺失/null时才按当前官方有序albumUsers核对首个owner。
+    /// decoder仅提供本次HTTP响应，不从登录用户、任意成员或界面缓存猜测所有者；不完整的新投影直接失败。
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        albumName = try values.decode(String.self, forKey: .albumName)
+        // 已有ownerId合同原样保留，包括旧响应中不同形状的albumUsers附加信息。
+        if let legacyOwner = try values.decodeIfPresent(String.self, forKey: .ownerId) {
+            ownerId = legacyOwner
+            return
+        }
+        let members = try values.decode([OwnerMember].self, forKey: .albumUsers)
+        guard let first = members.first, first.role == "owner", !first.user.id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .albumUsers, in: values,
+                                                   debugDescription: "Album users must begin with the owner.")
+        }
+        ownerId = first.user.id
+    }
+
+    /// 只读取实际管理投影字段；未知响应字段保持原Decodable兼容行为。
+    private enum CodingKeys: String, CodingKey { case id, albumName, ownerId, albumUsers }
+
+    /// 当前AlbumUserResponse的公开嵌套形状；保留原顺序，只用首项确认兼容所有者身份。
+    private nonisolated struct OwnerMember: Decodable, Sendable {
+        let user: OwnerUser
+        let role: String
+    }
+
+    /// 只需要当前公开用户的ID，不要求姓名、邮箱、头像等与所有权无关的字段。
+    private nonisolated struct OwnerUser: Decodable, Sendable { let id: String }
 }
 
 nonisolated struct AssetEditList: Codable, Sendable {
@@ -127,11 +172,22 @@ final nonisolated class LibraryMutationClient: Sendable {
     }
 
     /// id为元数据或本机checksum找到的候选；真实GET200状态用于校验账号、版本、offline/trash和服务端编辑。
-    /// 只读取资产信息，不下载照片/视频，不将候选直接视为已匹配或已备份。
+    /// 只读取资产信息；仅HTTP400且精确JSON拒绝正文抛LocalMediaCandidateError，其余错误保留原语义。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
         let expected = try validID(id)
-        let data = try await send("GET", ["assets", expected], expectedStatus: 200)
-        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: data)
+        let (data, response) = try await session.data(for: request("GET", ["assets", expected]))
+        try Task.checkCancellation()
+        // 当前服务的权限前不存在/不可读和权限后消失均为400；只在此候选GET识别拥有者合同，不放宽通用send。
+        if let response = response as? HTTPURLResponse, response.statusCode == 400,
+           response.mimeType?.lowercased() == "application/json",
+           let body = try? JSONDecoder().decode([String: String].self, from: data), body.count == 1,
+           let message = body["message"], ["Not found or no asset.read access", "Asset not found"].contains(message)
+        {
+            throw LocalMediaCandidateError.inaccessible
+        }
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw LibraryWriteError.malformedResponse }
+        let asset = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: bytes)
         guard asset.id == UUID(uuidString: expected) else { throw LibraryWriteError.malformedResponse }
         return asset
     }

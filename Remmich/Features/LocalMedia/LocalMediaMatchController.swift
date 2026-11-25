@@ -5,7 +5,7 @@ import Observation
 nonisolated protocol LocalMediaMatchingReading: Sendable {
     /// cloudIDs完整不截断；只接收完整只读metadata流，不能ACK/reset或发布半截候选。
     func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord]
-    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝。
+    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝；明确不可读抛LocalMediaCandidateError。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset
     /// queries最多64项，只查SHA1；noMatch绝不触发上传。
     func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup]
@@ -279,11 +279,12 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         if case let .resolved(cloudID) = snapshot.cloudIdentity,
                            case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: candidates[cloudID] ?? [])
                         {
-                            let fresh = try await remote.localMediaAsset(candidate.assetID.uuidString)
-                            try validateContext()
-                            if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata) {
+                            if let fresh = try await freshCandidate(candidate.assetID, using: remote, validateContext: validateContext),
+                               let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata)
+                            {
                                 accept(value); confirmedRemoteIDs.insert(value.remoteID); confirmed = true
                             } else {
+                                // 明确不可读只撤销此候选；独立本机字节仍可能找到另一个当前可读副本。
                                 removeAssociation(candidate.assetID)
                             }
                         }
@@ -308,9 +309,8 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         for item in hashes {
                             guard let lookup = byID[item.query.id] else { throw LocalMediaMetadataError.invalidMetadata }
                             if case let .existing(id) = lookup.outcome {
-                                let fresh = try await remote.localMediaAsset(id.uuidString)
-                                try validateContext()
-                                if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
+                                if let fresh = try await freshCandidate(id, using: remote, validateContext: validateContext),
+                                   let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
                                                                               source: .checksum, expectedChecksum: item.proof.digest.sha1Base64)
                                 {
                                     accept(value); confirmedRemoteIDs.insert(value.remoteID)
@@ -347,6 +347,25 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         }
         task = operation
         return operation
+    }
+
+    /// id来自本轮metadata/precheck；remote只读候选，validateContext在解释成功或错误前重验Task/账号/权限。
+    /// 仅窄typed不可读返回nil，由调用方撤销该ID并继续；其他HTTP、解码和网络错误原样抛出。
+    private func freshCandidate(_ id: UUID, using remote: any LocalMediaMatchingReading,
+                                validateContext: @MainActor () throws -> Void) async throws -> LocalMediaRemoteAsset?
+    {
+        try validateContext()
+        let fresh: LocalMediaRemoteAsset
+        do { fresh = try await remote.localMediaAsset(id.uuidString) }
+        catch {
+            try validateContext()
+            if case LocalMediaCandidateError.inaccessible = error {
+                return nil
+            }
+            throw error
+        }
+        try validateContext()
+        return fresh
     }
 
     /// run/manager/scope均绑定本次明确操作；expectedAccess开启后禁止在授权范围改变时继续发布旧清单。

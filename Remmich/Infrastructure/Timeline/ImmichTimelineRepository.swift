@@ -1,6 +1,9 @@
 import Foundation
 import ImmichAPI
 import OSLog
+#if DEBUG
+    import OpenAPIURLSession
+#endif
 
 /// 真实Immich读取适配器；持有当前账号/端点代际，拒绝把旧上下文响应发布给Feature。
 actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReading, AlbumReading {
@@ -57,6 +60,16 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         self.session = session
         return updateRoute(activeEndpoint)
     }
+
+    #if DEBUG
+        /// 仅隔离UI宿主使用；session为合成账号、networkSession必须全拦截请求，装配过程不发网络请求。
+        /// 原repo身份/代际与SDK鉴权、编码、只读策略保持生效，发布构建不包含此方法。
+        func configureSearchUITest(session: AccountSession, networkSession: URLSession) {
+            configure(session: session, activeEndpoint: session.apiURL)
+            client = ImmichClient(apiURL: session.apiURL, credential: .bearer(session.accessToken),
+                                  transport: URLSessionTransport(configuration: .init(session: networkSession)))
+        }
+    #endif
 
     @discardableResult
     func updateRoute(_ endpoint: URL?) -> Bool {
