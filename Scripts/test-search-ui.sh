@@ -4,7 +4,7 @@
 # 第三个参数存在时只执行唯一联合scheme xctestrun，缺失/歧义直接失败，绝不偷偷重新构建。
 # 依赖：Xcode、jq；第三参数省略时保留本地构建测试入口。启动等待默认180秒，可用REMMICH_UI_BOOT_TIMEOUT_SECONDS限定1–600秒。
 # CI复用select-ci-simulator写入的IPHONE_SIMULATOR_ID；tablet只关闭这个本链iPhone，普通Mac不关闭其他设备。
-# 仅CI tablet首次bootstatus等待超时会重启本次选定iPad一次；不重试实际UI测试，也不抹除或重启其他设备。
+# 仅CI phone/tablet首次bootstatus等待超时会重启本次选定设备一次；不重试实际UI测试，不触碰其他设备。
 # 输出：设备/runtime信息、准备及xcodebuild日志和含截图的xcresult；失败保留产物并返回非零。
 set -euo pipefail
 
@@ -170,10 +170,11 @@ esac
 REMMICH_UI_BOOTSTATUS_RESULT=0
 remmich_ui_prepare xcrun simctl bootstatus "$REMMICH_UI_UDID" -b || REMMICH_UI_BOOTSTATUS_RESULT=$?
 if [ "$REMMICH_UI_BOOTSTATUS_RESULT" -ne 0 ]; then
-    if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$REMMICH_UI_DEVICE" = tablet ] && [ "$REMMICH_UI_PREPARE_TIMED_OUT" = true ]; then
-        # 首次原生输出和124已保留在追加日志；只恢复本轮明确选中的iPad，第二次不再进入此分支。
-        printf 'CI tablet bootstatus timed out with exit code %s; restarting selected simulator %s once.\n' \
-            "$REMMICH_UI_BOOTSTATUS_RESULT" "$REMMICH_UI_UDID" | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log" >&2
+    if [ "${GITHUB_ACTIONS:-}" = true ] && [[ "$REMMICH_UI_DEVICE" = phone || "$REMMICH_UI_DEVICE" = tablet ]] && [ "$REMMICH_UI_PREPARE_TIMED_OUT" = true ]; then
+        # 首次原生输出和124保留；仅命名CI目标的脚本超时可恢复同UDID，显式UDID/原生失败不重试。
+        # 第二次bootstatus位于此单次分支内，失败照原退出码结束，不能重新进入或重跑UI测试。
+        printf 'CI %s bootstatus timed out with exit code %s; restarting selected simulator %s once.\n' \
+            "$REMMICH_UI_DEVICE" "$REMMICH_UI_BOOTSTATUS_RESULT" "$REMMICH_UI_UDID" | tee -a "$REMMICH_UI_OUTPUT/xcodebuild.log" >&2
         remmich_ui_prepare xcrun simctl shutdown "$REMMICH_UI_UDID"
         remmich_ui_prepare xcrun simctl boot "$REMMICH_UI_UDID"
         remmich_ui_prepare xcrun simctl bootstatus "$REMMICH_UI_UDID" -b

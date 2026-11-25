@@ -64,6 +64,28 @@ jobs:
       - name: Select available iPhone simulator
         run: bash Scripts/select-ci-simulator.sh
 
+      - name: Verify shared app and UI schemes
+        run: |
+          scheme_json="$RUNNER_TEMP/remmich-project-schemes.json"
+          scheme_log="$RUNNER_TEMP/remmich-project-schemes.log"
+          # quiet的JSON stdout单独保存；包解析进度和诊断保留在stderr，避免污染jq输入或隐藏Xcode失败。
+          if ! xcodebuild -list -project Remmich.xcodeproj -json -quiet \
+            > "$scheme_json" 2> "$scheme_log"; then
+            cat "$scheme_log" "$scheme_json"
+            exit 1
+          fi
+          cat "$scheme_log"
+          # PR仍构建SearchUI，但必须由实际Xcode同时发现dev所需的App方案；缺项/坏JSON均保持失败。
+          if ! jq -e '.project.schemes as $schemes |
+            if ($schemes | type) == "array" and
+               ($schemes | index("Remmich")) != null and
+               ($schemes | index("RemmichSearchUI")) != null
+            then {required: ["Remmich", "RemmichSearchUI"], discovered: $schemes}
+            else error("Required shared schemes are missing") end' "$scheme_json"; then
+            cat "$scheme_json"
+            exit 1
+          fi
+
       - name: Build app and test bundles
         id: test-build
         env:
