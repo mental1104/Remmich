@@ -104,6 +104,13 @@ struct LibraryView: View {
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityIdentifier("library-native-stacks")
+                                LibraryHubLink {
+                                    LibrarySceneStacksView(source: collectionSource, media: media, assetDetails: assetDetails)
+                                } label: {
+                                    LibraryCollectionCard(title: "Scene groups", symbol: "rectangle.on.rectangle.angled", appearance: .glass) { EmptyView() }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("library-scene-stacks")
                                 if preferences?.memoriesEnabled == true, !opening.memories.isConfirmedEmpty {
                                     LibraryMemoriesCard(source: collectionSource, media: media, assetDetails: assetDetails,
                                                         context: collectionNavigation, catalog: opening.memories,

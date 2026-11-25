@@ -811,6 +811,38 @@ public actor ImmichClient {
         .init(id: response.id, primaryAssetID: response.primaryAssetId, assets: response.assets.map(timelineAsset))
     }
 
+    /// assetIDs为一个完整已加载桶的至多5000个唯一UUID；空值不作ready探针，调用前失败而不发送HTTP。
+    /// 返回服务端证据标志与原始组；严格成员范围由领域validator再次检查，错误不伪装成空分组。
+    public func sceneStackGroups(assetIDs: [String]) async throws -> ImmichSceneStackReply {
+        guard credential != nil else { throw ImmichAPIError.unauthorized }
+        guard (1 ... 5000).contains(assetIDs.count), assetIDs.allSatisfy({ UUID(uuidString: $0) != nil }),
+              Set(assetIDs.map { $0.lowercased() }).count == assetIDs.count else { throw ImmichAPIError.invalidResponse }
+        // 仅编码公开合同的ids字段，不附加账号、路径或服务端扫描配置。
+        struct Body: Encodable { let ids: [String] }
+        let data = try JSONEncoder().encode(Body(ids: assetIDs.map { $0.lowercased() }))
+        let operationID = "forkSceneStacksQuery"
+        let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/scene-stacks/query",
+                                  headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])
+        let network = forkSmartTransport
+        do {
+            try Task.checkCancellation()
+            let (response, body) = try await AuthenticationMiddleware(credential: credential).intercept(
+                request, body: HTTPBody(data, length: .known(Int64(data.count)), iterationBehavior: .multiple),
+                baseURL: apiURL, operationID: operationID
+            ) { request, body, baseURL in
+                try await network.send(request, body: body, baseURL: baseURL, operationID: operationID)
+            }
+            try Task.checkCancellation()
+            guard response.status.code == 201 else { throw Self.map(status: response.status.code) }
+            guard let body else { throw ImmichAPIError.invalidResponse }
+            let bytes = try await Data(collecting: body, upTo: 4 * 1024 * 1024)
+            let result = try JSONDecoder().decode(ImmichSceneStackReply.self, from: bytes)
+            try Task.checkCancellation()
+            guard result.available || result.groups.isEmpty else { throw ImmichAPIError.invalidResponse }
+            return result
+        } catch { throw Self.map(error) }
+    }
+
     public func sharedLinks(serverURL: URL) async throws -> [ImmichSharedLink] {
         guard credential != nil else { throw ImmichAPIError.unauthorized }
         do {

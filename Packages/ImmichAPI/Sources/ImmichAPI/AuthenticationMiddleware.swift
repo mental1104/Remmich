@@ -34,6 +34,13 @@ enum ReadOnlyOperationPolicy {
 
     /// request为待发送请求，operationID为固定操作身份；不匹配读取契约时抛策略错误。
     static func validate(request: HTTPRequest, operationID: String) throws {
+        // 场景证据是独立只读POST，不能仅凭operation名放行任何其他路由或写方法。
+        if operationID == "forkSceneStacksQuery" {
+            guard request.method == .post, request.path == "/fork/scene-stacks/query" else {
+                throw ImmichAPIError.readOnlyPolicyViolation(operationID: operationID)
+            }
+            return
+        }
         // 随机抽样是独立只读POST，不能仅以操作名放行其他路径或方法。
         if operationID == "searchRandom" {
             guard request.method == .post, request.path == "/search/random" else {

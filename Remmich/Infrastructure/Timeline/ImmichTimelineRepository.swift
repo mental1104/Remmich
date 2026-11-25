@@ -25,21 +25,25 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
     private var peopleMutations: PeopleMutationClient?
     private let stackConfigurationFactory: (@Sendable () -> URLSessionConfiguration)?
     private var stackMutations: StackMutationClient?
+    private let sceneStackLoader: ImmichQueuedReadTransport.Loader?
     private var collectionStore: SQLiteLibraryIndexStore?
     private var collectionReads: [TimelineQuery: LibraryOpeningBuckets] = [:]
     private var collectionRequests: [String: Task<any Sendable, Error>] = [:]
 
     /// transfers为原持久读取队列；readLoader仅替换HTTP字节来源，仍经过SDK只读策略、认证和本层代际检查。
     /// people/stackConfigurationFactory分别为人物/堆叠前台会话提供隔离测试配置；生产nil沿用禁缓存/重定向规则。
+    /// sceneStackLoader仅提供精确只读场景POST测试字节，nil保持既有生产鉴权/可取消前台transport。
     /// 不在生产构造点注入替身，也不改变搜索POST的受限前台传输。
     init(transfers: LibraryTransferQueue? = nil, readLoader: ImmichQueuedReadTransport.Loader? = nil,
          peopleConfigurationFactory: (@Sendable () -> URLSessionConfiguration)? = nil,
-         stackConfigurationFactory: (@Sendable () -> URLSessionConfiguration)? = nil)
+         stackConfigurationFactory: (@Sendable () -> URLSessionConfiguration)? = nil,
+         sceneStackLoader: ImmichQueuedReadTransport.Loader? = nil)
     {
         self.transfers = transfers
         self.readLoader = readLoader
         self.peopleConfigurationFactory = peopleConfigurationFactory
         self.stackConfigurationFactory = stackConfigurationFactory
+        self.sceneStackLoader = sceneStackLoader
     }
 
     @discardableResult
@@ -921,6 +925,108 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         } catch {
             try requireCurrent(owner)
             throw Self.map(error)
+        }
+    }
+
+    /// 仅保留原仓库与当前代际，不复制token；外部页获得的facade在换号/换端点后不能再次读旧上下文。
+    func sceneStackReader() async throws -> any SceneStackReading {
+        let (_, owner) = try requestContext()
+        try requireStackOwner(owner)
+        return SceneStackReader(repository: self, owner: owner)
+    }
+
+    /// 官方标准月桶含照片/视频；不改固定schema增加Fork assetType，界面不得把桶count标作照片总数。
+    private func sceneStackMonths(owner: UInt64) async throws -> [TimelineBucketSummary] {
+        let client = try managementClient(owner: owner)
+        guard let userID = session?.userID else { throw TimelineReadError.routeUnavailable }
+        do {
+            let values = try await client.timelineBuckets(query: .init(includesStacks: true, includesPartners: false, userID: userID))
+            try requireStackOwner(owner)
+            guard Set(values.map(\.id)).count == values.count else { throw TimelineReadError.invalidResponse }
+            return values.map { .init(id: .init(rawValue: $0.id), assetCount: $0.assetCount) }
+        } catch { try requireCurrent(owner); throw Self.map(error) }
+    }
+
+    /// bucket是已选真实月份，完整解码标准桶再过滤IMAGE；withStacked保留原生封面/单张语义，不另取原生隐藏成员。
+    /// owner/visibility/trash校验后保留原官方stack信息，不把场景组当作官方stack。
+    private func sceneStackAssets(in bucket: TimelineBucketID, owner: UInt64) async throws -> [TimelineAssetSummary] {
+        let client = try managementClient(owner: owner)
+        guard let userID = session?.userID else { throw TimelineReadError.routeUnavailable }
+        do {
+            let values = try await client.timelineAssets(in: bucket.rawValue, query: .init(includesStacks: true, includesPartners: false, userID: userID))
+            try requireStackOwner(owner)
+            guard values.allSatisfy({ $0.ownerID == userID && !$0.isTrashed && $0.visibility == .timeline && UUID(uuidString: $0.id) != nil }),
+                  Set(values.map { $0.id.lowercased() }).count == values.count else { throw TimelineReadError.invalidResponse }
+            return values.filter { $0.mediaKind == .image }.map(Self.map)
+        } catch { try requireCurrent(owner); throw Self.map(error) }
+    }
+
+    /// assets为当前月完整本人照片快照；5000分块只查询完整组，跨块组保持展开，不拼接半组。
+    /// 任一块不可用/不支持则返回该状态；HTTP/坏响应失败抛出，调用者丢弃本轮全部分组并保留原照片。
+    private func sceneStackGroups(for assets: [TimelineAssetSummary], owner: UInt64) async throws -> SceneStackAvailability {
+        try requireStackOwner(owner)
+        guard let session, let activeEndpoint else { throw TimelineReadError.routeUnavailable }
+        guard !assets.isEmpty else { return .notRequested }
+        guard assets.allSatisfy({ $0.ownerID == session.userID && $0.mediaKind == .image && $0.visibility == .timeline && UUID(uuidString: $0.id) != nil }),
+              Set(assets.map { $0.id.lowercased() }).count == assets.count else { throw SceneStackError.invalidGroups }
+        let client: ImmichClient = if let sceneStackLoader {
+            ImmichClient(apiURL: activeEndpoint, credential: .bearer(session.accessToken),
+                         transport: ImmichQueuedReadTransport(sceneStackLoader: sceneStackLoader, loader: { _, _ in throw ImmichAPIError.invalidResponse }))
+        } else {
+            try managementClient(owner: owner)
+        }
+        var allGroups: [SceneStackGroup] = []
+        let ids = assets.map(\.id)
+        do {
+            for offset in stride(from: 0, to: ids.count, by: 5000) {
+                try requireStackOwner(owner)
+                let chunk = Array(ids[offset ..< min(offset + 5000, ids.count)])
+                let reply = try await client.sceneStackGroups(assetIDs: chunk)
+                try requireStackOwner(owner)
+                guard reply.available else { return .unavailable }
+                let groups = reply.groups.map { SceneStackGroup(id: $0.id, coverID: $0.coverId, memberIDs: $0.members) }
+                allGroups += try SceneStackValidator.validate(groups, assetIDs: chunk)
+            }
+            return try .available(SceneStackValidator.validate(allGroups, assetIDs: ids))
+        } catch {
+            try requireStackOwner(owner)
+            if let api = error as? ImmichAPIError, api == .notFound || api == .httpStatus(405) || api == .serverError(501) {
+                return .unsupported
+            }
+            throw Self.map(error)
+        }
+    }
+
+    /// 主时间线可含伙伴和视频；只将本人可见照片交既有scene通道，其他原行不受分组投影影响。
+    private func sceneStackGroupsForTimeline(_ assets: [TimelineAssetSummary], owner: UInt64) async throws -> SceneStackAvailability {
+        try requireStackOwner(owner)
+        guard let session else { throw TimelineReadError.routeUnavailable }
+        let owned = assets.filter { $0.ownerID == session.userID && $0.mediaKind == .image && $0.visibility == .timeline }
+        return try await sceneStackGroups(for: owned, owner: owner)
+    }
+
+    /// 场景读取器仅持有原actor与代际；每次调用回到原actor执行前后校验，永不创建独立旧会话clone。
+    private nonisolated struct SceneStackReader: SceneStackReading {
+        let repository: ImmichTimelineRepository
+        let owner: UInt64
+        /// 返回真实标准月份数组，不制造分页或媒体过滤后的伪计数。
+        func months() async throws -> [TimelineBucketSummary] {
+            try await repository.sceneStackMonths(owner: owner)
+        }
+
+        /// bucketID为真实月份；返回完整IMAGE快照供本页投影和冻结viewer使用。
+        func assets(in bucketID: TimelineBucketID) async throws -> [TimelineAssetSummary] {
+            try await repository.sceneStackAssets(in: bucketID, owner: owner)
+        }
+
+        /// assets不改变原片；仅查询服务端已发布场景证据，没有写操作。
+        func groups(for assets: [TimelineAssetSummary]) async throws -> SceneStackAvailability {
+            try await repository.sceneStackGroups(for: assets, owner: owner)
+        }
+
+        /// 混合主时间线仍由原repo筛本人，保留账号代际与未查询空集合语义。
+        func groupsForTimeline(_ assets: [TimelineAssetSummary]) async throws -> SceneStackAvailability {
+            try await repository.sceneStackGroupsForTimeline(assets, owner: owner)
         }
     }
 

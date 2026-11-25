@@ -143,6 +143,9 @@ final class PhotosTimelineStore {
     }
 
     private let reader: any TimelineReading
+    /// 仅主Photos注入原repo的可选只读scene边界，索引与Viewer继续使用原reader。
+    let sceneSource: (any SceneStackProviding)?
+    private var completeSceneBuckets = Set<TimelineBucketID>()
     private let openingSource: TimelineOpeningSource?
     private let persistentRefreshPolicy: PersistentTimelineRefreshPolicy
     private let hasUnfilteredBucketCounts: Bool
@@ -173,6 +176,7 @@ final class PhotosTimelineStore {
 
     init(
         reader: any TimelineReading,
+        sceneSource: (any SceneStackProviding)? = nil,
         persistentRefreshPolicy: PersistentTimelineRefreshPolicy = .reader,
         query: TimelineQuery = .init(),
         openingSource: TimelineOpeningSource? = nil,
@@ -181,6 +185,7 @@ final class PhotosTimelineStore {
         now: @escaping () -> Date = { .now }
     ) {
         self.reader = reader
+        self.sceneSource = sceneSource
         self.persistentRefreshPolicy = persistentRefreshPolicy
         self.query = query
         self.openingSource = openingSource
@@ -219,6 +224,7 @@ final class PhotosTimelineStore {
         bucketSummaries = snapshot.summaries
         rawAssetsByID = snapshot.assetsByBucket
         semanticAssetsByBucket = snapshot.assetsByBucket
+        completeSceneBuckets = !openingWindow && snapshot.isComplete ? Set(snapshot.assetsByBucket.keys) : []
         semanticContentRevision &+= 1
         sectionsByID = Dictionary(uniqueKeysWithValues: snapshot.summaries.map { summary in
             let assets = snapshot.assetsByBucket[summary.id, default: []]
@@ -854,6 +860,7 @@ final class PhotosTimelineStore {
         rangeVisibleBucketID = nil
         bucketRequestRevisions = [:]
         rawAssetsByID = [:]
+        completeSceneBuckets = []
         semanticAssetsByBucket = [:]
         semanticContentRevision &+= 1
         semanticHistoryState = .idle
@@ -980,6 +987,7 @@ final class PhotosTimelineStore {
         for (id, assets) in openingBuckets {
             rawAssetsByID[id] = assets
             semanticAssetsByBucket[id] = assets
+            completeSceneBuckets.insert(id)
             sectionsByID[id]?.loadState = .loaded
         }
         reconcileCrossBucketDuplicates()
@@ -1008,6 +1016,7 @@ final class PhotosTimelineStore {
             let deduplicationFinishedAt = Date()
             rawAssetsByID[bucketID] = assets
             semanticAssetsByBucket[bucketID] = assets
+            completeSceneBuckets.insert(bucketID)
             semanticContentRevision &+= 1
             sectionsByID[bucketID]?.loadState = .loaded
             reconcileCrossBucketDuplicates(forceRevisionFor: bucketID)
@@ -1102,6 +1111,7 @@ final class PhotosTimelineStore {
         rangeCardCoverTasks = [:]
         let unique = Self.deduplicateSummaries(summaries)
         let validIDs = Set(unique.map(\.id))
+        completeSceneBuckets.formIntersection(validIDs)
         let retainedSemantic = semanticAssetsByBucket.filter { validIDs.contains($0.key) }
         if retainedSemantic.count != semanticAssetsByBucket.count {
             semanticAssetsByBucket = retainedSemantic
@@ -1268,6 +1278,20 @@ final class PhotosTimelineStore {
             },
             uniquingKeysWith: { first, _ in first }
         )
+    }
+
+    /// visibleAssetIDs来自真实可见单元；复用已有页索引定位月份，不为滚动扫描全库或构造半桶。
+    /// opening/不完整bootstrap一律不参与；真实完整bucket GET或完整接受快照才授予折叠资格。
+    func sceneSnapshots(visibleAssetIDs: Set<String>) -> [PhotosSceneMonthSnapshot] {
+        guard !isOpeningWindow else { return [] }
+        let ids = Set(visibleAssetIDs.compactMap { id -> TimelineBucketID? in
+            guard let index = residencyPageIndexByAssetID[id], residencyPages.indices.contains(index) else { return nil }
+            return residencyPages[index].id.bucketID
+        })
+        return ids.sorted { $0.rawValue < $1.rawValue }.compactMap { id in
+            guard completeSceneBuckets.contains(id), let assets = semanticAssetsByBucket[id] else { return nil }
+            return .init(id: id, revision: sectionsByID[id]?.contentRevision ?? 0, assets: assets)
+        }
     }
 
     private func updateGroupedCatalogContributions(loadedBucketID: TimelineBucketID) {
