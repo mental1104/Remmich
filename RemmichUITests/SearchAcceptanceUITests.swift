@@ -147,11 +147,13 @@ final class SearchAcceptanceUITests: XCTestCase {
         field.typeText(query + "\n")
     }
 
-    /// 搜索激活会隐藏导航栏账号入口；识别本轮真实AX的Close和旧Cancel/close，不释放late响应gate。
+    /// 搜索激活会隐藏导航栏账号入口；先点平板固定退出入口，再兼容原生Close和旧Cancel/close，不释放late响应gate。
     /// app仍是合成宿主；调用后保留原account按钮点击与所有账号代际断言，缺入口照常失败。
     @MainActor private func dismissSearchIfAccountHidden(in app: XCUIApplication) {
         guard !app.buttons["account-button"].isHittable else { return }
-        if app.buttons["Cancel"].exists {
+        if app.buttons["search-dismiss"].exists {
+            app.buttons["search-dismiss"].tap()
+        } else if app.buttons["Cancel"].exists {
             app.buttons["Cancel"].tap()
         } else if app.buttons["Close"].exists {
             app.buttons["Close"].tap()

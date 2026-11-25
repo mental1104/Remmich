@@ -1,3 +1,9 @@
+## 2026-11-25: Integrate phone and tablet search dismissal repairs for the next candidate
+
+- Source: local-live-media with9087462 and cherry-pickededdb263/a5c2df3; upstream remains672f02e, no sync. Keep native/Media/SDK/backup behavior fixed. Phone acceptance recognizes the observed native Close; tablet has a real fixed SearchView exit control bound only to native search presentation. The helper prefers its unique search-dismiss identifier before legacy/native label fallbacks, retaining all five cases, assertions and timeouts.
+- Previous51e5 CI45437064970 attempt3 is terminal failure: compilation, API93/23suites and App982/126suites passed, including actual public PhotoKit reconstruction and real-object routing/final-pair rejection. Phone and tablet each passed4/5; both failed at account-button line81, but tablet AX had no native dismiss control. Actual tablet preparation completed without timeout/recovery. These receipts do not approve the new UI code.
+- Actual NAS workflow-scope SwiftFormat0.64.5 passes373 files, whitespace checks pass, and an independent baseline comparison retains exactly5 UI cases/32 assertions. Replacement compilation/App/UI remain pending. No skipped tests, fixture-direct switching, workflow/runner/API/production or parentgitlink changes. Rollback reverts these UI/text follow-ups and preserves media, associations and recovery data.
+
 ## 2026-11-25: Align local matching limits with verified native Live Photo selection
 
 - Source: codex/feature-local-live-media from51e5d10; upstream remains672f02e, no sync. The settings limit text still described the previous still-only candidate. Explain that native motion requires a confirmed pair/current version and otherwise uses Immich, matching the integrated Viewer/helper behavior.
