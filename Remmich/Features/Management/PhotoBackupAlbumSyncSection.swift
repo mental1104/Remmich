@@ -26,7 +26,7 @@ struct PhotoBackupAlbumSyncSection: View {
     var body: some View {
         Section("相簿同步 · 手动增量补入") {
             Text(sync.status)
-            Text("将当前包含且未排除的本地相簿，明确选择已有自有目标，或单独确认新建空相簿。只补入已确认照片的缺失成员关系；不上传或下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
+            Text("将当前包含且未排除的本地相簿，明确选择自有或具有编辑权限的共享相簿，或单独确认新建空相簿。只补入已确认照片的缺失成员关系；不上传或下载原片，不改名、不删除相簿/照片，也不自动移除成员。")
                 .font(.footnote).foregroundStyle(.secondary)
             Text("普通照片、视频及Live Photo主体需先开启本机照片匹配。RAW+JPEG需先具备两份完整原图回执；待匹配项目本次跳过，不会转为上传。")
                 .font(.footnote).foregroundStyle(.secondary)

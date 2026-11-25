@@ -45,6 +45,7 @@ struct PhotoBackupJournalTests {
         #expect(confirmed.jobs.first?.stage == .completed)
         #expect(confirmed.jobs.first?.primaryAssetID == primary)
         #expect(confirmed.jobs.first?.primaryWasDuplicate == true)
+        #expect(confirmed.jobs.first?.primaryChecksum == nil)
         #expect(confirmed.jobs.first?.attempts == 2)
     }
 

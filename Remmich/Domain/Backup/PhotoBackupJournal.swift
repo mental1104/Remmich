@@ -61,6 +61,8 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     private(set) var attempts: Int
     private(set) var motionAssetID: UUID?
     private(set) var primaryAssetID: UUID?
+    /// 本次已实际导出并发送/查重的主体SHA1；旧任务缺字段保持nil，不能以旧UUID猜测原图证明。
+    private(set) var primaryChecksum: String?
     private(set) var primaryWasDuplicate: Bool
     private(set) var failure: PhotoBackupFailure?
     private(set) var rawReceipt: PhotoBackupImageReceipt?
@@ -79,12 +81,15 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     func validate() throws {
         if source.kind == .rawJPEG {
             guard let pair = source.rawJPEG, let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
-                  primaryAssetID == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
+                  primaryAssetID == nil, primaryChecksum == nil, motionAssetID == nil else { throw PhotoBackupStateError.invalidJournal }
             try pair.validate(); try rawReceipt?.validate(); try jpegReceipt?.validate()
             guard stage != .completed || (rawReceipt != nil && jpegReceipt != nil && rawReceipt?.assetID != jpegReceipt?.assetID && rawReceipt?.checksum != jpegReceipt?.checksum)
             else { throw PhotoBackupStateError.invalidJournal }
         } else {
             guard source.rawJPEG == nil, rawReceipt == nil, jpegReceipt == nil else { throw PhotoBackupStateError.invalidJournal }
+        }
+        if let primaryChecksum {
+            guard primaryAssetID != nil, let bytes = Data(base64Encoded: primaryChecksum), bytes.count == 20, bytes.base64EncodedString() == primaryChecksum else { throw PhotoBackupStateError.invalidJournal }
         }
         guard !source.localID.isEmpty, attempts >= 0,
               motionAssetID == nil || source.kind == .livePhoto,
@@ -113,10 +118,11 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         stage = .uploadingPrimary
     }
 
-    /// assetID/duplicate为已确认主体回执；尚不代表Live Photo配对已核对。
-    mutating func recordPrimary(_ assetID: UUID, duplicate: Bool) throws {
+    /// assetID/duplicate为主体回执，checksum可附本次实际字节SHA1；nil保留旧调用兼容，尚不代表Live配对已核对。
+    mutating func recordPrimary(_ assetID: UUID, duplicate: Bool, checksum: String? = nil) throws {
         guard source.kind != .rawJPEG, stage == .uploadingPrimary, source.kind != .livePhoto || motionAssetID != nil else { throw PhotoBackupStateError.invalidTransition }
         primaryAssetID = assetID
+        primaryChecksum = checksum
         primaryWasDuplicate = duplicate
         stage = .verifying
     }

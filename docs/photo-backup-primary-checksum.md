@@ -1,0 +1,11 @@
+# 普通上传主体摘要的持久证明接点
+
+2026-11-25，独立自动相簿分支基于921d350，先单独交此依赖，未改变组织候选或后台入口。此前普通job只保存primaryAssetID，新上传不能凭该旧UUID自动认定为当前本地原图。
+
+现有流式SHA1只计算一次，同时产生既有查重/上传hex和canonical Base64。created、duplicate两种UploadResult均由本次本机计算附加checksum，不信响应同名字段，不额外读取照片、iCloud或Immich媒体。Worker把它传给recordPrimary，沿现有逐项checkpoint保存primaryChecksum；不改上传完成、Live配对或RAW双回执语义。
+
+新字段可选，旧JSON缺字段读nil，旧调用默认nil。只有存在primaryAssetID且20字节canonical SHA1才是合法新字段，RAW任务禁止借用普通主体字段。未知旧UUID没有摘要仍不能作为原片组织证明；消费者必须继续fresh核owner/type/状态/摘要和当前源版本。没有改变上传Header、background同意、日志格式版本或账户schema。
+
+必要回归源码：现有实际client/URLSession契约对ABC原片的created/duplicate独立核对固定SHA1 Base64；现有真实Worker/SQLite配对场景补可选摘要透传；旧Journal场景仍读nil。均未执行Swift，不冒称真实HTTP或完整上传→自动相簿运行通过。
+
+NAS实际格式检查覆盖现workflow390文件加修改脚本共391文件，0需改、1skip；diff空白/受保护Controller/组织Domain/后台Header保持检查通过。离线契约实际尝试退出127，缺swiftc。源依赖开发完成，运行验收后置；无push/CI/dev/父库/生产操作。
