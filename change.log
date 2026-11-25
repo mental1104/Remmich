@@ -1,3 +1,10 @@
+## 2026-11-25: Prepare the next integrated backup validation candidate
+
+- Source: codex/feature-backup-validation-candidate retains normal merges of458b5c6, f7917e6, b835a74 and4233698; integrated sourceabcc51a. Upstream672f02e unchanged, no sync. Only two additive record files conflicted in the first merges; every original line from both parents is retained. The persistent-stop repair merges without conflicts.
+- Integrate saved include/exclude/recovery, RAW+JPEG completeness, account-scoped default-off foreground automation, explicit safe-tail continuation, cold-start persistent stop and current album ownership decoding. Backup/UI/Worker source matches423; ownership fixtures matchb835; search/runner/workflow/project/schemes/UI tests matchf791. The Settings entry retainsMedia.photoBackups.
+- Actual NAS workflow-scope SwiftFormat0.64.5 passes0/386 files with1 existing skip; diff/source-preservation checks pass. Unchanged scripts reuse their actual37 preparation scenarios plus one selector assertion. New Swift cases remain unexecuted:28 automatic/recovery,36 RAW/JPEG and16+24 ownership cases. Existing18 HTTP requests apply only to the recorded cached artifact, not this source or Swift.
+- No new CI/dev merge/parent promotion/server/API/schema/official-mobile/production change. Current PR9 and draftPR10 run serially first. Automatic network recovery, OS background scheduling and album synchronization remain open. See docs/backup-validation-candidate.md; rollback retains SQLite/partial receipts/originals and first disables automation.
+
 ## 2026-11-25: Persist explicit automatic stop before cold configuration is loaded
 
 - Source: codex/fix-backup-stop-before-load from458b5c6e94ccf6facbbd7d52efebac156010f457; upstream672f02e unchanged, no sync. Independent fix; no old-branch/parent/API/SDK/workflow/production change, push/CI/dev merge.
