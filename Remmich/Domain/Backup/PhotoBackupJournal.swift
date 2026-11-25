@@ -240,13 +240,14 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let rawJPEGVersion: Int?
         let foregroundAutomaticEnabled: Bool?
         let backgroundAutomaticEnabled: Bool?
+        let foregroundNetworkRecoveryEnabled: Bool?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
         /// rawJPEGVersion仅格式3允许且必须为1；其他格式不得偷偷携带双图资料。
         /// foregroundAutomaticEnabled缺省nil表示默认关闭；旧读取器忽略后只会失去自动启用，不会扩大上传范围。
-        /// backgroundAutomaticEnabled为独立系统后台同意，缺省nil同样关闭，不复用前台选择。
+        /// backgroundAutomaticEnabled为独立系统后台同意；foregroundNetworkRecoveryEnabled为独立前台连接失败重核同意，缺省nil均关闭。
         init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil,
-             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil)
+             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil, foregroundNetworkRecoveryEnabled: Bool? = nil)
         {
             self.version = version
             self.namespace = namespace
@@ -256,6 +257,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             self.rawJPEGVersion = rawJPEGVersion
             self.foregroundAutomaticEnabled = foregroundAutomaticEnabled
             self.backgroundAutomaticEnabled = backgroundAutomaticEnabled
+            self.foregroundNetworkRecoveryEnabled = foregroundNetworkRecoveryEnabled
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -266,6 +268,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             guard [1, 2, 3].contains(version), namespace == expected,
                   foregroundAutomaticEnabled != true || validIncludes,
                   backgroundAutomaticEnabled != true || validIncludes,
+                  foregroundNetworkRecoveryEnabled != true || validIncludes,
                   version == 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
                   exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
                   version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
@@ -282,6 +285,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     private(set) var foregroundAutomaticEnabled: Bool?
     /// 独立系统后台同意；旧日志缺省nil为关闭，不借前台自动开关推导同意。
     private(set) var backgroundAutomaticEnabled: Bool?
+    /// 独立前台网络恢复同意；旧日志缺省关闭，不借原自动开关扩大对失败项的操作范围。
+    private(set) var foregroundNetworkRecoveryEnabled: Bool?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -294,6 +299,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         rawJPEGVersion = nil
         foregroundAutomaticEnabled = nil
         backgroundAutomaticEnabled = nil
+        foregroundNetworkRecoveryEnabled = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -307,13 +313,14 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         rawJPEGVersion = header.rawJPEGVersion
         foregroundAutomaticEnabled = header.foregroundAutomaticEnabled
         backgroundAutomaticEnabled = header.backgroundAutomaticEnabled
+        foregroundNetworkRecoveryEnabled = header.foregroundNetworkRecoveryEnabled
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
         .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs,
               rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled,
-              backgroundAutomaticEnabled: backgroundAutomaticEnabled)
+              backgroundAutomaticEnabled: backgroundAutomaticEnabled, foregroundNetworkRecoveryEnabled: foregroundNetworkRecoveryEnabled)
     }
 
     /// enabled是用户对当前已保存选择的明确自动化同意；不修改相簿/iCloud草稿，也不恢复任何任务。
@@ -328,6 +335,39 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         try validate(namespace: namespace)
         guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
         backgroundAutomaticEnabled = enabled
+    }
+
+    /// enabled为用户独立同意；只改已有账号日志头，不开启前台/后台规则、不修改保存范围或恢复任务。
+    mutating func setForegroundNetworkRecoveryEnabled(_ enabled: Bool) throws {
+        try validate(namespace: namespace)
+        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        foregroundNetworkRecoveryEnabled = enabled
+    }
+
+    /// scan必须来自本轮完整保存范围/当前源；只在新验证网络事件和独立同意下由Controller调用一次。
+    /// 返回重排数；保留所有字节/配对回执供原Worker重新导出、查重和fresh核验，取消/其他未知/版本变化不恢复。
+    @discardableResult mutating func resumeNetworkFailures(_ scan: PhotoBackupAlbumScan) throws -> Int {
+        try validate(namespace: namespace)
+        guard foregroundAutomaticEnabled == true, foregroundNetworkRecoveryEnabled == true,
+              !jobs.contains(where: \.stage.isInFlight), Set(selectedAlbumIDs) == scan.selection.included,
+              Set(excludedAlbumIDs ?? []) == scan.selection.excluded else { throw PhotoBackupStateError.invalidTransition }
+        let eligible = Set(scan.sources)
+        let incomplete = jobs.filter { $0.stage != .completed }
+        let blocked = Set(incomplete.filter {
+            !($0.stage == .failed && $0.failure == .network)
+                && ($0.stage == .cancelled || $0.attempts > 0 || $0.failure != nil || $0.motionAssetID != nil
+                    || $0.primaryAssetID != nil || $0.rawReceipt != nil || $0.jpegReceipt != nil)
+        }.map(\.source.localID))
+        let histories = Dictionary(grouping: incomplete, by: { $0.source.localID })
+        var count = 0
+        for index in jobs.indices {
+            let job = jobs[index]
+            guard job.stage == .failed, job.failure == .network, eligible.contains(job.source),
+                  let modified = job.source.modifiedAt, modified.timeIntervalSince1970.isFinite,
+                  !blocked.contains(job.source.localID), histories[job.source.localID]?.count == 1 else { continue }
+            jobs[index].queueForVerification(); count += 1
+        }
+        return count
     }
 
     /// scan须精确使用已保存的包含/排除规则；自动计划仅新增安全源，不重排完成项或恢复失败/取消/未知尝试。

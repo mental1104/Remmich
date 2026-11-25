@@ -57,7 +57,16 @@ struct PhotoBackupView: View {
                         ))
                         .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil
                             || (!backup.foregroundAutomaticEnabled && (backup.requiresSelectionScan || backup.selected.isEmpty || controller.busy)))
-                        Text("默认关闭。开启后只使用最近扫描保存的相簿、排除与 iCloud 选项；允许 iCloud 的已保存设置可能下载原片。仅处理安全的新项和未尝试项；失败、已尝试暂停及取消项需手动处理。手动停止会关闭并保存自动规则。")
+                        Text("默认关闭。开启后只使用最近扫描保存的相簿、排除与 iCloud 选项；允许 iCloud 的已保存设置可能下载原片。默认仅处理安全的新项和未尝试项；连接失败重核须另行同意下方选项，其他失败、已尝试暂停及取消项仍需手动处理。手动停止会关闭并保存自动规则。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Toggle("网络恢复后核查连接失败项（本账户）", isOn: Binding(
+                            get: { backup.foregroundNetworkRecoveryEnabled },
+                            set: { value in Task { await backup.setForegroundNetworkRecoveryEnabled(value, using: controller) } }
+                        ))
+                        .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil
+                            || (!backup.foregroundNetworkRecoveryEnabled && (!backup.foregroundAutomaticEnabled || backup.running
+                                    || backup.requiresSelectionScan || controller.busy)))
+                        Text("独立同意，默认关闭。仅前台新网络经服务器验证后，使用保存的相簿、排除和 iCloud 选项重核同版本连接失败项。已发送未知结果先重新导出、查重并核对回执，不直接重发；权限、源变化、取消和其他失败仍需手动处理，再次失败等待下一网络事件。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Toggle("允许下载 iCloud 原片（可能使用移动数据）", isOn: $backup.allowCloud)
                             .disabled(loadingQueue)
