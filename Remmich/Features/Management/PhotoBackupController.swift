@@ -428,7 +428,7 @@ import Photos
                             progress: { _, result in
                                 self.completed = result.completed; self.duplicates = result.duplicates; self.failed = result.failed
                                 self.processed = result.completed + result.failed + result.skipped + result.review
-                                self.status = "已处理 \(self.processed) 项：新备份 \(result.completed)，跳过 \(result.skipped)，待核查 \(result.review)，失败 \(result.failed)。"
+                                self.status = "已处理 \(self.processed) 项：新备份 \(result.completed)，已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed)。"
                             }
                         )
                     }
@@ -437,7 +437,7 @@ import Photos
                 let current = try await store.loadPhotoBackups(scope: scope)
                 try Self.validate(manager, owner: owner, scope: scope)
                 apply(current, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
-                status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮已确认 \(result.completed) 项（重复 \(result.duplicates)），跳过 \(result.skipped)，待核查 \(result.review)，失败 \(result.failed) 项。"
+                status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮新备份 \(result.completed) 项（重复 \(result.duplicates)），已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed) 项。"
                 if mode.isBackground {
                     backgroundLastResult = !result.stopped && result.failed == 0 && result.review == 0
                 }
@@ -567,7 +567,6 @@ import Photos
         guard manager.generation == owner else { return }
         if let error = error as? PhotoBackupContinuityError {
             switch error {
-            case .importRequired: status = "请先导入官方 Immich 备份记录；本次没有下载或上传原片。"
             case .wrongAccount: status = "备份记录属于其他账户，未导入。"
             default: status = "接续核查未完成；记录与队列保留，本次没有开始上传。"
             }

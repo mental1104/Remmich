@@ -242,6 +242,10 @@ struct PhotoBackupServerMatchingTests {
         let id = addServerContinuityCandidate("known", photos: photos, client: client)
         photos.values["unknown"] = continuitySnapshot("unknown", created: 200, cloud: true)
         let sources = [continuitySource("known", modified: 200), continuitySource("unknown", modified: 200)]
+        // 真实Controller已先建立认证账号目录；只准备同样的账号，不导入或保存任何备份历史。
+        try await store.prepare(scope: scope)
+        let importedHistory = try await store.loadPhotoBackupHistory(scope: scope)
+        #expect(importedHistory == nil)
         var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
         try journal.enqueue(sources); try await store.savePhotoBackups(journal, scope: scope)
         let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(

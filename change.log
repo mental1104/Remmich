@@ -1,5 +1,7 @@
 ## 2026-11-26: Server iCloud identity matching without imports
 
+- 7f2c0f0的CI45762664081编译/契约/格式/API98项通过；原13备份套件和新增匹配依据HTTP套件通过，新无导入套件仅端到端用例因未准备账号目录抛CancellationError。补齐与Controller相同的账号prepare并断言没有导入历史，保留零导出/服务端标记/冷读已匹配断言；统一进度文案为已匹配并移除不再适用的强制导入错误。
+
 - 无SQLite时使用完整mobile-app流及Photos公开元组匹配，fresh资源核拥有者/版本/状态，重读本机观察后写独立remmich-icloud-match元数据（method=icloud-id、byteVerified=false）。移动端持久显示已匹配，不下载/导出原片、不增加上传完成回执；未知项明确跳过并保留未确认。
 - 复用官方PUT /assets/metadata，最多64项，严格核每项UUID/key/value；不改服务端或API，不覆盖mobile-app。新增实际客户端HTTP和真实Checker/Worker/SQLite的无导入、仅云端、媒体类型、缺项/歧义、权限/账号/源变化、写失败与批量场景。新增执行结果等待本提交CI，不能复用0a025ee收据。
 - 原0a025ee已确认编译/API98项/13备份套件通过；整套App及两设备搜索UI仍失败。SQLite缓存接续和导入后新源上传保留，无导入未命中的新增源仍不盲目上传；没有生产匹配标记写入或服务部署。

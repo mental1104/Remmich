@@ -2,7 +2,7 @@ import Foundation
 
 /// 接续导入与预核查的安全错误分类；不包含照片标识、私有路径或数据库原始错误。
 nonisolated enum PhotoBackupContinuityError: Error, Equatable, Sendable {
-    case importRequired, invalidDatabase, wrongAccount, invalidHistory, incompleteResponse
+    case invalidDatabase, wrongAccount, invalidHistory, incompleteResponse
 }
 
 /// 官方客户端曾观察到的本机版本；checksum只用来查询服务器，不能当作本轮原片或完整Live/RAW回执。
