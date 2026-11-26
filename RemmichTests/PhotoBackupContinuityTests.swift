@@ -6,6 +6,22 @@ import Testing
 /// 接续链路使用真实SQLite、生产Importer/Checker/Worker；只替换Photos观察与只读网络端口，禁止访问生产媒体。
 @Suite("Backup continuity before original export")
 struct PhotoBackupContinuityTests {
+    /// 读取已安装Mac候选写入的真实旧枚举形状；保留已有/待核查状态，未知未来格式仍拒绝，不清空队列。
+    @Test func retainsInstalledCandidateHistoryStates() throws {
+        let legacy = #"[{"id":"11111111-1111-4111-8111-111111111111","source":{"localID":"legacy-existing","kind":"photo"},"stage":"existing","attempts":0,"primaryWasDuplicate":false},{"id":"22222222-2222-4222-8222-222222222222","source":{"localID":"legacy-review","kind":"photo"},"stage":"failed","attempts":0,"primaryWasDuplicate":false,"failure":"historyNeedsReview"}]"#
+        let jobs = try JSONDecoder().decode([PhotoBackupJob].self, from: Data(legacy.utf8))
+        let journal = PhotoBackupJournal(header: .init(version: 1, namespace: "synthetic", selectedAlbumIDs: [], allowCloud: false), jobs: jobs)
+        try journal.validate(namespace: "synthetic")
+        #expect(jobs.map(\.stage) == [.existing, .failed] && jobs[1].failure == .historyNeedsReview)
+        var retained = jobs[0]
+        retained.pause()
+        #expect(retained.stage == .existing && retained.attempts == 0 && retained.primaryAssetID == nil)
+        let roundTrip = try JSONDecoder().decode(PhotoBackupJournal.self, from: JSONEncoder().encode(journal))
+        #expect(roundTrip.jobs.map(\.stage) == [.existing, .failed])
+        let future = legacy.replacingOccurrences(of: "existing\"", with: "future\"")
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode([PhotoBackupJob].self, from: Data(future.utf8)) }
+    }
+
     /// 实际SQLite只读导入保留缺失摘要，跨账号拒绝且源文件逐字节不变。
     @Test func importsReadOnlyAndRejectsAnotherAccount() async throws {
         let root = continuityRoot()

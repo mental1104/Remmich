@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Remmich
 
+/// 使用真实SQLite代际校验索引同步、账号退休和进度发布，合成源不访问生产图库。
 @Suite(.serialized)
 struct LibraryIndexSynchronizationTests {
     @Test @MainActor func invalidatedIndexRunCannotRestoreOldAccountThumbnailRegistrations() async throws {

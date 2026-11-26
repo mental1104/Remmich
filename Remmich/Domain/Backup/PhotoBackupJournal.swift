@@ -18,6 +18,8 @@ nonisolated struct PhotoBackupSource: Codable, Hashable, Sendable {
 nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
     case interrupted, sourceMissing, sourceChanged, unsupportedResources, permission, network
     case livePhotoMismatch, unconfirmedResponse, unavailable, storage, historyUnconfirmed
+    /// Mac候选已写入的旧枚举值；仅保留读取兼容，不把未知历史升级为新上传许可。
+    case historyNeedsReview
 
     /// 返回安全可展示的原因；中断/网络错误也必须经用户明确恢复后再查重。
     var message: String {
@@ -32,7 +34,7 @@ nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
         case .unconfirmedResponse: "The server did not confirm the complete backup. Reload before retrying."
         case .unavailable: "The account or endpoint is unavailable."
         case .storage: "The backup state could not be saved. No new upload will start."
-        case .historyUnconfirmed: "The previous backup could not be confirmed. No original was downloaded or uploaded."
+        case .historyUnconfirmed, .historyNeedsReview: "The previous backup could not be confirmed. No original was downloaded or uploaded."
         }
     }
 }
@@ -46,6 +48,8 @@ nonisolated enum PhotoBackupStateError: Error, Equatable, Sendable {
 nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     enum Stage: String, Codable, Sendable {
         case queued, exporting, uploadingMotion, uploadingPrimary, verifying, paused, failed, cancelled, completed
+        /// Mac候选的只读接续状态；不等于完整上传回执，恢复时保留，重新扫描后仍须完整核查。
+        case existing
 
         /// 进程退出后这些状态都不是成功；冷恢复必须暂停，等待重新验证。
         var isInFlight: Bool {
@@ -165,9 +169,9 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         stage = .completed; failure = nil
     }
 
-    /// 暂停未完成任务并保留所有已确认回执；完成/取消历史不因页面退出被改写。
+    /// 暂停未完成任务并保留所有已确认回执；完成/旧已有候选/取消历史不因页面退出被改写。
     mutating func pause() {
-        guard stage != .completed, stage != .cancelled, stage != .failed else { return }
+        guard stage != .completed, stage != .cancelled, stage != .failed, stage != .existing else { return }
         failure = stage.isInFlight ? .interrupted : nil
         stage = .paused
     }
