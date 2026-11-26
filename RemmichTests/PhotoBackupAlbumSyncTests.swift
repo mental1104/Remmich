@@ -90,7 +90,10 @@ struct PhotoBackupAlbumSyncTests {
             }
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
             #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
-            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase != .confirmed)
+            }
             #expect(fixture.photos.hashReads == 0)
         }
     }
@@ -100,7 +103,10 @@ struct PhotoBackupAlbumSyncTests {
         try await withAlbumSyncFixture(kind: .livePhoto) { fixture in
             try await fixture.mapAndPrepare()
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
             #expect(await fixture.server.putCount(albumSyncMotion) == 0)
             let savedBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
@@ -118,13 +124,19 @@ struct PhotoBackupAlbumSyncTests {
             let partial = try await fixture.coldState()
             #expect(partial.operations.first?.phase == .failed && partial.operations.first?.confirmedAssetIDs == [albumSyncPrimary])
             #expect(fixture.sync.confirmed == 0 && fixture.sync.previewCount == 1)
-            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.first?.stage == .completed)
+            do {
+                let persistedSnapshot = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+                #expect(persistedSnapshot.jobs.first?.stage == .completed)
+            }
             await fixture.server.setMode(.normal)
             let restored = fixture.makeController()
             await restored.load(using: fixture.manager, backup: fixture.backup)
             await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
             #expect(await fixture.server.putCount(albumSyncJPEG) == 2)
             #expect(restored.confirmed == 1 && fixture.photos.hashReads == 0)
@@ -136,7 +148,10 @@ struct PhotoBackupAlbumSyncTests {
         try await withAlbumSyncFixture(kind: .rawJPEG) { fixture in
             try await fixture.mapAndPrepare()
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             await fixture.server.removeMember(albumSyncJPEG, target: albumSyncTarget2)
             try await fixture.mapAndPrepare(saveMapping: false)
             await fixture.server.setMode(.heldJPEGRead)
@@ -149,14 +164,20 @@ struct PhotoBackupAlbumSyncTests {
             fixture.sync.cancel()
             await fixture.server.release()
             await old.value
-            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase != .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncJPEG) == 1)
             await fixture.server.setMode(.normal)
             let restored = fixture.makeController()
             await restored.load(using: fixture.manager, backup: fixture.backup)
             await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
             #expect(await fixture.server.putCount(albumSyncJPEG) == 2)
         }
@@ -177,7 +198,10 @@ struct PhotoBackupAlbumSyncTests {
             await restored.load(using: fixture.manager, backup: fixture.backup)
             await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == (mode == .missingAfterSuccess ? 2 : 1))
         }
     }
@@ -205,7 +229,10 @@ struct PhotoBackupAlbumSyncTests {
             fixture.sync.cancel()
             await fixture.server.release()
             await old.value
-            #expect(try await fixture.coldState().operations.first?.phase == .sending)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .sending)
+            }
             if account {
                 #expect(fixture.backup.selected.isEmpty && fixture.backup.jobs.isEmpty)
                 let savedOperations = try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).operations
@@ -219,7 +246,10 @@ struct PhotoBackupAlbumSyncTests {
             await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
         }
     }
 
@@ -235,15 +265,18 @@ struct PhotoBackupAlbumSyncTests {
             }
             #expect(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup) == nil)
             #expect(await fixture.server.putCount(albumSyncPrimary) == 0)
-            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).excludedAlbumIDs == ["exclude"])
+            do {
+                let persistedSnapshot = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+                #expect(persistedSnapshot.excludedAlbumIDs == ["exclude"])
+            }
         }
     }
 
     /// 没有上传任务的服务器双原图交集，必须经两份真实SHA1流和两次fresh解析；组织不增加上传任务。
     @Test(.timeLimit(.minutes(1))) @MainActor func existingRAWJPEGUsesBothLocalByteStreamsAndFreshRemoteIDs() async throws {
         try await withAlbumSyncFixture(kind: .rawJPEG, rawExisting: true) { fixture in
-            let savedBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
-            #expect(savedBackupJobs.isEmpty)
+            let initialBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
+            #expect(initialBackupJobs.isEmpty)
             try await fixture.mapAndPrepare()
             let preview = try await fixture.coldState()
             let operation = try #require(preview.operations.first)
@@ -262,8 +295,8 @@ struct PhotoBackupAlbumSyncTests {
             #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
             #expect(await fixture.server.member(albumSyncJPEG, target: albumSyncTarget2))
             #expect(await fixture.server.onlyMetadataAndMembershipRoutes(allowChecksum: true))
-            let savedBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
-            #expect(savedBackupJobs.isEmpty)
+            let finalBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
+            #expect(finalBackupJobs.isEmpty)
             #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
         }
     }
@@ -353,7 +386,10 @@ struct PhotoBackupAlbumSyncTests {
                 await fixture.server.setMismatch(mode)
             }
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .failed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .failed)
+            }
             let rawPuts = await fixture.server.putCount(albumSyncPrimary), jpegPuts = await fixture.server.putCount(albumSyncJPEG)
             #expect(rawPuts == 0 && jpegPuts == 0)
             let savedBackupJobs = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs
@@ -397,7 +433,10 @@ struct PhotoBackupAlbumSyncTests {
                 let preview = try await fixture.coldState()
                 #expect(preview.operations.first?.assets.first?.proof == .originalReceipt && preview.operations.first?.assets.first?.revision == nil)
                 await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+                }
                 #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
             }
             let job = try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.first
@@ -448,11 +487,17 @@ struct PhotoBackupAlbumSyncTests {
             #expect(try probe.rows("SELECT payload FROM photo_backup_album_sync_operations ORDER BY position") == before)
             #expect(try probe.rows("SELECT kind FROM pair_write_events").isEmpty)
             try await fixture.store.savePhotoBackupAlbumSyncPlan(stale, scope: fixture.scope)
-            #expect(try await fixture.coldState().automaticEnabled)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.automaticEnabled)
+            }
             try probe.execute("DELETE FROM pair_write_events")
             let second = try probe.rows("SELECT payload FROM photo_backup_album_sync_operations ORDER BY position")
             _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(false, scope: fixture.scope)
-            #expect(try await fixture.coldState().automaticEnabled == false)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.automaticEnabled == false)
+            }
             #expect(try probe.rows("SELECT payload FROM photo_backup_album_sync_operations ORDER BY position") == second)
             #expect(try probe.rows("SELECT kind FROM pair_write_events").isEmpty)
         }
@@ -499,10 +544,16 @@ struct PhotoBackupAlbumSyncTests {
             let old = try #require(initial.operations.first)
             let replacement = PhotoBackupAlbumSyncOperation(id: old.id, localAlbumID: old.localAlbumID, targetID: albumSyncTarget1, source: old.source, assets: old.assets)
             await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncOperation(replacement, scope: fixture.scope) }
-            #expect(try await fixture.coldState().operations.first?.targetID == albumSyncTarget2)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.targetID == albumSyncTarget2)
+            }
             let future = PhotoBackupAlbumSyncState(namespace: fixture.scope.cacheNamespace, version: PhotoBackupAlbumSyncState.currentVersion + 1)
             await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(future, scope: fixture.scope) }
-            #expect(try await fixture.coldState().operations.count == 1)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.count == 1)
+            }
         }
     }
 
@@ -547,7 +598,10 @@ struct PhotoBackupAlbumSyncTests {
             await restored.load(using: fixture.manager, backup: fixture.backup)
             await fixture.server.setMode(.normal)
             await fixture.run(restored.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().mappings.first?.targetID == receiptID)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.mappings.first?.targetID == receiptID)
+            }
             #expect(await fixture.server.creationCount() == 1)
         }
     }
@@ -561,7 +615,10 @@ struct PhotoBackupAlbumSyncTests {
             let id = try #require(preview.creations.first?.id)
             await fixture.server.setMode(mode)
             await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().creations.first?.phase == .unknown)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .unknown)
+            }
             await fixture.server.setMode(.normal)
             let restored = fixture.makeController()
             await restored.load(using: fixture.manager, backup: fixture.backup)
@@ -570,7 +627,10 @@ struct PhotoBackupAlbumSyncTests {
             await fixture.run(restored.createAndMap(id, using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.prepareCreation(localID: "include", name: "Again", using: fixture.manager, backup: fixture.backup))
             #expect(await fixture.server.creationCount() == 1)
-            #expect(try await fixture.coldState().creations.count == 1)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.count == 1)
+            }
             await fixture.run(restored.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
             let resolved = try await fixture.coldState()
             #expect(resolved.creations.first?.phase == .mapped && resolved.creations.first?.mappedTargetID == albumSyncTarget2)
@@ -603,7 +663,10 @@ struct PhotoBackupAlbumSyncTests {
             }
             fixture.sync.cancel()
             await fixture.server.release(); await old.value
-            #expect(try await fixture.coldState().creations.first?.phase == .sending)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .sending)
+            }
             if account {
                 let savedCreations = try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).creations
                 #expect(savedCreations.isEmpty)
@@ -628,7 +691,10 @@ struct PhotoBackupAlbumSyncTests {
             let id = try #require(preview.creations.first?.id)
             await fixture.server.setMode(.createRejected)
             await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().creations.first?.phase == .rejected)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .rejected)
+            }
             #expect(await fixture.server.createdIDs().isEmpty)
             await fixture.server.setMode(.normal)
             await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Allowed", using: fixture.manager, backup: fixture.backup))
@@ -637,7 +703,10 @@ struct PhotoBackupAlbumSyncTests {
             #expect(newID != id)
             #expect(await fixture.server.creationCount() == 1)
             await fixture.run(fixture.sync.createAndMap(newID, using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().creations.last?.phase == .mapped)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.last?.phase == .mapped)
+            }
             #expect(await fixture.server.creationCount() == 2)
         }
     }
@@ -645,7 +714,10 @@ struct PhotoBackupAlbumSyncTests {
     /// v1可读，首次预览升当前辅助格式；旧格式、丢历史或unknown回退prepared皆不能覆盖SQLite事实并触发重POST。
     @Test(.timeLimit(.minutes(1))) @MainActor func creationLedgerRejectsDowngradeLossAndSendRewind() async throws {
         try await withAlbumSyncFixture { fixture in
-            #expect(try await fixture.coldState().version == 1)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.version == 1)
+            }
             await fixture.run(fixture.sync.prepareCreation(localID: "include", name: "Intent", using: fixture.manager, backup: fixture.backup))
             var saved = try await fixture.coldState()
             #expect(saved.version == PhotoBackupAlbumSyncState.currentVersion)
@@ -659,7 +731,10 @@ struct PhotoBackupAlbumSyncTests {
             try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope)
             saved.creations[0].phase = .prepared
             await #expect(throws: PhotoBackupStateError.self) { try await fixture.store.savePhotoBackupAlbumSyncPlan(saved, scope: fixture.scope) }
-            #expect(try await fixture.coldState().creations.first?.phase == .unknown)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .unknown)
+            }
             #expect(await fixture.server.creationCount() == 0)
         }
     }
@@ -688,7 +763,10 @@ struct PhotoBackupAlbumSyncTests {
             #expect(fixture.sync.targets.contains { UUID(uuidString: $0.id) == albumSyncTarget2 })
             try await fixture.mapAndPrepare()
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
             #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
@@ -726,14 +804,20 @@ struct PhotoBackupAlbumSyncTests {
                 await fixture.server.setSharedRole("viewer")
             }
             await fixture.run(fixture.sync.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase != .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase != .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == (timing == "before" ? 0 : 1))
             await fixture.server.setMode(.normal); await fixture.server.setSharedRole("editor")
             let restored = fixture.makeController()
             await restored.load(using: fixture.manager, backup: fixture.backup)
             await fixture.run(restored.prepare(using: fixture.manager, backup: fixture.backup))
             await fixture.run(restored.synchronize(using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+            }
             #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
         }
     }
@@ -746,12 +830,18 @@ struct PhotoBackupAlbumSyncTests {
             let id = try #require(preview.creations.first?.id)
             await fixture.server.setMode(.createReadFailure)
             await fixture.run(fixture.sync.createAndMap(id, using: fixture.manager, backup: fixture.backup))
-            #expect(try await fixture.coldState().creations.first?.phase == .received)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .received)
+            }
             await fixture.server.setMode(.normal); await fixture.server.setSharedRole("createdEditor")
             await fixture.run(fixture.sync.recoverCreation(id, using: fixture.manager, backup: fixture.backup))
             let savedMappings = try await fixture.coldState().mappings
             #expect(savedMappings.isEmpty)
-            #expect(try await fixture.coldState().creations.first?.phase == .received)
+            do {
+                let persistedSnapshot = try await fixture.coldState()
+                #expect(persistedSnapshot.creations.first?.phase == .received)
+            }
             #expect(await fixture.server.creationCount() == 1)
         }
     }
@@ -770,8 +860,14 @@ struct PhotoBackupAlbumSyncTests {
                 }
                 await fixture.run(driver.contentsChanged())
                 #expect(driver.enabled && !driver.running)
-                #expect(try await fixture.coldState().automaticEnabled)
-                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.automaticEnabled)
+                }
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+                }
                 #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
                 #expect(driver.managementChanged(fixture.manager.revision) == nil)
                 await fixture.run(driver.contentsChanged())
@@ -817,9 +913,15 @@ struct PhotoBackupAlbumSyncTests {
                         try #require(await gate.waitUntilEntered())
                         await driver.setEnabled(false, using: fixture.manager)
                         #expect(!driver.enabled)
-                        #expect(try await fixture.coldState().automaticEnabled == false)
+                        do {
+                            let persistedSnapshot = try await fixture.coldState()
+                            #expect(persistedSnapshot.automaticEnabled == false)
+                        }
                         gate.release()
-                        #expect(try await held.value == false)
+                        do {
+                            let persistedSnapshot = try await held.value
+                            #expect(persistedSnapshot == false)
+                        }
                     } onCancel: { Task { @MainActor in gate.release() } }
                 } catch {
                     gate.release(); held.cancel(); _ = await held.result; throw error
@@ -850,8 +952,14 @@ struct PhotoBackupAlbumSyncTests {
                 }
                 let retired = driver.conditionsChanged(using: fixture.manager, scope: account ? otherScope : fixture.scope, active: false)
                 await fixture.server.release(); await work.value; await retired?.value
-                #expect(try await fixture.coldState().operations.first?.phase == .sending)
-                #expect(try await fixture.coldState().automaticEnabled)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .sending)
+                }
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.automaticEnabled)
+                }
                 if account {
                     let savedOperations = try await fixture.store.loadPhotoBackupAlbumSync(scope: otherScope).operations
                     #expect(savedOperations.isEmpty)
@@ -859,7 +967,10 @@ struct PhotoBackupAlbumSyncTests {
                 await fixture.restoreAccount(); await fixture.server.setMode(.normal)
                 await fixture.run(driver.conditionsChanged(using: fixture.manager, scope: fixture.scope, active: true))
                 #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
-                #expect(try await fixture.coldState().operations.first?.phase == .sending)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .sending)
+                }
             }
         }
     }
@@ -882,7 +993,10 @@ struct PhotoBackupAlbumSyncTests {
                 if !denied {
                     #expect(fixture.backup.excluded == ["draft"])
                 }
-                #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).excludedAlbumIDs == ["exclude"])
+                do {
+                    let persistedSnapshot = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+                    #expect(persistedSnapshot.excludedAlbumIDs == ["exclude"])
+                }
                 #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
             }
         }
@@ -900,7 +1014,10 @@ struct PhotoBackupAlbumSyncTests {
                 _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
                 let completed = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() })
                 #expect(completed && driver.contentsChanged() == nil)
-                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+                }
                 #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
                 #expect(fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
             }
@@ -925,7 +1042,10 @@ struct PhotoBackupAlbumSyncTests {
                         case .success: Issue.record("Expired album lease must not report successful completion.")
                         case .failure: break
                         }
-                        #expect(try await fixture.coldState().operations.first?.phase == .sending)
+                        do {
+                            let persistedSnapshot = try await fixture.coldState()
+                            #expect(persistedSnapshot.operations.first?.phase == .sending)
+                        }
                         #expect(await fixture.server.putCount(albumSyncPrimary) == 1)
                     } onCancel: { work.cancel(); Task { await fixture.server.abort() } }
                 } catch {
@@ -958,7 +1078,10 @@ struct PhotoBackupAlbumSyncTests {
                         await foreground.setEnabled(false, using: fixture.manager)
                         #expect(lease.current && !foreground.enabled)
                         await fixture.server.release()
-                        #expect(try await work.value == false)
+                        do {
+                            let persistedSnapshot = try await work.value
+                            #expect(persistedSnapshot == false)
+                        }
                         let cold = try await fixture.coldState()
                         #expect(cold.automaticEnabled == false && cold.operations.first?.phase == (afterPUT ? .sending : .queued))
                         #expect(cold.operations.first?.confirmedAssetIDs.isEmpty == true)
@@ -1033,7 +1156,10 @@ struct PhotoBackupAlbumSyncTests {
                 let lease = AlbumAutomationLease()
                 let organized = try await driver.performBackground(using: fixture.manager, scope: fixture.scope, validateLease: { try lease.check() })
                 #expect(organized)
-                #expect(try await fixture.coldState().operations.first?.phase == .confirmed)
+                do {
+                    let persistedSnapshot = try await fixture.coldState()
+                    #expect(persistedSnapshot.operations.first?.phase == .confirmed)
+                }
                 #expect(await fixture.server.member(albumSyncPrimary, target: albumSyncTarget2))
                 #expect(await fixture.server.bulkCheckCount() == 1)
                 #expect(exporter.calls == 1 && fixture.photos.hashReads == 0 && fixture.photos.authorizationRequests == 0)
@@ -1091,7 +1217,10 @@ struct PhotoBackupAlbumSyncTests {
             #expect(await fixture.server.bulkCheckCount() == 1)
             #expect(exporter.calls == 1 && exporter.cloudChoices == [true] && fixture.photos.authorizationRequests == 0)
             #expect(!FileManager.default.fileExists(atPath: exporter.directory.path))
-            #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.map(\.stage) == [.completed])
+            do {
+                let persistedSnapshot = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+                #expect(persistedSnapshot.jobs.map(\.stage) == [.completed])
+            }
         }
     }
 

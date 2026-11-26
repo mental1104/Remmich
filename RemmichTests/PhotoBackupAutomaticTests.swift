@@ -92,7 +92,10 @@ struct PhotoBackupAutomaticTests {
             await fixture.activate()?.value
             #expect(fixture.port.scans == 0 && fixture.port.permissionPrompts == 0)
             #expect(fixture.exporter.observations.isEmpty && fixture.server.counts == [0, 0])
-            #expect(try await fixture.coldJournal().foregroundAutomaticEnabled == denied)
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.foregroundAutomaticEnabled == denied)
+            }
         }
     }
 
@@ -124,7 +127,10 @@ struct PhotoBackupAutomaticTests {
             fixture.port.sources.append(.init(localID: "new-screenshot", modifiedAt: nil, kind: .photo))
             await fixture.request()?.value
             #expect(fixture.server.counts == [2, 2] && fixture.exporter.observations.count == 2)
-            #expect(try await fixture.coldJournal().jobs.allSatisfy { $0.stage == .completed })
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.jobs.allSatisfy { $0.stage == .completed })
+            }
             #expect(fixture.port.permissionPrompts == 0 && fixture.exporter.directories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
         }
     }
@@ -173,7 +179,10 @@ struct PhotoBackupAutomaticTests {
             fixture.exporter.release()
             await first?.value; await second?.value; await third?.value
             #expect(fixture.port.scans == 2 && fixture.exporter.observations.count == 1 && fixture.server.counts == [1, 1])
-            #expect(try await fixture.coldJournal().jobs.first?.stage == .completed)
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.jobs.first?.stage == .completed)
+            }
             #expect(!fixture.controller.running && !fixture.manager.busy)
         }
     }
@@ -308,7 +317,10 @@ struct PhotoBackupAutomaticTests {
             await fixture.controller.automaticConditionsChanged(using: fixture.manager, scope: fixture.scope, active: false)?.value
             await fixture.activate()?.value; await fixture.request()?.value
             #expect(fixture.exporter.observations.isEmpty && fixture.server.counts == [0, 0])
-            #expect(try await fixture.coldJournal().foregroundAutomaticEnabled == false)
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.foregroundAutomaticEnabled == false)
+            }
         }
     }
 
@@ -321,7 +333,10 @@ struct PhotoBackupAutomaticTests {
             let retirement = fixture.controller.automaticConditionsChanged(using: fixture.manager, scope: fixture.scope, active: false)
             fixture.exporter.release()
             await retirement?.value; await old?.value
-            #expect(try await fixture.coldJournal().foregroundAutomaticEnabled == true)
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.foregroundAutomaticEnabled == true)
+            }
             fixture.exporter.hold = false
             fixture.port.sources.append(.init(localID: "after-background", modifiedAt: nil, kind: .photo))
             await fixture.activate()?.value
@@ -437,7 +452,10 @@ struct PhotoBackupUnattemptedRecoveryTests {
             let cold = fixture.coldController()
             await cold.load(using: fixture.manager)
             await fixture.resumeUnattempted(using: cold)?.value
-            #expect(try await fixture.coldJournal().jobs.map(\.stage) == [.paused, .completed])
+            do {
+                let persistedSnapshot = try await fixture.coldJournal()
+                #expect(persistedSnapshot.jobs.map(\.stage) == [.paused, .completed])
+            }
             #expect(fixture.exporter.observations.map(\.localID) == ["first", "tail-after-cancel"] && fixture.server.counts == [1, 1])
         }
     }

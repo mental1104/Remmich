@@ -50,7 +50,10 @@ struct PhotoBackupWorkerTests {
         let result = try await fixture.worker.run(scope: fixture.scope, userID: "synthetic", allowCloud: false,
                                                   client: transport, validateContext: {}, progress: { _, _ in })
         #expect(result.completed == 1 && result.failed == 0 && !result.stopped)
-        #expect(try await fixture.store.loadPhotoBackups(scope: fixture.scope).jobs.first?.stage == .completed)
+        do {
+            let persistedSnapshot = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            #expect(persistedSnapshot.jobs.first?.stage == .completed)
+        }
         #expect(await transport.assetReads == [fixture.primaryID.uuidString, fixture.motionID.uuidString])
     }
 

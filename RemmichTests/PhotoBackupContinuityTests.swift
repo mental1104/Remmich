@@ -54,6 +54,13 @@ struct PhotoBackupContinuityTests {
         #expect(index.query(for: continuitySource("asset-1", modified: 10.75)) != nil)
         #expect(index.query(for: continuitySource("other-phone"), cloudID: "cloud-1") != nil)
         #expect(index.query(for: continuitySource("missing")) == nil)
+        // 整批逆序核查而非只测一个末项，防止未来退回每项遍历88,187行的平方开销。
+        var resolved = 0
+        for id in (1 ..< 88187).reversed() {
+            guard index.query(for: continuitySource("asset-\(id)")) != nil else { break }
+            resolved += 1
+        }
+        #expect(resolved == 88186)
     }
 
     /// 无导入记录必须在Photos/HTTP及Exporter之前失败，不能把既有服务器图库视作空库重新上传。
@@ -94,9 +101,12 @@ struct PhotoBackupContinuityTests {
         )
         let cold = try await SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")).loadPhotoBackups(scope: scope)
         #expect(exporter.calls == 0 && result.completed == 0 && result.skipped == 65 && result.review == 65)
-        #expect(cold.jobs.count { $0.stage == .paused } == 65 && cold.jobs.count { $0.failure == .historyUnconfirmed } == 65)
+        #expect(cold.jobs.count { $0.stage == .paused } == 65 && cold.jobs.count { $0.failure == .historyNeedsReview } == 65)
         #expect(cold.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
-        #expect(try await store.loadPhotoBackupHistory(scope: continuityScope(other: true)) == nil)
+        do {
+            let persistedSnapshot = try await store.loadPhotoBackupHistory(scope: continuityScope(other: true))
+            #expect(persistedSnapshot == nil)
+        }
     }
 
     /// Live Photo只有主体checksum命中不能冒充完整动态备份；仍不读取原片补证明。
@@ -162,13 +172,15 @@ struct PhotoBackupContinuityTests {
         let client = ContinuityQueries()
         var current = true
         client.onQuery = { current = false }
-        await #expect(throws: LibraryWriteError.changedAccount) {
-            try await PhotoBackupContinuityChecker(store: store, metadata: ContinuityPhotos()).plan(
+        var rejected = false
+        do {
+            _ = try await PhotoBackupContinuityChecker(store: store, metadata: ContinuityPhotos()).plan(
                 jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {
                     guard current else { throw LibraryWriteError.changedAccount }
                 }
             )
-        }
+        } catch LibraryWriteError.changedAccount { rejected = true }
+        #expect(rejected)
         #expect(client.batches.count == 1)
     }
 
@@ -297,7 +309,7 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
     var associatedCloud: String?
     var onQuery: (@MainActor () -> Void)?
     /// queries逐批记录；可模拟完整未命中、协议缺项或网络失败，不返回任何上传许可。
-    func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
+    @MainActor func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
         if queries.isEmpty {
             return []
         }
@@ -315,7 +327,7 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
     }
 
     /// cloudIDs是本轮真正新源；返回mobile-app已有关系，或完整空结果，不访问任何媒体。
-    func localMediaMetadata(cloudIDs _: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
+    @MainActor func localMediaMetadata(cloudIDs _: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
         guard let associatedCloud else { return [] }
         return [.init(assetID: UUID(), value: Data("{\"iCloudId\":\"\(associatedCloud)\"}".utf8))]
     }

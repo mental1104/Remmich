@@ -18,7 +18,7 @@ nonisolated struct PhotoBackupSource: Codable, Hashable, Sendable {
 nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
     case interrupted, sourceMissing, sourceChanged, unsupportedResources, permission, network
     case livePhotoMismatch, unconfirmedResponse, unavailable, storage, historyUnconfirmed
-    /// Mac候选已写入的旧枚举值；仅保留读取兼容，不把未知历史升级为新上传许可。
+    /// 沿用Mac候选的待核查标记以保留往返读取；它不把未知历史升级为新上传许可。
     case historyNeedsReview
 
     /// 返回安全可展示的原因；中断/网络错误也必须经用户明确恢复后再查重。

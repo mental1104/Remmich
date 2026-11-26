@@ -64,7 +64,7 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                     if preflight.existing.contains(job.source) {
                         job.pause()
                     } else {
-                        job.fail(.historyUnconfirmed)
+                        job.fail(.historyNeedsReview)
                     }
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
                     if preflight.existing.contains(job.source) {
