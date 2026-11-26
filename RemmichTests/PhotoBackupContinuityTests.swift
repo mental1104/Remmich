@@ -559,7 +559,7 @@ private nonisolated func continuityOriginalCheck(id: String, duplicate: Bool) ->
     })
 }
 
-/// id/checksum为独立HTTP金值，必须与真实文件abc对应；缺失或错误摘要不能产生来源写入。
+/// id/checksum为独立HTTP金值，kind选择照片或视频类型；摘要与abc对应，错误摘要不能产生来源写入。
 private nonisolated func continuityUploadedAsset(id: String, checksum: String, kind: PhotoBackupSource.Kind = .photo) -> String {
     "{\"id\":\"\(id)\",\"ownerId\":\"99999999-9999-4999-8999-999999999999\",\"isFavorite\":false,\"visibility\":\"timeline\",\"isTrashed\":false,\"type\":\"\(kind == .video ? "VIDEO" : "IMAGE")\",\"originalFileName\":\"fresh.jpg\",\"checksum\":\"\(checksum)\",\"isOffline\":false,\"isEdited\":false,\"updatedAt\":\"1970-01-01T00:05:00Z\"}"
 }

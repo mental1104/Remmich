@@ -1197,6 +1197,7 @@
 
 ## 2026-11-26: Complete no-import backup and publish iCloud origins
 
+- f43ea63的CI45799087407格式通过，离线契约在App编译前失败：固定swiftc清单未包含新PhotoBackupOrigin，导致找不到类型和级联Codable错误。已将实际领域文件加入原清单，保留全部检查与workflow触发；新功能尚无Swift运行通过结论。
 - NAS全范围SwiftFormat0/473（1个既有排除）、diff及1610对中英文键/占位符检查通过；没有Swift/Xcode，新增编译和执行尚待本提交CI。
 - 按用户明确口径修正无SQLite路径：新照片未匹配时进入原有Exporter→SHA1→bulk-upload-check→必要时磁盘上传→fresh确认，不再全部标为待核查。不可读取/变化/冲突源仍待核查，历史尝试仅明确恢复或已验证恢复令牌可重进；整批手动恢复也传入实际排队ID。
 - 实际原片摘要与fresh资产checksum/online一致后，以每云ID独立remmich-backup-icloud-<SHA256>元数据保存version=1/method=sha1/byteVerified=true/checksum/公开Photos元组；多来源不互相覆盖，也不改官方mobile-app。仅ID匹配继续独立保存false标记。来源写入失败保留未确认和已上传回执，明确恢复先查重。
