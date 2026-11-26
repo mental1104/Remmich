@@ -590,9 +590,10 @@ private nonisolated func continuityOriginWrite(fails: Bool = false) -> ChecksumL
         calls += 1; cloudFlags.append(allowCloud)
         guard source.kind == .photo || source.kind == .video else { throw PhotoBackupExportError(reason: .unsupportedResources) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appending(path: "fresh.jpg")
+        let name = source.kind == .video ? "fresh.mp4" : "fresh.jpg"
+        let file = directory.appending(path: name)
         try Data("abc".utf8).write(to: file)
-        return .init(directory: directory, primary: .init(file: file, name: "fresh.jpg"), motion: nil,
+        return .init(directory: directory, primary: .init(file: file, name: name), motion: nil,
                      created: Date(timeIntervalSince1970: 200), modified: Date(timeIntervalSince1970: 200), favorite: false)
     }
 }

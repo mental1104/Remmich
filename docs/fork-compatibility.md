@@ -2,6 +2,8 @@
 
 ## No-import uploads and durable iCloud origins, 2026-11-26
 
+The existing ready-PR workflow now runs a focused backup/matching selection and uploads its actual log/result bundle before the complete App stage. It requires the two critical suite pass records to reject zero-test filtering mistakes. All original API/full-App/two-device-UI checks, triggers and draft protection remain. This gives the user's primary acceptance an independent early result without hiding existing baseline failures.
+
 First run45799087407 on f43ea63 passes formatting but stops before App compilation: the standalone contract script's explicit swiftc input list omitted PhotoBackupOrigin. That missing input explains the unknown-type and cascading Codable diagnostics; the actual domain source is now included, with all checks and workflow triggers preserved. No new functional test pass is claimed from that failed run.
 
 User-confirmed behavior supersedes the earlier review-only no-import policy below: readable unmatched new sources now enter the existing original-export/SHA1/bulk-upload-check/upload/fresh-receipt pipeline. ID matches still skip originals entirely. Missing/changed/conflicting sources stay under review; previously attempted work requires explicit verification or the existing verified recovery token. Whole-batch manual verification passes its actual queued IDs. Cloud downloads retain the saved user consent.

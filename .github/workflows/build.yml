@@ -154,6 +154,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      # 先保留当天核心同步/匹配验收；后面的完整App及两设备UI继续执行，不缩减既有检查。
+      - name: Test backup and matching before full app tests
+        id: backup-tests
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Remmich.xcodeproj \
+            -scheme RemmichSearchUI \
+            -configuration Debug \
+            -destination "$IPHONE_DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$RUNNER_TEMP/RemmichBackupTests.xcresult" \
+            -jobs 2 \
+            -parallel-testing-enabled NO \
+            -only-testing:RemmichTests/PhotoBackupServerMatchingTests \
+            -only-testing:RemmichTests/PhotoBackupOriginTests \
+            -only-testing:RemmichTests/PhotoBackupContinuityTests \
+            -only-testing:RemmichTests/PhotoBackupWorkerTests \
+            -only-testing:RemmichTests/PhotoBackupICloudMarkerHTTPTests \
+            -only-testing:RemmichTests/LocalMediaMetadataStreamTests \
+            -only-testing:RemmichTests/LocalMediaMetadataHTTPTests \
+            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 \
+            | tee "$RUNNER_TEMP/RemmichBackupTests.log" \
+            | xcbeautify
+          # 防止筛选拼写错误造成零用例假通过；仍以原始测试退出码和真实套件完成行为准。
+          grep -F 'Suite "Server iCloud backup matching without imports" passed' "$RUNNER_TEMP/RemmichBackupTests.log"
+          grep -F 'Suite "Backup iCloud origin and cross-client metadata" passed' "$RUNNER_TEMP/RemmichBackupTests.log"
+
+      - name: Upload backup and matching evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.backup-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-backup-test-evidence
+          path: |
+            ${{ runner.temp }}/RemmichBackupTests.log
+            ${{ runner.temp }}/RemmichBackupTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Test app logic before PR merge
         id: app-tests
         if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
@@ -231,6 +271,8 @@ jobs:
           name: remmich-pr-test-results
           path: |
             ${{ runner.temp }}/RemmichAPITests.log
+            ${{ runner.temp }}/RemmichBackupTests.log
+            ${{ runner.temp }}/RemmichBackupTests.xcresult
             ${{ runner.temp }}/RemmichPRTests.log
             ${{ runner.temp }}/RemmichPRTests.xcresult
             ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult
