@@ -118,7 +118,7 @@ struct SavedPhotosView: View {
             ContentUnavailableView {
                 Label("Photos Access Needed", systemImage: "photo.badge.exclamationmark")
             } description: {
-                Text(library.limited ? "The Remmich album is not available with your current Photos selection." : "Allow Photos access in Settings to browse your saved items.")
+                Text(L10n.string(library.limited ? "The Remmich album is not available with your current Photos selection." : "Allow Photos access in Settings to browse your saved items."))
             } actions: { photosSettingsButton }
         case .ambiguous:
             ContentUnavailableView("Multiple Remmich Albums", systemImage: "rectangle.stack",

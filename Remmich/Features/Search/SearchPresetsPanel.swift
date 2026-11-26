@@ -19,7 +19,7 @@ struct SearchPresetsPanel: View {
     var body: some View {
         DisclosureGroup("Saved searches") {
             VStack(alignment: .leading, spacing: 12) {
-                Button(store.busy ? "Loading" : "Reload saved searches") { Task { conversionError = nil; await store.load(manager: manager) } }
+                Button(L10n.string(store.busy ? "Loading" : "Reload saved searches")) { Task { conversionError = nil; await store.load(manager: manager) } }
                     .disabled(store.busy)
                     .accessibilityIdentifier("saved-search-reload")
                 if store.supported == false {
@@ -29,7 +29,7 @@ struct SearchPresetsPanel: View {
                     TextField("Search name", text: $name).textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("saved-search-name")
                     HStack {
-                        Button(editing == nil ? "Save current search" : "Save name") { Task { await save() } }
+                        Button(L10n.string(editing == nil ? "Save current search" : "Save name")) { Task { await save() } }
                             .disabled(store.busy || !store.hasFreshData || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("saved-search-save")
                         if editing != nil {

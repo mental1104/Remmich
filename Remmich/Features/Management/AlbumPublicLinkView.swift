@@ -54,7 +54,7 @@ struct AlbumPublicLinkView: View {
             }
             .confirmationDialog("确认公开链接变更？", isPresented: $showsConfirmation, titleVisibility: .visible) {
                 if let plan = pending {
-                    Button(isRevocation(plan) ? "撤销此链接" : "确认公开链接设置", role: isRevocation(plan) ? .destructive : nil) {
+                    Button(L10n.string(isRevocation(plan) ? "撤销此链接" : "确认公开链接设置"), role: isRevocation(plan) ? .destructive : nil) {
                         pending = nil; copied = false; store.start(plan, manager: controller)
                     }
                 }
@@ -118,7 +118,7 @@ struct AlbumPublicLinkView: View {
                         Text(album.albumName).font(.headline)
                     }
                     Text("创建于 \(link.createdAt.formatted(date: .abbreviated, time: .shortened))").font(.caption).foregroundStyle(.secondary)
-                    Text(link.options.password?.isEmpty == false ? "密码保护" : "无密码").font(.caption)
+                    Text(L10n.string(link.options.password?.isEmpty == false ? "密码保护" : "无密码")).font(.caption)
                     if let expires = link.options.expiresAt {
                         Text("\(expires <= .now ? "已过期" : "有效至") \(expires.formatted(date: .abbreviated, time: .shortened))").font(.caption)
                     } else {
@@ -250,7 +250,7 @@ private struct AlbumPublicLinkEditor: View {
     private var passwordSection: some View {
         Section("密码") {
             Picker("密码操作", selection: $passwordAction) {
-                Text(link == nil ? "不设置密码" : "保留现状").tag(PublicLinkPasswordAction.keep)
+                Text(L10n.string(link == nil ? "不设置密码" : "保留现状")).tag(PublicLinkPasswordAction.keep)
                 Text("设置新密码").tag(PublicLinkPasswordAction.replace)
                 Text("清除密码").tag(PublicLinkPasswordAction.remove)
             }

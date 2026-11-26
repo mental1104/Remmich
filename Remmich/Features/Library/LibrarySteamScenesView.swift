@@ -116,7 +116,7 @@ struct LibrarySteamScenesView: View {
                     .aspectRatio(1, contentMode: .fit).clipped()
             }
             .buttonStyle(.plain).disabled(store.busy)
-            .accessibilityLabel(tile.group == nil ? "Open screenshot" : "Open Steam scene group")
+            .accessibilityLabel(L10n.string(tile.group == nil ? "Open screenshot" : "Open Steam scene group"))
             .accessibilityIdentifier("steam-scene-photo-\(tile.id)")
             Text(tile.asset.capturedAt, format: .dateTime.year().month().day().hour().minute()).font(.caption2)
             if let group = tile.group {

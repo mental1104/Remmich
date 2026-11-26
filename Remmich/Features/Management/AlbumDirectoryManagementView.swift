@@ -121,7 +121,7 @@ struct AlbumDirectoryManagementView: View {
 
     /// 大组创建/改名共用输入；取消只清空本地草稿，不触发服务端请求。
     private var categoryEditor: some View {
-        Section(editingCategory == nil ? "Create category" : "Rename category") {
+        Section(L10n.string(editingCategory == nil ? "Create category" : "Rename category")) {
             TextField("Category name", text: $categoryName)
             Button("Review change") {
                 if let editingCategory {

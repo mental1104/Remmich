@@ -141,7 +141,7 @@ struct AssetTagManagementView: View {
             if let selected, let state = store.state {
                 let attached = state.asset.tags.contains { $0.id == selected.id }
                 Text(selected.value).font(.footnote).foregroundStyle(.secondary)
-                Button(attached ? "Review remove from this asset" : "Review add to this asset") {
+                Button(L10n.string(attached ? "Review remove from this asset" : "Review add to this asset")) {
                     review(attached ? .detach(tagID: selected.id) : .attach(tagID: selected.id))
                 }
                 TextField("New leaf name", text: $renameName)

@@ -43,7 +43,7 @@ struct TimelineSceneBadge: View {
                 .background(.ultraThinMaterial, in: .capsule)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(expanded ? "Collapse scene group" : "Expand scene group")
+        .accessibilityLabel(L10n.string(expanded ? "Collapse scene group" : "Expand scene group"))
         .accessibilityValue("\(count) photos")
     }
 }

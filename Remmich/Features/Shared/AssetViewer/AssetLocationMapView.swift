@@ -65,7 +65,7 @@ struct AssetLocationMapView: View {
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "map")
-                    Text(failed ? "Map Unavailable" : "Asset Location").font(.subheadline)
+                    Text(L10n.string(failed ? "Map Unavailable" : "Asset Location")).font(.subheadline)
                     if failed {
                         Button("Try Again") { retry &+= 1 }
                     }

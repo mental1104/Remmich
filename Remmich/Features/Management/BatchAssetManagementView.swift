@@ -201,7 +201,7 @@ struct BatchAssetManagementView: View {
     @ViewBuilder private var resultSummary: some View {
         if !store.results.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text(store.operationTitle ?? "Last operation").font(.headline)
+                Text(L10n.string(store.operationTitle ?? "Last operation")).font(.headline)
                 Text("\(store.results.filter { $0.state == .succeeded }.count) confirmed / \(store.results.count) selected")
                     .font(.subheadline)
                 ForEach(Array(store.results.enumerated()), id: \.element.id) { index, result in

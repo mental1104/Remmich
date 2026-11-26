@@ -627,7 +627,7 @@ struct PhotosView: View {
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(memoryViewerErrorMessage ?? "The memory’s assets aren’t available.")
+            Text(L10n.string(memoryViewerErrorMessage ?? "The memory’s assets aren’t available."))
         }
         .overlay(alignment: .top) {
             if UIDevice.current.userInterfaceIdiom == .phone {

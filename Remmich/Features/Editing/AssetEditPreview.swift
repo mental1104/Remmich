@@ -57,7 +57,7 @@ struct AssetEditResultPreview: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(showsOriginal ? "Original image" : "Edited image preview")
+        .accessibilityLabel(L10n.string(showsOriginal ? "Original image" : "Edited image preview"))
         .accessibilityIdentifier(showsOriginal ? "asset-editor-original" : "asset-editor-result")
     }
 }

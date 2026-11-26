@@ -90,11 +90,11 @@ struct AlbumSharingView: View {
                         Menu("管理") {
                             ForEach(AlbumSharingRole.allCases, id: \.self) { value in
                                 if member.role != value.rawValue, allowed(.role(id: member.id, role: value), in: snapshot) {
-                                    Button(value == .editor ? "设为编辑者" : "设为浏览者") { prepare(.role(id: member.id, role: value)) }
+                                    Button(L10n.string(value == .editor ? "设为编辑者" : "设为浏览者")) { prepare(.role(id: member.id, role: value)) }
                                 }
                             }
                             if allowed(.remove(id: member.id), in: snapshot) {
-                                Button(member.id.lowercased() == controller.client?.userID.lowercased() ? "退出相簿" : "移除成员", role: .destructive) { prepare(.remove(id: member.id)) }
+                                Button(L10n.string(member.id.lowercased() == controller.client?.userID.lowercased() ? "退出相簿" : "移除成员"), role: .destructive) { prepare(.remove(id: member.id)) }
                             }
                         }.disabled(!ready || !snapshot.hasKnownRoles)
                     } else {

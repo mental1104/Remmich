@@ -422,12 +422,12 @@ struct AssetViewerInfoView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .transition(.opacity)
-                .accessibilityLabel(
+                .accessibilityLabel(L10n.string(
                     renderedImageMetadata == nil
                         && videoPlaybackMetadata == nil
                         ? "Image details loading"
                         : displayText
-                )
+                ))
                 .accessibilityIdentifier("asset-viewer-rendered-metadata")
         }
         .animation(

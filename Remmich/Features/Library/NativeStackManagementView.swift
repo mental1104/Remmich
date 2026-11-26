@@ -122,7 +122,7 @@ private struct NativeStackDetailView: View {
                 Text("Only visible, non-trashed members are listed. Stack-wide changes also affect any members omitted by the server.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !stack.canManage {
-                    Text(NativeStackError.unavailableMembers.errorDescription ?? "Read-only")
+                    Text(L10n.string(NativeStackError.unavailableMembers.errorDescription ?? "Read-only"))
                 }
                 Button("Add photos") { adding = true }.disabled(!canWrite)
                 Button("Review dissolving stack", role: .destructive) { pending = .dissolve(stack) }
@@ -239,7 +239,7 @@ private struct NativeStackPickerView: View {
                     }
                     .pickerStyle(.navigationLink)
                 }
-                Button(existing == nil ? "Review creating stack" : "Review adding photos") {
+                Button(L10n.string(existing == nil ? "Review creating stack" : "Review adding photos")) {
                     let ordered = existing == nil ? [representative] + selected.filter { $0 != representative } : selected
                     pending = .create(assetIDs: ordered, addingTo: existing)
                 }
@@ -259,7 +259,7 @@ private struct NativeStackPickerView: View {
                         .accessibilityIdentifier("native-stack-candidate-\(asset.id)")
                 }
                 if candidates.hasLoaded, candidates.assets.isEmpty, candidates.error == nil {
-                    Text(candidates.continuation == nil ? "No available photos" : "No available photos on this page. Load more to continue.")
+                    Text(L10n.string(candidates.continuation == nil ? "No available photos" : "No available photos on this page. Load more to continue."))
                         .foregroundStyle(.secondary)
                 }
                 if let error = candidates.error {
@@ -269,7 +269,7 @@ private struct NativeStackPickerView: View {
                     ProgressView("Loading photos")
                 }
                 if !candidates.hasLoaded || candidates.continuation != nil {
-                    Button(candidates.error == nil ? "Load more photos" : "Retry page", action: loadMore)
+                    Button(L10n.string(candidates.error == nil ? "Load more photos" : "Retry page"), action: loadMore)
                         .disabled(candidates.busy || store.busy || store.needsReload)
                 }
             }
@@ -286,7 +286,7 @@ private struct NativeStackPickerView: View {
                 await candidates.loadMore(source: source, excluding: excludedIDs)
             }
             .onDisappear { loading?.cancel(); loading = nil; candidates.invalidate() }
-            .confirmationDialog(existing == nil ? "Create this stack?" : "Add selected photos?", isPresented: Binding(get: { pending != nil }, set: {
+            .confirmationDialog(L10n.string(existing == nil ? "Create this stack?" : "Add selected photos?"), isPresented: Binding(get: { pending != nil }, set: {
                 if !$0 {
                     pending = nil
                 }
@@ -296,8 +296,8 @@ private struct NativeStackPickerView: View {
                 }
                 Button("Cancel", role: .cancel) { pending = nil }
             } message: {
-                Text(existing == nil ? "The selected representative becomes the first member. Selected photos remain in your library."
-                    : "The server replaces this stack with a new stack containing its current non-trashed members and your selection. Trashed members lose their stack link. Photos are kept.")
+                Text(L10n.string(existing == nil ? "The selected representative becomes the first member. Selected photos remain in your library."
+                        : "The server replaces this stack with a new stack containing its current non-trashed members and your selection. Trashed members lose their stack link. Photos are kept."))
             }
     }
 

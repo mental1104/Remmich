@@ -56,7 +56,7 @@ struct AssetManagementView: View {
                                 .disabled(asset.isTrashed)
                             Button("Tags") { managingTags = true }
                                 .disabled(asset.isTrashed)
-                            Button(asset.isFavorite ? "取消收藏" : "收藏") {
+                            Button(L10n.string(asset.isFavorite ? "取消收藏" : "收藏")) {
                                 run { try await $0.update(assetID, favorite: !asset.isFavorite) }
                             }
                             Button(asset.visibility == "archive" ? "移回时间线" : "归档") {

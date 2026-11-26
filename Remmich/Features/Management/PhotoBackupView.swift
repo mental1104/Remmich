@@ -41,10 +41,12 @@ struct PhotoBackupView: View {
                     Text(backup.continuityStatus).font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
                         ProgressView(value: Double(backup.processed), total: Double(max(1, backup.total)))
+                    } else {
+                        // 冷摘要只表示上次保存的累计结果；运行中的实时数值由上方进度文案发布。
+                        LabeledContent("Matched on Server") { Text(backup.unattemptedSummary.matched, format: .number) }
+                        LabeledContent("Uploaded or Matched") { Text(backup.unattemptedSummary.completed, format: .number) }
+                        LabeledContent("Needs Review") { Text(backup.unattemptedSummary.failed + backup.unattemptedSummary.attemptedOrUnconfirmed, format: .number) }
                     }
-                    LabeledContent("Matched on Server") { Text(backup.unattemptedSummary.matched, format: .number) }
-                    LabeledContent("Uploaded or Matched") { Text(backup.unattemptedSummary.completed, format: .number) }
-                    LabeledContent("Needs Review") { Text(backup.unattemptedSummary.failed + backup.unattemptedSummary.attemptedOrUnconfirmed, format: .number) }
                 }
                 Section {
                     if backup.running {

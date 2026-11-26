@@ -121,7 +121,7 @@ struct PhotoBackupAlbumSyncSection: View {
                 Button("取消未发送的创建预览") { sync.abandonPreparedCreation(intent.id, using: manager, backup: backup) }
                     .disabled(creationBlocked)
             } else {
-                Text(intent.receiptID == nil ? "创建结果未知。请只读核查后明确选择现有目标；同名不能证明是本次创建，不会再次发送POST。" : "已有本次201身份回执，需重新核实目标后完成映射，不会再次创建。")
+                Text(L10n.string(intent.receiptID == nil ? "创建结果未知。请只读核查后明确选择现有目标；同名不能证明是本次创建，不会再次发送POST。" : "已有本次201身份回执，需重新核实目标后完成映射，不会再次创建。"))
                     .font(.footnote).foregroundStyle(.secondary)
                 Button("只读核查创建结果") { sync.recoverCreation(intent.id, using: manager, backup: backup) }
                     .disabled(creationBlocked)

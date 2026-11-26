@@ -138,14 +138,14 @@ struct OnboardingView: View {
                     .buttonStyle(.glass)
                     .buttonBorderShape(.circle)
                     .disabled(isBusy)
-                    .accessibilityLabel(server == nil ? "Back to account" : "Back to server address")
+                    .accessibilityLabel(L10n.string(server == nil ? "Back to account" : "Back to server address"))
                 } else {
                     Image(systemName: "globe")
                         .font(.title2)
                         .foregroundStyle(accent)
                         .accessibilityHidden(true)
                 }
-                Text(server == nil ? "Connect to Immich" : "Sign in")
+                Text(L10n.string(server == nil ? "Connect to Immich" : "Sign in"))
                     .font(.title2.bold())
                     .foregroundStyle(accent)
                     .accessibilityAddTraits(.isHeader)
@@ -199,7 +199,7 @@ struct OnboardingView: View {
                     .onSubmit { requestConnection() }
                     .accessibilityIdentifier("server-address")
             }
-            primaryButton(isChecking ? "Checking server…" : "Continue", enabled: canConnect, action: requestConnection)
+            primaryButton(L10n.string(isChecking ? "Checking server…" : "Continue"), enabled: canConnect, action: requestConnection)
             Text("Leave the address empty to try the Immich demo.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -244,9 +244,9 @@ struct OnboardingView: View {
                     .onSubmit { signIn(server) }
                     .accessibilityIdentifier("login-password")
             }
-            primaryButton(isSigningIn ? "Signing in…" : "Sign In", enabled: canSignIn) { signIn(server) }
+            primaryButton(L10n.string(isSigningIn ? "Signing in…" : "Sign In"), enabled: canSignIn) { signIn(server) }
         } else {
-            Label(server.capabilities.oauth ? "This server requires OAuth sign-in." : "Password sign-in is disabled on this server.",
+            Label(L10n.string(server.capabilities.oauth ? "This server requires OAuth sign-in." : "Password sign-in is disabled on this server."),
                   systemImage: "person.badge.key")
                 .font(.headline)
                 .fixedSize(horizontal: false, vertical: true)

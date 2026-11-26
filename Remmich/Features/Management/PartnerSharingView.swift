@@ -88,8 +88,8 @@ struct PartnerSharingView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(partner.name).font(.headline)
                     if let enabled = partner.inTimeline {
-                        Text(enabled ? "服务端：在我的时间线显示" : "服务端：仅在伙伴图库浏览").font(.caption).foregroundStyle(.secondary)
-                        Button(enabled ? "从我的时间线隐藏" : "在我的时间线显示") { prepare(.timeline(partner.id, !enabled)) }.disabled(!ready)
+                        Text(L10n.string(enabled ? "服务端：在我的时间线显示" : "服务端：仅在伙伴图库浏览")).font(.caption).foregroundStyle(.secondary)
+                        Button(L10n.string(enabled ? "从我的时间线隐藏" : "在我的时间线显示")) { prepare(.timeline(partner.id, !enabled)) }.disabled(!ready)
                     } else {
                         Text("服务器未提供时间线状态，暂不可修改。").font(.caption).foregroundStyle(.secondary)
                     }

@@ -128,7 +128,7 @@ struct SearchView: View {
                             if let deviceError {
                                 Text(deviceError).font(.caption)
                             }
-                            Button(loadingDevices ? "Loading devices" : "Load capture devices") { Task { await loadDevices() } }
+                            Button(L10n.string(loadingDevices ? "Loading devices" : "Load capture devices")) { Task { await loadDevices() } }
                                 .disabled(loadingDevices)
                                 .accessibilityIdentifier("search-load-devices")
                         }
@@ -145,7 +145,7 @@ struct SearchView: View {
                         if let suggestionError {
                             Text(suggestionError).font(.caption)
                         }
-                        Button(loadingSuggestions ? "Loading choices" : "Load filter choices") { Task { await loadChoices() } }
+                        Button(L10n.string(loadingSuggestions ? "Loading choices" : "Load filter choices")) { Task { await loadChoices() } }
                             .disabled(loadingSuggestions)
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
@@ -204,7 +204,7 @@ struct SearchView: View {
                                     }
                                 }.frame(maxHeight: 240)
                             }
-                            Button(loadingTags ? "Loading tags" : "Load tags") { Task { await loadTags() } }
+                            Button(L10n.string(loadingTags ? "Loading tags" : "Load tags")) { Task { await loadTags() } }
                                 .disabled(loadingTags)
                         }
                         DisclosureGroup("People") {
@@ -255,7 +255,7 @@ struct SearchView: View {
                             SearchResultCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
+                        .accessibilityLabel(L10n.string(asset.mediaKind == .video ? "Open video" : "Open photo"))
                         .accessibilityIdentifier("search-result-\(asset.id)")
                         .contextMenu {
                             Button("Find similar photos", systemImage: "photo.on.rectangle.angled") {

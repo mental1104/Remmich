@@ -269,7 +269,7 @@ struct AlbumsView: View {
                         ContentUnavailableView(
                             query.isEmpty ? (contentScope == .shared ? "No Shared Albums" : "No Albums") : "No Results",
                             systemImage: "rectangle.stack",
-                            description: Text(query.isEmpty ? "Albums available to this account will appear here." : "Try another album name.")
+                            description: Text(L10n.string(query.isEmpty ? "Albums available to this account will appear here." : "Try another album name."))
                         )
                     } else {
                         AlbumReflowLayout(progress: albumLayoutProgress, metrics: metrics) {
@@ -510,7 +510,7 @@ struct AlbumsView: View {
                 Picker("相簿分组", selection: $forkGroup) {
                     Text("全部分组").tag(String?.none)
                     ForEach(directory.groupNames, id: \.self) { name in
-                        Text(name.isEmpty ? "未分组" : name).tag(Optional(name))
+                        Text(L10n.string(name.isEmpty ? "未分组" : name)).tag(Optional(name))
                     }
                 }
                 Button("清除目录筛选") { forkCategory = nil; forkGroup = nil }

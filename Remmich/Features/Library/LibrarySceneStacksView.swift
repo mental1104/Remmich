@@ -102,7 +102,7 @@ struct LibrarySceneStacksView: View {
         switch store.availability {
         case .unsupported?: Text("This server does not provide scene grouping. All photos remain visible.").foregroundStyle(.secondary)
         case .unavailable?: Text("Scene evidence is unavailable. All photos remain visible.").foregroundStyle(.secondary)
-        case .notRequested?: Text(store.months.isEmpty ? "No timeline months" : "No photos in this month.").foregroundStyle(.secondary)
+        case .notRequested?: Text(L10n.string(store.months.isEmpty ? "No timeline months" : "No photos in this month.")).foregroundStyle(.secondary)
         case let .available(groups)? where groups.isEmpty: Text("No complete scene groups for these loaded photos.").foregroundStyle(.secondary)
         case nil where !store.busy && store.error == nil && !store.assets.isEmpty:
             Text("Scene grouping has not been checked. Reload to query evidence.").foregroundStyle(.secondary)
@@ -124,7 +124,7 @@ struct LibrarySceneStacksView: View {
                     .aspectRatio(1, contentMode: .fit).clipped()
             }
             .buttonStyle(.plain).disabled(store.busy)
-            .accessibilityLabel(tile.group == nil ? "Open photo" : "Open scene group")
+            .accessibilityLabel(L10n.string(tile.group == nil ? "Open photo" : "Open scene group"))
             .accessibilityIdentifier("scene-photo-\(tile.id)")
             Text(tile.asset.capturedAt, format: .dateTime.month().day().hour().minute()).font(.caption2)
             if let group = tile.group {

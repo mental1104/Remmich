@@ -126,8 +126,8 @@ private struct PeopleManagementDetail: View {
                     .disabled(!canWrite || name == person.name)
             }
             Section("Person visibility") {
-                Text(person.isHidden ? "This person is hidden from the normal People list." : "This person appears in the normal People list.")
-                Button(person.isHidden ? "Review showing person" : "Review hiding person") { confirmation = .visibility(!person.isHidden) }
+                Text(L10n.string(person.isHidden ? "This person is hidden from the normal People list." : "This person appears in the normal People list."))
+                Button(L10n.string(person.isHidden ? "Review showing person" : "Review hiding person")) { confirmation = .visibility(!person.isHidden) }
                     .disabled(!canWrite)
                 Text("Hiding a person does not hide, trash or delete their photos.").font(.caption).foregroundStyle(.secondary)
             }
@@ -167,13 +167,13 @@ private struct PeopleManagementDetail: View {
         }), titleVisibility: .visible, presenting: confirmation) { change in
             switch change {
             case let .rename(value): Button("Save name for your account") { run { await store.rename(person, name: value, source: source) } }
-            case let .visibility(hidden): Button(hidden ? "Hide person" : "Show person") { run { await store.setHidden(person, hidden: hidden, source: source) } }
+            case let .visibility(hidden): Button(L10n.string(hidden ? "Hide person" : "Show person")) { run { await store.setHidden(person, hidden: hidden, source: source) } }
             case let .merge(target): Button("Merge into \(target.displayName)", role: .destructive) { run { await store.merge(target: target, sourcePerson: person, source: source) } }
             }
         } message: { change in
             switch change {
             case let .rename(value): Text("Rename \(person.displayName) to \(value.isEmpty ? "Unnamed" : value) for your account?")
-            case let .visibility(hidden): Text(hidden ? "Hide this person from the normal People list? Photos remain unchanged." : "Show this person in the normal People list?")
+            case let .visibility(hidden): Text(L10n.string(hidden ? "Hide this person from the normal People list? Photos remain unchanged." : "Show this person in the normal People list?"))
             case let .merge(target): Text("Merge \(person.displayName) into \(target.displayName)? Shared linked records may also merge. Photos are retained. This cannot be undone here.")
             }
         }

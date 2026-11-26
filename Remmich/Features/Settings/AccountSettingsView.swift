@@ -769,7 +769,7 @@ struct AccountSettingsView: View {
                         navigate(to: .appearance)
                     }
                 }
-                .accessibilityLabel(selectedPage == .home ? "Change app icon" : "Remmich logo")
+                .accessibilityLabel(L10n.string(selectedPage == .home ? "Change app icon" : "Remmich logo"))
                 .accessibilityHint(selectedPage == .home ? "Touch and hold to choose an app icon" : "")
                 .accessibilityAction(named: "Change app icon") { navigate(to: .appearance) }
             VStack(spacing: 4) {
