@@ -282,7 +282,8 @@ struct PhotoBackupServerMatchingTests {
                                    requestContentTypePrefix: "multipart/form-data; boundary="))
         }
         let serverDigest = mode == "wrong-digest" ? continuityChecksum : digest
-        exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: serverDigest, kind: kind)))
+        // Worker将回执解析为UUID后使用uuidString回读，路径保持其大写形式；响应仍保留原始wire身份。
+        exchanges.append(.init(method: "GET", path: "assets/" + id.uppercased(), status: 200, json: continuityUploadedAsset(id: id, checksum: serverDigest, kind: kind)))
         if mode != "wrong-digest" {
             exchanges.append(continuityOriginWrite(fails: mode == "metadata-failure"))
         }
@@ -290,7 +291,7 @@ struct PhotoBackupServerMatchingTests {
         if mode == "metadata-failure" {
             exchanges += continuityEmptyStream()
             exchanges.append(continuityOriginalCheck(id: id, duplicate: true))
-            exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: digest, kind: kind)))
+            exchanges.append(.init(method: "GET", path: "assets/" + id.uppercased(), status: 200, json: continuityUploadedAsset(id: id, checksum: digest, kind: kind)))
             exchanges.append(continuityOriginWrite())
         }
         let http = ChecksumLookupHTTPFixture(exchanges: exchanges)
@@ -377,7 +378,7 @@ struct PhotoBackupServerMatchingTests {
         let empty = continuityEmptyStream()
         let http = ChecksumLookupHTTPFixture(exchanges: [empty[0],
                                                          .init(method: "POST", path: "sync/stream", status: 200, json: oldLine + line + empty[1].json, contentType: "application/jsonlines+json"),
-                                                         .init(method: "GET", path: "assets/" + assetID, status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
+                                                         .init(method: "GET", path: "assets/" + assetID.uppercased(), status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
                                                          continuityOriginWrite()])
         defer { http.close() }
         let client = try #require(http.manager.client)

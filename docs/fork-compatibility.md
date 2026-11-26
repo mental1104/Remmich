@@ -2,6 +2,8 @@
 
 ## No-import uploads and durable iCloud origins, 2026-11-26
 
+Resumed from f10aa4f's focused result: compilation and API98/24 pass, six of seven focused suites pass, but the new upload chain stops because the strict fixture expects lowercase UUID asset paths while the Worker uses UUID.uuidString (uppercase). Three expected GET paths now match the actual requests; response identities and all checksum/upload/origin/recovery/cross-device assertions remain unchanged. No production ID normalization or transport relaxation was added. End-to-end acceptance remains pending the correction's CI.
+
 The existing ready-PR workflow now runs a focused backup/matching selection and uploads its actual log/result bundle before the complete App stage. It requires the two critical suite pass records to reject zero-test filtering mistakes. All original API/full-App/two-device-UI checks, triggers and draft protection remain. This gives the user's primary acceptance an independent early result without hiding existing baseline failures.
 
 First run45799087407 on f43ea63 passes formatting but stops before App compilation: the standalone contract script's explicit swiftc input list omitted PhotoBackupOrigin. That missing input explains the unknown-type and cascading Codable diagnostics; the actual domain source is now included, with all checks and workflow triggers preserved. No new functional test pass is claimed from that failed run.
