@@ -403,6 +403,8 @@ struct PhotoBackupAlbumSyncTests {
         try await withAlbumSyncFixture(kind: .rawJPEG, rawExisting: true) { fixture in
             await fixture.run(fixture.sync.setMapping(localID: "include", targetID: albumSyncTarget2, using: fixture.manager, backup: fixture.backup))
             await fixture.server.setMode(.heldJPEGRead)
+            // setMapping已结束上一轮观察；新prepare必须重新开启门，才能等待本轮真实JPEG请求。
+            await fixture.server.beginObservedWork()
             let work = fixture.track(fixture.sync.prepare(using: fixture.manager, backup: fixture.backup))
             try #require(await fixture.server.waitUntilHeld(), "RAW preparation must reach the actual JPEG details request")
             if mode == "cancel" {

@@ -31,7 +31,10 @@ struct PhotoBackupAutomaticTests {
         let sources = names.map { PhotoBackupSource(localID: $0, modifiedAt: nil, kind: $0 == "partial-live" ? .livePhoto : .photo) }
         let selection = try PhotoBackupAlbumSelection(included: ["include"], excluded: ["exclude"])
         var journal = PhotoBackupJournal(namespace: "synthetic")
-        let snapshots = [PhotoBackupAlbumSnapshot(id: "include", assets: sources.map { .init(source: $0, capturedAt: nil) }), .init(id: "exclude", assets: [])]
+        // 显式拍摄顺序与下方各阶段的固定索引一致，避免nil日期按localID排序后把普通照片当作Live处理。
+        let snapshots = [PhotoBackupAlbumSnapshot(id: "include", assets: sources.enumerated().map {
+            .init(source: $0.element, capturedAt: Date(timeIntervalSince1970: Double($0.offset)))
+        }), .init(id: "exclude", assets: [])]
         try journal.applyAlbumScan(selection.scan(snapshots), allowCloud: false)
         let ids = journal.jobs.map(\.id)
         try journal.update(ids[0]) { job in
@@ -369,7 +372,9 @@ struct PhotoBackupUnattemptedRecoveryTests {
         let sources = names.map { PhotoBackupSource(localID: $0, modifiedAt: nil, kind: $0 == "partial" ? .livePhoto : .photo) }
         let selection = try PhotoBackupAlbumSelection(included: ["include"], excluded: ["exclude"])
         var journal = PhotoBackupJournal(namespace: "synthetic")
-        try journal.applyAlbumScan(selection.scan([.init(id: "include", assets: sources.map { .init(source: $0, capturedAt: nil) }), .init(id: "exclude", assets: [])]), allowCloud: true)
+        // 固定初始拍摄顺序，使下方索引确实对应completed/partial/safe等指定源，不依赖标识符字母顺序。
+        let assets = sources.enumerated().map { PhotoBackupScannedAsset(source: $0.element, capturedAt: Date(timeIntervalSince1970: Double($0.offset))) }
+        try journal.applyAlbumScan(selection.scan([.init(id: "include", assets: assets), .init(id: "exclude", assets: [])]), allowCloud: true)
         let ids = journal.jobs.map(\.id)
         try journal.update(ids[0]) { try $0.begin(); try $0.exported(); try $0.recordPrimary(UUID(), duplicate: true); try $0.confirmVerifiedReceipt() }
         try journal.update(ids[1]) { $0.fail(.network) }

@@ -2,6 +2,8 @@
 
 ## Backup continuity and responsiveness, 2026-11-26
 
+On 9cd18d9, run45750821522 passes compilation, offline contracts, formatting, API98/24 suites and the new continuity suite (large index2.368s, historical zero-export0.362s, scan cancellation0.002s). Full app execution fails in existing backup fixtures and in editing/batch/Steam tests. Backup fixtures now specify capture order and reset the real-request observation gate; their original expectations remain. A green full-app/CI or real-device claim is still unavailable.
+
 CI on e33e1aa still stops at test compilation: the baseline album-header finite-measurement assertion has the same Testing KeyPath/rethrows issue already repaired in backup tests. Its collection query now runs before the unchanged Boolean assertion. No test has been removed, and this is not runtime acceptance.
 
 The available first-five candidate 0d5b4d4 now gates all three backup entrypoints on a complete account-scoped continuity preflight before original export. Read-only official SQLite imports reuse cached checksums, historical misses remain review-only, and genuinely new sources require complete current metadata without an existing association. Scans move off the UI executor and remain cancellable; queue display is paginated. No successful-upload or complete compound-media receipt is invented for a duplicate primary. The new SQLite/Checker/Worker and large-history tests await this head's GitHub CI. See [behavior and limits](backup-continuity-validation.md). Mac-local d2d94bed was unavailable; no signing, device acceptance, server deployment, official sync acknowledgement or parent promotion is claimed.
