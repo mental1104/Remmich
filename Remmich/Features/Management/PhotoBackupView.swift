@@ -184,7 +184,7 @@ struct PhotoBackupView: View {
     private var configurationView: some View {
         NavigationStack {
             Form {
-                Section("Selected Albums") {
+                Section {
                     Button("读取手机相簿…") { Task { await backup.loadAlbums() } }
                         .disabled(backup.loadingAlbums || loadingQueue)
                     if loadingQueue {
@@ -210,12 +210,16 @@ struct PhotoBackupView: View {
                         .disabled(loadingQueue)
                     exclusionChoices
                         .disabled(loadingQueue)
+                } header: {
+                    Text("Selected Albums")
                 } footer: {
                     Text("Changes to album selection are saved when you scan.")
                 }
-                Section("iCloud") {
+                Section {
                     Toggle("允许下载 iCloud 原片（可能使用移动数据）", isOn: $backup.allowCloud)
                         .disabled(loadingQueue)
+                } header: {
+                    Text(verbatim: "iCloud")
                 } footer: {
                     Text("Matched items skip original downloads and uploads. Unconfirmed items stay skipped for review.")
                 }

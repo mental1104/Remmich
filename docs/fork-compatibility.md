@@ -2,6 +2,8 @@
 
 ## Unified Me tab and application language, 2026-11-26
 
+First UI run45777358192 on1ace237 passes formatting/contracts but stops at app compilation: the backup settings used a title-string Section with a footer, which has no matching SwiftUI overload. Both sections now use explicit header/footer views. No tests executed in that run; the correction and conditional-label follow-up await the new head's full CI.
+
 The primary tab order is Photos, Videos, Library, Search, Me. Me remains rightmost, including timeline-range layouts. Albums and Collections share the Library tab but keep distinct navigation stacks and active-page identities. Account, backup, matching, connection, index/cache, and language settings move to Me; Library no longer hosts an expanding account overlay. Backup configuration and recovery details are separated from the current progress and primary actions. No permission, cancellation, upload admission, persistent receipt, or API contract is relaxed.
 
 Conditional button and status titles are resolved at their String presentation boundary as well as literal SwiftUI labels. During backup execution, only live Worker progress is shown; the last saved cold cumulative summary is hidden until the run stops, so old counts cannot be mistaken for current results.
