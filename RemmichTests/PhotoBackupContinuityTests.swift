@@ -370,9 +370,9 @@ struct PhotoBackupServerMatchingTests {
         let line = try String(decoding: JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n"
         // 服务端可同时有旧官方元组和本次原片来源；另一设备应选中当前元组，重复当前元组仍须拒绝。
         let stale = try LocalMediaMobileMetadata(cloudId: origin.metadata.cloudId, createdAt: origin.metadata.createdAt?.addingTimeInterval(1),
-                                                adjustmentTime: origin.metadata.adjustmentTime, latitude: origin.metadata.latitude, longitude: origin.metadata.longitude)
+                                                 adjustmentTime: origin.metadata.adjustmentTime, latitude: origin.metadata.latitude, longitude: origin.metadata.longitude)
         var oldEvent = event
-        oldEvent["data"] = ["assetId": assetID, "key": "mobile-app", "value": try JSONSerialization.jsonObject(with: JSONEncoder().encode(stale))]
+        oldEvent["data"] = try ["assetId": assetID, "key": "mobile-app", "value": JSONSerialization.jsonObject(with: JSONEncoder().encode(stale))]
         let oldLine = try String(decoding: JSONSerialization.data(withJSONObject: oldEvent), as: UTF8.self) + "\n"
         let empty = continuityEmptyStream()
         let http = ChecksumLookupHTTPFixture(exchanges: [empty[0],
