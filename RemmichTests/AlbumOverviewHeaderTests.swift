@@ -54,7 +54,9 @@ struct AlbumOverviewHeaderTests {
         for width in [CGFloat.zero, -1, .nan, .infinity, 44, 80] {
             let layout = AlbumOverviewHeaderLayout(availableWidth: width, scopeWidth: .nan, rowHeight: .nan, searchExpanded: true)
             for frame in [layout.scopeFrame, layout.searchFrame, layout.optionsFrame] {
-                #expect([frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite))
+                // 在Testing宏外解析KeyPath/rethrows，仍对同一矩形的四个测量值逐项验证有限性。
+                let measurementsAreFinite = [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+                #expect(measurementsAreFinite)
                 #expect(frame.minX >= 0 && frame.minY >= 0 && frame.width > 0 && frame.height > 0)
             }
             #expect(!layout.searchFrame.intersects(layout.optionsFrame))

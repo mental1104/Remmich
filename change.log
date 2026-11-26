@@ -1,5 +1,7 @@
 ## 2026-11-26: Backup continuity and responsive scans
 
+- CI45749730318（e33e1aa）备份测试宏错误已消除，继续暴露基线相簿标题测试同类KeyPath/rethrows编译问题；相同方式移出宏，保持四个矩形值检查。全测试目录已核对无其余allSatisfy KeyPath宏；未缩减CI。
+
 - CI45748889476（56b6f04）仅剩自动恢复测试的allSatisfy KeyPath/rethrows宏编译错误；将原集合查询移出宏后仍逐项检查云下载许可，未改变生产路径或删除断言，等待新提交执行结果。
 
 - CI45747253383（2fe9958）继续暴露测试编译：新增网络替身须显式MainActor，账号退休断言须匹配非Equatable错误case，既有异步读取宏及局部重名需修正。统一将51处备份测试异步读取移到原断言前的独立快照作用域，保留读取顺序和全部283条相簿同步expect/require；未知未来格式仍拒绝。新待核查写入沿用已安装版historyNeedsReview标记，避免产生不必要的新回退格式。大历史测试增加整批逆序查询，防止平方复杂度回归。
