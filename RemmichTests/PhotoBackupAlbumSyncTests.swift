@@ -1033,7 +1033,7 @@ struct PhotoBackupAlbumSyncTests {
             _ = try await fixture.store.setPhotoBackupAlbumSyncAutomaticEnabled(true, scope: fixture.scope)
             let exporter = AlbumAutomationExporter(directory: fixture.root.appending(path: "system-original"), expected: fixture.photos.source)
             let background = PhotoBackupController(store: fixture.store, exporter: exporter, albumScanner: { try fixture.photos.albums($0) },
-                                                   authorizationStatus: { .authorized }, observeAutomaticPhotos: false)
+                                                   authorizationStatus: { .authorized }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
             await background.load(using: fixture.manager)
             await background.setBackgroundAutomaticEnabled(true, using: fixture.manager)
             let upload = try #require(background.runSystemBackground(using: fixture.manager))
@@ -1814,7 +1814,7 @@ private nonisolated let albumSyncLocalJPEGDigest = "WJwiM1o4HxItEpIl9cC6MFbtWBE=
         }
         AlbumSyncURLProtocol.install(server, endpoint: endpoint)
         manager.configure(session: session, endpoint: endpoint); matching.configure(using: manager, scope: scope)
-        let backup = PhotoBackupController(store: store, albumScanner: { try photos.albums($0) }, authorizationStatus: { photos.authorization == .full ? .authorized : .denied }, observeAutomaticPhotos: false)
+        let backup = PhotoBackupController(store: store, albumScanner: { try photos.albums($0) }, authorizationStatus: { photos.authorization == .full ? .authorized : .denied }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
         await backup.load(using: manager)
         let sync = Self.controller(matching: matching, photos: photos, database: database)
         self.root = root; self.database = database; self.endpoint = endpoint; self.session = session; self.scope = scope; self.store = store

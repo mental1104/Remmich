@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 当前账号的持久前台备份入口；扫描与上传分开确认，离开前台只暂停，不删除手机或服务器资源。
 struct PhotoBackupView: View {
@@ -14,6 +15,8 @@ struct PhotoBackupView: View {
     @State private var retryID: UUID?
     @State private var resumesUnattempted = false
     @State private var confirmationOwner: UUID?
+    @State private var importsHistory = false
+    @State private var visibleJobs = 100
 
     /// controller提供当前鉴权通道，backup由Media统一持有，页面草稿/手动任务与前台自动化共享同一持久队列事实。
     /// albumSync/albumAutomation同由Media持有；页面只借用，关闭页面不能销毁正在运行的自动规则。
@@ -29,6 +32,7 @@ struct PhotoBackupView: View {
             Form {
                 Section("前台备份") {
                     Text(backup.status)
+                    Text(backup.continuityStatus).font(.footnote).foregroundStyle(.secondary)
                     Text("队列及回执按账户保存。手动备份离开本页会停止；前台自动备份进入后台会停止。系统后台备份须另行开启并等待 iOS 调度。不会删除或修改手机原片。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
@@ -37,6 +41,8 @@ struct PhotoBackupView: View {
                             Task { await backup.stopManually(using: controller) }
                         }
                     } else {
+                        Button("导入 Immich 备份记录") { importsHistory = true }
+                            .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil)
                         Button("重新读取备份队列") {
                             guard queueReadTask == nil else { return }
                             // 按钮创建的Task须随页面/账号退役取消，不能依赖SwiftUI只取消首次.task读取。
@@ -115,7 +121,7 @@ struct PhotoBackupView: View {
                 PhotoBackupAlbumSyncSection(sync: albumSync, manager: controller, backup: backup, automatic: albumAutomation)
                 if !backup.running, !backup.jobs.isEmpty {
                     Section("当前账户队列（\(backup.jobs.count) 项）") {
-                        ForEach(Array(backup.jobs.enumerated()), id: \.element.id) { index, job in
+                        ForEach(Array(backup.jobs.prefix(visibleJobs).enumerated()), id: \.element.id) { index, job in
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("第 \(index + 1) 项 · \(job.source.kind.rawValue) · \(job.stage.rawValue)")
                                 if let reason = job.failure {
@@ -133,6 +139,9 @@ struct PhotoBackupView: View {
                                     .disabled(loadingQueue || backup.configuringAutomatic || controller.busy)
                                 }
                             }
+                        }
+                        if visibleJobs < backup.jobs.count {
+                            Button("显示后续任务") { visibleJobs += 100 }
                         }
                     }
                 }
@@ -156,6 +165,10 @@ struct PhotoBackupView: View {
                 }
             }
             .task { await reloadBackupQueue() }
+            .fileImporter(isPresented: $importsHistory, allowedContentTypes: [.database, .data]) { result in
+                guard case let .success(url) = result else { return }
+                Task { await backup.importHistory(from: url, using: controller) }
+            }
             .onChange(of: controller.generation) { _, _ in
                 queueReadTask?.cancel(); backup.cancelPageWork()
                 // Media负责自动实例的账号退役；旧页面迟到的dismiss不能取消已接管新账号的自动任务。

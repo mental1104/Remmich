@@ -66,6 +66,30 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         return try JSONDecoder().decode(MediaExportJournal.self, from: Data(json.utf8))
     }
 
+    /// history只能来自本账号显式导入；原子保存完整接续记录，不写源SQLite或已有备份回执，移除账号后拒绝重建。
+    func savePhotoBackupHistory(_ history: PhotoBackupHistory, scope: MediaAccountScope) throws {
+        try Task.checkCancellation(); try history.validate(scope: scope)
+        let data = try JSONEncoder().encode(history)
+        guard data.count <= 134_217_728, let json = String(data: data, encoding: .utf8) else { throw PhotoBackupContinuityError.invalidHistory }
+        let db = try preparedDatabase(scope: scope)
+        try db.execute("CREATE TABLE IF NOT EXISTS main.photo_backup_history(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE,payload TEXT NOT NULL)")
+        try Task.checkCancellation()
+        try db.execute("INSERT INTO main.photo_backup_history(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload", [.text(scope.cacheNamespace), .text(json)])
+    }
+
+    /// scope固定为当前认证账号；旧库无记录返回nil，损坏/跨账号数据抛错，不能据此回退为全库新上传。
+    func loadPhotoBackupHistory(scope: MediaAccountScope) throws -> PhotoBackupHistory? {
+        try Task.checkCancellation()
+        guard try canRead(scope) else { return nil }
+        let db = try preparedDatabase(scope: scope)
+        guard try db.scalarInt64("SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='photo_backup_history'") == 1,
+              let json = try db.scalarText("SELECT payload FROM main.photo_backup_history WHERE scope=?", [.text(scope.cacheNamespace)]) else { return nil }
+        guard json.utf8.count <= 134_217_728 else { throw PhotoBackupContinuityError.invalidHistory }
+        let history = try JSONDecoder().decode(PhotoBackupHistory.self, from: Data(json.utf8))
+        try history.validate(scope: scope); try Task.checkCancellation()
+        return history
+    }
+
     /// scope来自当前认证账号；读取该账号原片备份日志，不存在时返回空日志，不重建已移除账号。
     /// 旧版本/损坏或跨namespace的日志抛错，调用方不得以空值覆盖恢复资料。
     func loadPhotoBackups(scope: MediaAccountScope) throws -> PhotoBackupJournal {

@@ -296,7 +296,7 @@ private nonisolated let recoveryMotionID = "33333333-3333-4333-8333-333333333333
         })
         manager.configure(session: session, endpoint: endpoint)
         let controller = PhotoBackupController(store: store, exporter: exporter, albumScanner: { try port.scan($0) },
-                                               authorizationStatus: { port.authorization }, observeAutomaticPhotos: false)
+                                               authorizationStatus: { port.authorization }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
         self.root = root; self.database = database; self.endpoint = endpoint; self.session = session; self.scope = scope
         self.store = store; self.port = port; self.exporter = exporter; self.server = server; self.manager = manager; self.controller = controller
         var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
@@ -326,7 +326,7 @@ private nonisolated let recoveryMotionID = "33333333-3333-4333-8333-333333333333
     /// store/exporter为冷恢复依赖，沿用同保存相簿/权限adapter，不访问系统Photos。
     func makeController(store: SQLiteLibraryIndexStore, exporter: NetworkRecoveryExporter) -> PhotoBackupController {
         let port = port
-        return .init(store: store, exporter: exporter, albumScanner: { try port.scan($0) }, authorizationStatus: { port.authorization }, observeAutomaticPhotos: false)
+        return .init(store: store, exporter: exporter, albumScanner: { try port.scan($0) }, authorizationStatus: { port.authorization }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
     }
 
     /// 等待原自动生命周期退役，不改用户同意或已持久回执。

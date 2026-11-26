@@ -225,6 +225,11 @@ final nonisolated class LibraryMutationClient: Sendable {
     /// queries为最多64个不重复nonce的本机完整字节摘要；官方precheck只查现有资源，accept仅返回未命中，绝不上传。
     /// 精确200、逐ID唯一回执及duplicate/isTrashed必须完整；结果仍须调用方fresh owner/版本/编辑状态验证。
     @concurrent func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
+        try await lookupBackupChecksums(queries.map { try .init(id: $0.id, checksum: $0.digest.sha1Base64) })
+    }
+
+    /// queries来自已导入缓存或实际字节摘要；仅共享官方只读查询编码与严格回执验证，不将缓存升级为本机证明。
+    @concurrent func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
         guard queries.count <= LocalMediaChecksumQuery.batchLimit,
               Set(queries.map(\.id)).count == queries.count else { throw LocalPhotoChecksumError.invalidInput }
         guard !queries.isEmpty else { return [] }
@@ -253,7 +258,7 @@ final nonisolated class LibraryMutationClient: Sendable {
         }
         // 官方根对象；不能用其他数组或空响应冒充所有资源未命中。
         struct Response: Decodable { let results: [Item] }
-        let body = Body(assets: queries.map { .init(id: $0.id.uuidString.lowercased(), checksum: $0.digest.sha1Hex) })
+        let body = Body(assets: queries.map { .init(id: $0.id.uuidString.lowercased(), checksum: $0.sha1Hex) })
         let data = try await send("POST", ["assets", "bulk-upload-check"], body: JSONEncoder().encode(body), expectedStatus: 200)
         guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
         let results = try JSONDecoder().decode(Response.self, from: data).results

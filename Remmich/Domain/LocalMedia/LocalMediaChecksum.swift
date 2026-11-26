@@ -106,6 +106,21 @@ nonisolated struct LocalMediaChecksumQuery: Equatable, Sendable {
     }
 }
 
+/// 官方缓存提供的查询摘要；与本轮读取完整字节的LocalPhotoByteDigest分开，不虚构文件大小或原片证明。
+nonisolated struct PhotoBackupCachedChecksumQuery: Sendable {
+    let id: UUID
+    let sha1Hex: String
+
+    /// checksum须为规范20字节Base64 SHA1，id是本轮nonce；坏摘要拒绝进入HTTP请求。
+    init(id: UUID = UUID(), checksum: String) throws {
+        guard let bytes = Data(base64Encoded: checksum), bytes.count == 20, bytes.base64EncodedString() == checksum else {
+            throw LocalPhotoChecksumError.invalidDigest
+        }
+        self.id = id
+        sha1Hex = bytes.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
 /// bulk-upload-check只是查找；accept为未命中，trashed不能关联，existing还必须fresh检查owner/类型/离线/编辑和checksum。
 nonisolated struct LocalMediaChecksumLookup: Equatable, Sendable {
     /// 不暴露action=accept为上传指令，避免匹配流程误入备份队列。

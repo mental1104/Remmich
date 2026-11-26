@@ -1,3 +1,10 @@
+## 2026-11-26: Backup continuity and responsive scans
+
+- 从可取得的0d5b4d4继续；Photos枚举/排序移出UI线程、支持枚举中取消，队列分页与缓存恢复摘要限制大图库页面开销。
+- 官方SQLite只读导入并隔离账号；手动、前台自动和系统后台在导出前完整核查缓存checksum及真正新源，历史未命中/歧义/未知不下载原片、不盲目上传。已有主体不伪造完整Live/RAW回执。见docs/backup-continuity-validation.md。
+- 新增真实SQLite/Importer/Checker/Worker测试及88,187项索引、批量、失败、取消场景；当前等待本提交GitHub CI编译和执行。没有把NAS格式检查或旧Mac安装当作运行验收。
+- Mac本地d2d94bed未取得；不修改服务器、生产数据、官方同步检查点或父gitlink。真实手机/iCloud及后台调度仍待设备验收。
+
 ## 2026-11-25: Freeze the first five development stages in one candidate
 
 - Source: codex/integrate-remmich-management at3e18319, normal merge0d30e95. Retain all management/iPad/browsing slices, traceable RAW pickaf5c22a, network73d6f10 and actual automatic organization/processing lease bridge. Product source merges automatically; both additive record histories remain. Upstream672f02e/serverv3.4.2 unchanged; no upstream sync or API/database/official-client contract change.

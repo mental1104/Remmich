@@ -670,7 +670,7 @@ struct PhotoBackupSystemBackgroundTests {
         let port = AutomaticBackupPhotoPort()
         self.port = port
         controller = PhotoBackupController(store: store, exporter: exporter, albumLoader: { try await port.requestAlbums() },
-                                           albumScanner: { try port.scan($0) }, authorizationStatus: { port.authorization }, observeAutomaticPhotos: false)
+                                           albumScanner: { try port.scan($0) }, authorizationStatus: { port.authorization }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
     }
 
     /// 真实客户端只能进入本例私有URLProtocol，没有进程全局注册或真实网络后备。
@@ -737,7 +737,7 @@ struct PhotoBackupSystemBackgroundTests {
     func coldController() -> PhotoBackupController {
         PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: database), exporter: exporter,
                               albumLoader: { [port] in try await port.requestAlbums() }, albumScanner: { [port] in try port.scan($0) },
-                              authorizationStatus: { [port] in port.authorization }, observeAutomaticPhotos: false)
+                              authorizationStatus: { [port] in port.authorization }, observeAutomaticPhotos: false, preflight: SyntheticBackupPreflight())
     }
 
     /// 记录实际新恢复任务，保证取消/超时也等待其Worker退役。

@@ -215,7 +215,8 @@ import Testing
         await controller.load(using: account.manager)
         await controller.loadAlbums()
         let scan = controller.scan(using: account.manager)
-        #expect(scan == nil && !controller.running && exporter.calls == 0)
+        await scan?.value
+        #expect(scan != nil && !controller.running && exporter.calls == 0)
         #expect(controller.selected == ["all"] && controller.excluded == ["private"])
         let after = try await store.loadPhotoBackups(scope: account.scope)
         #expect(try encoder.encode(after) == before)

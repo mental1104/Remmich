@@ -44,8 +44,10 @@ nonisolated struct PhotoBackupRunResult: Sendable {
     }
 
     /// scope/userID固定为本轮认证身份，allowCloud固定为用户此次确认的选择；validateContext在每次await前后检查代际。
+    /// preflight为Controller整批核查的完整许可；nil仅保留低层独立Worker测试入口，产品Controller始终提供计划。
     /// progress只发布当前任务及安全计数；调用者仍须检查代际。取消、存储错误或未知上传结果停止后续自动上传。
     func run(scope: MediaAccountScope, userID: String, allowCloud: Bool, client: any PhotoBackupUploading,
+             preflight: PhotoBackupPreflightPlan? = nil,
              validateContext: @MainActor () throws -> Void,
              progress: @MainActor (PhotoBackupJob, PhotoBackupRunResult) -> Void) async throws -> PhotoBackupRunResult
     {
@@ -55,6 +57,17 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                 try checkContext(validateContext)
                 guard var job = try await store.nextQueuedPhotoBackup(scope: scope) else { break }
                 try checkContext(validateContext)
+                if let preflight, !preflight.allowed.contains(job.source) {
+                    // 已有主体仅暂停，不伪造完整上传回执；未知历史单独失败，任何一种都不能进入Exporter。
+                    if preflight.existing.contains(job.source) {
+                        job.pause()
+                    } else {
+                        job.fail(.historyUnconfirmed)
+                    }
+                    try await checkpoint(job, scope: scope, validateContext: validateContext)
+                    progress(job, result)
+                    continue
+                }
                 try job.begin()
                 try await checkpoint(job, scope: scope, validateContext: validateContext)
                 progress(job, result)

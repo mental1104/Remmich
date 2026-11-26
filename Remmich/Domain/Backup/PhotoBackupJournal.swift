@@ -17,7 +17,7 @@ nonisolated struct PhotoBackupSource: Codable, Hashable, Sendable {
 /// 备份失败的可持久化原因，不保存token、原始HTTP响应或私人文件路径。
 nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
     case interrupted, sourceMissing, sourceChanged, unsupportedResources, permission, network
-    case livePhotoMismatch, unconfirmedResponse, unavailable, storage
+    case livePhotoMismatch, unconfirmedResponse, unavailable, storage, historyUnconfirmed
 
     /// 返回安全可展示的原因；中断/网络错误也必须经用户明确恢复后再查重。
     var message: String {
@@ -32,6 +32,7 @@ nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
         case .unconfirmedResponse: "The server did not confirm the complete backup. Reload before retrying."
         case .unavailable: "The account or endpoint is unavailable."
         case .storage: "The backup state could not be saved. No new upload will start."
+        case .historyUnconfirmed: "The previous backup could not be confirmed. No original was downloaded or uploaded."
         }
     }
 }

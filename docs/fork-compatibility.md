@@ -1,5 +1,9 @@
 # Client and server maintenance
 
+## Backup continuity and responsiveness, 2026-11-26
+
+The available first-five candidate 0d5b4d4 now gates all three backup entrypoints on a complete account-scoped continuity preflight before original export. Read-only official SQLite imports reuse cached checksums, historical misses remain review-only, and genuinely new sources require complete current metadata without an existing association. Scans move off the UI executor and remain cancellable; queue display is paginated. No successful-upload or complete compound-media receipt is invented for a duplicate primary. The new SQLite/Checker/Worker and large-history tests await this head's GitHub CI. See [behavior and limits](backup-continuity-validation.md). Mac-local d2d94bed was unavailable; no signing, device acceptance, server deployment, official sync acknowledgement or parent promotion is claimed.
+
 ## First-five development candidate, 2026-11-25
 
 The combined candidate now contains network73d6f10 and automatic processing0d30e95 over management/RAW3e18319. Development1–5 is100%;6/7 remains0% (71.4% equal-weight total), with runtime acceptance deferred. Whole-range NAS lint passes0/459 with1 existing skip, four Bash syntax checks and diff pass. Newly added Swift tests and real devices remain unexecuted;29d searchCI45556521240 still has two unresolved phone-panel failures. No new macOS chain, API/server/official-mobile/production change or parentgitlink promotion. See [the exact scope and verification limits](first-five-development-candidate.md); older per-slice “not integrated” statements below are historical snapshots.

@@ -61,9 +61,8 @@ import Photos
     private(set) var automaticRunning = false
     private(set) var configuringAutomatic = false
     /// 当前列表可恢复上限与跳过原因；实际继续前仍重新读取SQLite和完整保存相簿规则。
-    var unattemptedSummary: PhotoBackupUnattemptedSummary {
-        .init(jobs: jobs)
-    }
+    private(set) var unattemptedSummary = PhotoBackupUnattemptedSummary(jobs: [])
+    private(set) var continuityStatus = "先导入官方 Immich 备份记录，再核查已有项目。"
 
     /// 只暴露当前已加载、无草稿且没有备份/配置写入的门禁，不向组织页面传递账号凭据或私有存储。
     func hasCurrentSavedSelection(using manager: LibraryManagementController) -> Bool {
@@ -73,8 +72,9 @@ import Photos
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let exporter: any PhotoBackupResourceExporting
+    @ObservationIgnored private let preflight: any PhotoBackupPreflighting
     @ObservationIgnored private let albumLoader: @MainActor () async throws -> AlbumCatalog
-    @ObservationIgnored private let albumScanner: @MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot]
+    @ObservationIgnored private let albumScanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private var configurationScope: MediaAccountScope?
     @ObservationIgnored private var applyingConfiguration = false
     @ObservationIgnored private var automaticTask: Task<Void, Never>?
@@ -100,14 +100,16 @@ import Photos
     /// authorizationStatus只查询已有授权，自动周期不得请求授权；observeAutomaticPhotos为false时仅关闭系统变更观察供隔离测试。
     init(store: SQLiteLibraryIndexStore = .init(), exporter: any PhotoBackupResourceExporting = PhotoKitBackupResourceExporter(),
          albumLoader: (@MainActor () async throws -> AlbumCatalog)? = nil,
-         albumScanner: (@MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot])? = nil,
+         albumScanner: (@MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot])? = nil,
          authorizationStatus: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
-         observeAutomaticPhotos: Bool = true)
+         observeAutomaticPhotos: Bool = true,
+         preflight: (any PhotoBackupPreflighting)? = nil)
     {
         self.store = store
         self.exporter = exporter
+        self.preflight = preflight ?? PhotoBackupContinuityChecker(store: store)
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
-        self.albumScanner = albumScanner ?? Self.albumSnapshots
+        self.albumScanner = albumScanner ?? { ids in try await Self.albumSnapshots(for: ids) }
         self.authorizationStatus = authorizationStatus
         self.observeAutomaticPhotos = observeAutomaticPhotos
     }
@@ -203,7 +205,7 @@ import Photos
     }
 
     /// manager须与已读取配置属于同一账号；显式扫描保留顺序/回执，配置与任务原子保存后才允许单独点击继续。
-    /// 返回持久化任务供调用方等待完整退役；nil表示读取/选择门禁拒绝或同步扫描失败，没有写入或上传。
+    /// 返回持久化任务供调用方等待完整退役；nil表示前置门禁拒绝。Photos枚举异步执行，失败不更新队列。
     @discardableResult
     func scan(using manager: LibraryManagementController) -> Task<Void, Never>? {
         guard !running, !configuringAutomatic, hasLoadedAlbums, !loadingAlbums, !selected.isEmpty, let scope = manager.backupScope else { return nil }
@@ -213,19 +215,19 @@ import Photos
         let excludedIDs = excluded
         let cloud = allowCloud
         guard albumIDs.union(excludedIDs).isSubset(of: Set(albums.map(\.id))) else { status = "请先重新读取手机相簿，确认包含和排除的选择仍可访问。"; return nil }
-        let scan: PhotoBackupAlbumScan
-        do {
-            let selection = try PhotoBackupAlbumSelection(included: albumIDs, excluded: excludedIDs)
-            scan = try selection.scan(albumScanner(albumIDs.union(excludedIDs)))
-        } catch {
-            status = "相簿不可访问或扫描期间照片发生变化，未更新队列；请重新读取并扫描。"
-            return nil
-        }
         running = true
+        status = "正在核查所选相簿，可随时暂停。"
         task = Task {
             defer { running = false; task = nil; requestAutomaticWork() }
             do {
+                // 先发布运行状态再枚举；大图库读取不占UI线程，暂停会传播到实际扫描任务。
+                let selection = try PhotoBackupAlbumSelection(included: albumIDs, excluded: excludedIDs)
+                let snapshots = try await albumScanner(albumIDs.union(excludedIDs))
+                let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                guard selected == albumIDs, excluded == excludedIDs, allowCloud == cloud else { throw CancellationError() }
                 let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                    try Task.checkCancellation()
                     try Self.validate(manager, owner: owner, scope: scope)
                     var journal = try await store.loadPhotoBackups(scope: scope)
                     try Self.validate(manager, owner: owner, scope: scope)
@@ -248,31 +250,46 @@ import Photos
     /// ids为包含与排除相簿的并集；先重新确认每个集合可访问，避免旧PHAssetCollection消失被当作空排除。
     /// 返回仅含授权源版本/日期的快照；不导出文件、不下载iCloud，集合缺失或前后权限等级变化时在队列写入前抛错。
     /// 这是本轮可见成员的冻结选择，不宣称跨集合原子快照或后续limited成员变化通知；执行前仍由exporter核对当前源。
-    static func albumSnapshots(for ids: Set<String>) throws -> [PhotoBackupAlbumSnapshot] {
+    @concurrent static func albumSnapshots(for ids: Set<String>) async throws -> [PhotoBackupAlbumSnapshot] {
+        try Task.checkCancellation()
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { throw AlbumReadError.permission }
         let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: ids.sorted(), options: nil)
         var byID: [String: PHAssetCollection] = [:]
         for index in 0 ..< collections.count {
+            try Task.checkCancellation()
             let collection = collections.object(at: index)
             byID[collection.localIdentifier] = collection
         }
         guard ids.allSatisfy({ byID[$0] != nil }) else { throw PhotoBackupAlbumSelectionError.unavailableAlbum }
-        let snapshots: [PhotoBackupAlbumSnapshot] = ids.sorted().compactMap { id in
+        let snapshots: [PhotoBackupAlbumSnapshot] = try ids.sorted().compactMap { id in
+            try Task.checkCancellation()
             guard let collection = byID[id] else { return nil }
             let assets = PHAsset.fetchAssets(in: collection, options: nil)
             var values: [PhotoBackupScannedAsset] = []
             for index in 0 ..< assets.count {
-                let asset = assets.object(at: index)
-                guard asset.mediaType == .image || asset.mediaType == .video else { continue }
-                let source = PhotoKitBackupResourceExporter.source(for: asset)
-                values.append(.init(source: source, capturedAt: asset.creationDate))
+                try Task.checkCancellation()
+                // 每项释放Photos临时对象，避免数万项资源描述积留到整次枚举结束。
+                autoreleasepool {
+                    let asset = assets.object(at: index)
+                    guard asset.mediaType == .image || asset.mediaType == .video else { return }
+                    let source = PhotoKitBackupResourceExporter.source(for: asset)
+                    values.append(.init(source: source, capturedAt: asset.creationDate))
+                }
             }
             return .init(id: id, assets: values)
         }
         // 枚举前后由系统确认同一权限等级，避免把撤销权限后的空排除集合与先前已读包含资源混合保存。
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == authorization else { throw AlbumReadError.permission }
         return snapshots
+    }
+
+    /// selection为冻结包含/排除规则，snapshots只含可发送值；去重排序在通用执行器运行，返回完整计划或取消错误。
+    @concurrent static func planAlbumScan(_ selection: PhotoBackupAlbumSelection, snapshots: [PhotoBackupAlbumSnapshot]) async throws -> PhotoBackupAlbumScan {
+        try Task.checkCancellation()
+        let scan = try selection.scan(snapshots)
+        try Task.checkCancellation()
+        return scan
     }
 
     /// manager须与已读取配置属于同一认证账号；jobID非nil只重试指定任务，nil恢复可重试项，已完成历史不会重传。
@@ -372,7 +389,9 @@ import Photos
                         try Task.checkCancellation()
                         guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
                         let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
-                        let scan = try selection.scan(self.albumScanner(selection.included.union(selection.excluded)))
+                        let snapshots = try await self.albumScanner(selection.included.union(selection.excluded))
+                        let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
+                        try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                         guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
                         if mode.isBackground {
                             guard self.backgroundAutomaticEnabled else { throw CancellationError() }
@@ -386,9 +405,11 @@ import Photos
                     self.total = journal.jobs.count { $0.stage == .queued }
                     let cloud = journal.allowCloud
                     // management占用整个执行周期，防止多个窗口同时通过同一写通道执行队列。
-                    return try await manager.perform(publishChange: false) { _ in
-                        try await PhotoBackupWorker(store: store, exporter: exporter).run(
+                    return try await manager.perform(publishChange: false) { [journal] _ in
+                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client)
+                        return try await PhotoBackupWorker(store: store, exporter: exporter).run(
                             scope: scope, userID: client.userID, allowCloud: cloud, client: client,
+                            preflight: plan,
                             validateContext: {
                                 try Self.validate(manager, owner: owner, scope: scope)
                                 if mode.onlyUnattempted {
@@ -494,7 +515,39 @@ import Photos
         backgroundAutomaticEnabled = journal.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
         configurationScope = scope
         jobs = journal.jobs
+        unattemptedSummary = .init(jobs: journal.jobs)
         total = jobs.count
+    }
+
+    /// url来自用户选定的官方导出；manager绑定当前认证身份。只读导入并原子保存，失败保留原接续快照和队列。
+    func importHistory(from url: URL, using manager: LibraryManagementController) async {
+        guard !running, !configuringAutomatic, !manager.busy, let scope = manager.backupScope else { return }
+        let owner = manager.generation
+        configuringAutomatic = true
+        defer { configuringAutomatic = false }
+        do {
+            let history = try await PhotoBackupHistoryImporter.read(url, scope: scope)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            try await store.savePhotoBackupHistory(history, scope: scope)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            continuityStatus = "已导入 \(history.records.count) 项记录。已有项目只核查，不重新下载原片。"
+        } catch { showFailure(error, manager: manager, owner: owner) }
+    }
+
+    /// journal是Coordinator内固定的实际待执行队列；完整在线核查通过才发放Worker许可，每个await后继续核原账号。
+    private func prepareContinuity(_ journal: PhotoBackupJournal, manager: LibraryManagementController, owner: UUID,
+                                   scope: MediaAccountScope, client: LibraryMutationClient) async throws -> PhotoBackupPreflightPlan
+    {
+        let queued = journal.jobs.filter { $0.stage == .queued }
+        let plan = try await preflight.plan(jobs: queued, scope: scope, client: client, progress: { [self] done, total in
+            continuityStatus = "正在核查 \(done) / \(total) 项，可随时暂停。"
+        }, validateContext: {
+            try Self.validate(manager, owner: owner, scope: scope)
+        })
+        try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+        try plan.validate(sources: Set(queued.map(\.source)))
+        continuityStatus = "服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，待核查 \(plan.review.count) 项。"
+        return plan
     }
 
     /// owner/scope必须仍属于manager当前认证上下文；不检查Task取消，供worker取消清理判断是否仍可落盘。
@@ -505,7 +558,15 @@ import Photos
     /// error只影响原代际界面，不向用户显示私人PhotoKit标识或底层响应正文。
     private func showFailure(_ error: any Error, manager: LibraryManagementController, owner: UUID) {
         guard manager.generation == owner else { return }
-        status = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
+        if let error = error as? PhotoBackupContinuityError {
+            switch error {
+            case .importRequired: status = "请先导入官方 Immich 备份记录；本次没有下载或上传原片。"
+            case .wrongAccount: status = "备份记录属于其他账户，未导入。"
+            default: status = "接续核查未完成；记录与队列保留，本次没有开始上传。"
+            }
+        } else {
+            status = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
+        }
     }
 }
 
@@ -784,7 +845,8 @@ extension PhotoBackupController {
                         guard journal.foregroundAutomaticEnabled == true else { throw CancellationError() }
                         journal.recoverInterrupted()
                         let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
-                        let scan = try selection.scan(albumScanner(selection.included.union(selection.excluded)))
+                        let snapshots = try await albumScanner(selection.included.union(selection.excluded))
+                        let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                         try journal.applyAutomaticAlbumScan(scan)
                         if networkRecovery, journal.foregroundNetworkRecoveryEnabled == true {
@@ -799,9 +861,12 @@ extension PhotoBackupController {
                         guard let client = manager.client else { throw LibraryWriteError.unavailable }
                         let cloud = journal.allowCloud
                         let attempted = Set(journal.jobs.filter { $0.stage == .queued }.map(\.id))
-                        let result = try await manager.perform(publishChange: false) { [self] _ in
-                            try await PhotoBackupWorker(store: store, exporter: exporter).run(
+                        let result = try await manager.perform(publishChange: false) { [self, journal] _ in
+                            let plan = try await prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client)
+                            try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                            return try await PhotoBackupWorker(store: store, exporter: exporter).run(
                                 scope: scope, userID: client.userID, allowCloud: cloud, client: client,
+                                preflight: plan,
                                 // cleanup仍须在Task取消后保存安全暂停；正常Worker检查点先检查Task取消。
                                 validateContext: {
                                     try Self.validate(manager, owner: owner, scope: scope)

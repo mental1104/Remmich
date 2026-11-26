@@ -101,7 +101,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
     }
 
     /// 扫描只读取公开资源描述；仅明确无调整双原图升级source类型，其他复杂形状仍走原有明确拒绝路径。
-    static func source(for asset: PHAsset) -> PhotoBackupSource {
+    nonisolated static func source(for asset: PHAsset) -> PhotoBackupSource {
         let pair: PhotoBackupRawJPEGSource? = if asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive),
                                                  let modified = asset.modificationDate, modified.timeIntervalSince1970.isFinite
         {
@@ -115,7 +115,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
     }
 
     /// asset资源必须完整恰两份；公开type/UTI各自确认，不使用私有isCurrent或资源数组位置。
-    fileprivate static func rawJPEGSource(for asset: PHAsset) throws -> PhotoBackupRawJPEGSource {
+    fileprivate nonisolated static func rawJPEGSource(for asset: PHAsset) throws -> PhotoBackupRawJPEGSource {
         let values = PHAssetResource.assetResources(for: asset).map { resource in
             PhotoBackupOriginalImage(kind: resource.type == .photo ? .photo : resource.type == .alternatePhoto ? .alternatePhoto : .unsupported,
                                      uniformTypeIdentifier: resource.uniformTypeIdentifier, originalFilename: resource.originalFilename,
