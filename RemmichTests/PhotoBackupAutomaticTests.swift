@@ -407,7 +407,9 @@ struct PhotoBackupUnattemptedRecoveryTests {
             #expect(resumed.jobs.map(\.stage) == [.failed, .completed] && resumed.jobs.map(\.attempts) == [1, 1])
             #expect(resumed.foregroundAutomaticEnabled == false && fixture.server.counts == [2, 1])
             #expect(fixture.exporter.observations.map(\.localID) == ["first", "unattempted-tail"])
-            #expect(fixture.exporter.observations.allSatisfy(\.allowCloud))
+            // 先执行rethrows集合查询，避免Testing宏把KeyPath谓词误推断成抛错闭包；仍逐项检查云下载许可。
+            let allExportsAllowedCloud = fixture.exporter.observations.allSatisfy(\.allowCloud)
+            #expect(allExportsAllowedCloud)
             let failed = try #require(resumed.jobs.first?.id)
             await fixture.retry(failed, using: cold)?.value
             let verified = try await fixture.coldJournal()
