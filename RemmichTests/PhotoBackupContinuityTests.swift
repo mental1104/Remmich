@@ -282,8 +282,8 @@ struct PhotoBackupServerMatchingTests {
                                    requestContentTypePrefix: "multipart/form-data; boundary="))
         }
         let serverDigest = mode == "wrong-digest" ? continuityChecksum : digest
-        // Worker将回执解析为UUID后使用uuidString回读，路径保持其大写形式；响应仍保留原始wire身份。
-        exchanges.append(.init(method: "GET", path: "assets/" + id.uppercased(), status: 200, json: continuityUploadedAsset(id: id, checksum: serverDigest, kind: kind)))
+        // Worker内部使用UUID.uuidString，HTTP边界必须统一回服务端权限集合采用的小写，不能放宽夹具来掩盖问题。
+        exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: serverDigest, kind: kind)))
         if mode != "wrong-digest" {
             exchanges.append(continuityOriginWrite(fails: mode == "metadata-failure"))
         }
@@ -291,7 +291,7 @@ struct PhotoBackupServerMatchingTests {
         if mode == "metadata-failure" {
             exchanges += continuityEmptyStream()
             exchanges.append(continuityOriginalCheck(id: id, duplicate: true))
-            exchanges.append(.init(method: "GET", path: "assets/" + id.uppercased(), status: 200, json: continuityUploadedAsset(id: id, checksum: digest, kind: kind)))
+            exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: digest, kind: kind)))
             exchanges.append(continuityOriginWrite())
         }
         let http = ChecksumLookupHTTPFixture(exchanges: exchanges)
@@ -333,6 +333,7 @@ struct PhotoBackupServerMatchingTests {
             let body = try #require(try JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
             let items = try #require(body["items"] as? [[String: Any]])
             let item = try #require(items.first)
+            #expect(item["assetId"] as? String == id)
             let originValue = try #require(item["value"])
             let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: JSONSerialization.data(withJSONObject: originValue))
             #expect(item["key"] as? String == PhotoBackupOrigin.metadataKey(for: "cloud-fresh"))
@@ -378,7 +379,7 @@ struct PhotoBackupServerMatchingTests {
         let empty = continuityEmptyStream()
         let http = ChecksumLookupHTTPFixture(exchanges: [empty[0],
                                                          .init(method: "POST", path: "sync/stream", status: 200, json: oldLine + line + empty[1].json, contentType: "application/jsonlines+json"),
-                                                         .init(method: "GET", path: "assets/" + assetID.uppercased(), status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
+                                                         .init(method: "GET", path: "assets/" + assetID, status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
                                                          continuityOriginWrite()])
         defer { http.close() }
         let client = try #require(http.manager.client)
@@ -408,6 +409,7 @@ struct PhotoBackupServerMatchingTests {
         let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
         let items = try #require(object["items"] as? [[String: Any]])
         let marker = try #require(items.first?["value"] as? [String: Any])
+        #expect(items.first?["assetId"] as? String == assetID)
         #expect(items.first?["key"] as? String == "remmich-icloud-match" && marker["byteVerified"] as? Bool == false)
     }
 

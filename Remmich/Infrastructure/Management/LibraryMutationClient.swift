@@ -295,20 +295,20 @@ final nonisolated class LibraryMutationClient: Sendable {
         // 独立key允许未来字节证明并存；false明确本次只有ID/元数据证据，不能被当作哈希验证。
         // 固定版本/方法和完整标识；byteVerified始终false，不接收调用方声称的字节证明。
         struct Value: Codable, Equatable { let version: Int; let method: String; let iCloudId: String; let byteVerified: Bool }
-        // 单个已核验服务端身份及独立元数据key，不写资产内容或官方mobile-app字段。
-        struct Item: Codable { let assetId: UUID; let key: String; let value: Value }
+        // assetId显式编码为小写字符串，不能使用UUID的默认大写编码；不写资产内容或官方mobile-app字段。
+        struct Item: Codable { let assetId: String; let key: String; let value: Value }
         // 官方批量元数据接口的完整请求信封。
         struct Body: Encodable { let items: [Item] }
         let key = "remmich-icloud-match"
         let items = matches.sorted { $0.key.uuidString < $1.key.uuidString }.map {
-            Item(assetId: $0.key, key: key, value: .init(version: 1, method: "icloud-id", iCloudId: $0.value, byteVerified: false))
+            Item(assetId: $0.key.uuidString.lowercased(), key: key, value: .init(version: 1, method: "icloud-id", iCloudId: $0.value, byteVerified: false))
         }
         let data = try await send("PUT", ["assets", "metadata"], body: JSONEncoder().encode(Body(items: items)), expectedStatus: 200)
         guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
         let returned = try JSONDecoder().decode([Item].self, from: data)
-        guard returned.count == items.count, Set(returned.map(\.assetId)) == Set(matches.keys) else { throw LibraryWriteError.malformedResponse }
+        guard returned.count == items.count, Set(returned.compactMap { UUID(uuidString: $0.assetId) }) == Set(matches.keys) else { throw LibraryWriteError.malformedResponse }
         for item in returned {
-            guard item.key == key, let cloud = matches[item.assetId],
+            guard item.key == key, let id = UUID(uuidString: item.assetId), let cloud = matches[id],
                   item.value == Value(version: 1, method: "icloud-id", iCloudId: cloud, byteVerified: false) else { throw LibraryWriteError.malformedResponse }
         }
         try Task.checkCancellation()
@@ -317,17 +317,17 @@ final nonisolated class LibraryMutationClient: Sendable {
     /// assetID为本轮fresh确认的主体，origin绑定本机云身份与实际原片摘要；保存到每云ID独立key并核对完整响应。
     @concurrent func recordBackupOrigin(assetID: UUID, origin: PhotoBackupOrigin) async throws {
         try origin.validate()
-        _ = try validID(assetID.uuidString)
+        let canonicalID = try validID(assetID.uuidString)
         // 一次只写一个经过原片验证的来源，多个云ID对同一资产使用不同key，不覆盖官方或其他来源。
-        struct Item: Codable { let assetId: UUID; let key: String; let value: PhotoBackupOrigin }
+        struct Item: Codable { let assetId: String; let key: String; let value: PhotoBackupOrigin }
         // 复用官方批量元数据接口的信封，不改资产内容、同步ACK或服务端协议。
         struct Body: Encodable { let items: [Item] }
-        let item = Item(assetId: assetID, key: PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId), value: origin)
+        let item = Item(assetId: canonicalID, key: PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId), value: origin)
         let data = try await send("PUT", ["assets", "metadata"], body: JSONEncoder().encode(Body(items: [item])), expectedStatus: 200)
         guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
         let returned = try JSONDecoder().decode([Item].self, from: data)
         guard returned.count == 1, let actual = returned.first,
-              actual.assetId == assetID, actual.key == item.key, actual.value == origin else { throw LibraryWriteError.malformedResponse }
+              UUID(uuidString: actual.assetId) == assetID, actual.key == item.key, actual.value == origin else { throw LibraryWriteError.malformedResponse }
         try Task.checkCancellation()
     }
 
@@ -360,9 +360,11 @@ final nonisolated class LibraryMutationClient: Sendable {
         return try decoder.finish()
     }
 
+    /// value为服务端实体UUID；返回小写规范形式，避免权限集合与数据库返回的小写ID比较时拒绝有效资源。
+    /// 只规范UUID，不处理Photos/iCloud不透明标识；无效输入仍在请求前拒绝。
     private func validID(_ value: String) throws -> String {
-        guard UUID(uuidString: value) != nil else { throw LibraryWriteError.invalidID }
-        return value
+        guard let id = UUID(uuidString: value) else { throw LibraryWriteError.invalidID }
+        return id.uuidString.lowercased()
     }
 
     private func request(_ method: String, _ components: [String]) throws -> URLRequest {

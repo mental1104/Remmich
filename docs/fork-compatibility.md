@@ -2,6 +2,8 @@
 
 ## No-import uploads and durable iCloud origins, 2026-11-26
 
+Server-source review found that UUID route validation preserves case and requireAccess compares requested strings with database-returned UUID strings. The client now canonicalizes entity UUIDs to lowercase at validID and explicitly emits lowercase assetId strings for both new metadata writes; response identities remain validated as UUIDs. Strict lowercase GET fixtures and lowercase metadata-body assertions cover this production boundary. The previous fixture-only uppercase expectations are superseded; no server/API/authorization rule is relaxed. These production changes await their own CI.
+
 Resumed from f10aa4f's focused result: compilation and API98/24 pass, six of seven focused suites pass, but the new upload chain stops because the strict fixture expects lowercase UUID asset paths while the Worker uses UUID.uuidString (uppercase). Three expected GET paths now match the actual requests; response identities and all checksum/upload/origin/recovery/cross-device assertions remain unchanged. No production ID normalization or transport relaxation was added. End-to-end acceptance remains pending the correction's CI.
 
 The existing ready-PR workflow now runs a focused backup/matching selection and uploads its actual log/result bundle before the complete App stage. It requires the two critical suite pass records to reject zero-test filtering mistakes. All original API/full-App/two-device-UI checks, triggers and draft protection remain. This gives the user's primary acceptance an independent early result without hiding existing baseline failures.
