@@ -558,6 +558,7 @@ struct LibraryIndexSynchronizationTests {
         #expect(snapshot.assets.first?.livePhotoVideoID == "live-photo-motion")
     }
 
+    /// 在实际全量校验中收集progress，核对Live主体和视频计数；回调显式标注，避免绑定到零参数验证器。
     @Test func fullReconciliationPublishesLivePhotoAndVideoCounts() async throws {
         let fixture = try IndexFixture()
         defer { fixture.cleanup() }
@@ -569,9 +570,9 @@ struct LibraryIndexSynchronizationTests {
         let recorder = IndexProgressRecorder()
         let synchronizer = LibraryIndexSynchronizer(source: source, store: store)
 
-        _ = try await synchronizer.fullSyncAndVerify(scope: Self.scope) { progress in
+        _ = try await synchronizer.fullSyncAndVerify(scope: Self.scope, progress: { progress in
             await recorder.append(progress)
-        }
+        })
 
         let progressValues = await recorder.values
         let finalProgress = try #require(progressValues.last)

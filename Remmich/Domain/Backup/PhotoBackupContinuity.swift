@@ -87,12 +87,14 @@ nonisolated struct PhotoBackupHistoryIndex: Sendable {
         byCloudID = clouds; ambiguousCloudIDs = duplicateClouds
     }
 
-    /// source必须与官方缓存的修改时刻完全一致；只有规范Base64 SHA1能进入bulk查询，未知不读取原片补哈希。
+    /// 官方iOS把Photos修改时刻截为Int64秒；这里只按相同精度选择缓存查询候选，不冒充当前原片字节证明。
+    /// source为当前版本，cloudID仅用于本机ID缺失时回退；歧义、跨秒变化或坏SHA1均不读取原片补哈希。
     func query(for source: PhotoBackupSource, cloudID: String? = nil) -> PhotoBackupCachedChecksumQuery? {
         let record = byLocalID[source.localID] ?? cloudID.flatMap { ambiguousCloudIDs.contains($0) ? nil : byCloudID[$0] }
         guard !ambiguous.contains(source.localID), let record,
               let modified = source.modifiedAt, let previous = record.modifiedAt,
-              abs(modified.timeIntervalSince(previous)) < 0.001,
+              modified.timeIntervalSince1970.isFinite, previous.timeIntervalSince1970.isFinite,
+              modified.timeIntervalSince1970.rounded(.towardZero) == previous.timeIntervalSince1970.rounded(.towardZero),
               let checksum = record.checksum, let bytes = Data(base64Encoded: checksum), bytes.count == 20,
               bytes.base64EncodedString() == checksum else { return nil }
         return try? .init(checksum: checksum)

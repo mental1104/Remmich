@@ -429,7 +429,8 @@ private final nonisolated class NetworkRecoveryURLProtocol: URLProtocol, @unchec
     override func startLoading() {
         if let host = request.url?.host, let server = Self.servers.withLock({ $0[host] }), let gate = server.gate {
             let request = request
-            let task = Task { [self] in
+            // 显式可发送闭包只捕获已有线程安全边界；取消及响应退役握手继续真实执行。
+            let task = Task { @Sendable [self] in
                 var held = false
                 do {
                     try Task.checkCancellation(); held = await gate.beforeResponse(); try Task.checkCancellation()

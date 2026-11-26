@@ -35,6 +35,7 @@ struct PhotoBackupContinuityTests {
         #expect(index.query(for: continuitySource("asset-0")) == nil)
         #expect(index.query(for: continuitySource("asset-88186"))?.sha1Hex == String(repeating: "01", count: 20))
         #expect(index.query(for: continuitySource("asset-1", modified: 11)) == nil)
+        #expect(index.query(for: continuitySource("asset-1", modified: 10.75)) != nil)
         #expect(index.query(for: continuitySource("other-phone"), cloudID: "cloud-1") != nil)
         #expect(index.query(for: continuitySource("missing")) == nil)
     }
