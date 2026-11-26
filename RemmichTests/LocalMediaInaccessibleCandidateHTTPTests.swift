@@ -17,7 +17,8 @@ import Testing
         #expect(fixture.controller.association(assetID: inaccessibleFirst.uuidString, revision: inaccessibleRevision) == nil)
         #expect(fixture.controller.total == 2 && fixture.controller.scanned == 2 && fixture.controller.unmatched == 1)
         #expect(fixture.controller.metadataMatches == (path == "metadata" ? 1 : 0) && fixture.controller.checksumMatches == (path == "checksum" ? 1 : 0))
-        #expect(fixture.controller.metadataFailures == 0 && fixture.controller.status.contains("已完成") && !fixture.controller.running)
+        let complete = L10n.language.resolvedCode() == "zh-Hans" ? "已完成" : "Matching is complete"
+        #expect(fixture.controller.metadataFailures == 0 && fixture.controller.status.contains(complete) && !fixture.controller.running)
         let saved = try await fixture.store.load(scope: fixture.scope)
         #expect(saved?.enabled == true && saved?.associations == [second])
         let coldManager = LibraryManagementController()
@@ -59,7 +60,8 @@ import Testing
         #expect(fixture.controller.association(assetID: inaccessibleFirst.uuidString, revision: inaccessibleRevision) == fixture.seed)
         #expect(fixture.controller.association(assetID: inaccessibleSecond.uuidString, revision: inaccessibleRevision) == nil)
         #expect(fixture.controller.revision == revision && fixture.controller.unmatched == 0 && !fixture.controller.running)
-        #expect(fixture.controller.status.contains("未完成"))
+        let incomplete = L10n.language.resolvedCode() == "zh-Hans" ? "未完成" : "incomplete"
+        #expect(fixture.controller.status.contains(incomplete))
         let saved = try await fixture.store.load(scope: fixture.scope)
         #expect(saved?.associations == [fixture.seed])
         let requests = await fixture.http.script.requests()

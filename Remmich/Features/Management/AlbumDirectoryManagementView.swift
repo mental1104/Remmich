@@ -26,7 +26,7 @@ struct AlbumDirectoryManagementView: View {
                         Text(notice).foregroundStyle(.secondary)
                     }
                     if let error = store.error {
-                        Text(error).foregroundStyle(.red)
+                        Text(L10n.string(error)).foregroundStyle(.red)
                     }
                     if store.isLoading {
                         ProgressView("Loading directory")
@@ -114,7 +114,7 @@ struct AlbumDirectoryManagementView: View {
             }), titleVisibility: .visible, presenting: pending) { plan in
                 Button("Confirm", role: deletionRole(plan.command)) { store.start(plan, manager: controller); pending = nil }
                 Button("Cancel", role: .cancel) { pending = nil }
-            } message: { plan in Text(plan.message) }
+            } message: { plan in Text(L10n.string(plan.message)) }
         }
         .interactiveDismissDisabled(store.isWorking)
     }

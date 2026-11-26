@@ -51,11 +51,11 @@ struct AlbumOverviewHeader<Search: View, Options: View>: View {
     private var scopeMenu: some View {
         Menu {
             Picker("Album Scope", selection: $scope) {
-                ForEach(AlbumScope.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(AlbumScope.allCases) { Text(L10n.string($0.rawValue)).tag($0) }
             }
         } label: {
             HStack(spacing: 8) {
-                Text(scope.rawValue).font(.system(size: fontSize, weight: .medium))
+                Text(L10n.string(scope.rawValue)).font(.system(size: fontSize, weight: .medium))
                 Image(systemName: "chevron.up.chevron.down").font(.system(size: 16))
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }

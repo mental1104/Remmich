@@ -38,7 +38,7 @@ struct PhotoBackupAlbumSyncSection: View {
                 .font(.footnote).foregroundStyle(.secondary)
             if sync.running {
                 ProgressView("已核对 \(sync.processed) 组，完整确认 \(sync.confirmed) 组")
-                Button(automatic.enabled ? "停止并关闭自动相簿同步" : "停止相簿组织", role: .destructive) {
+                Button(L10n.string(automatic.enabled ? "停止并关闭自动相簿同步" : "停止相簿组织"), role: .destructive) {
                     sync.cancel()
                     if automatic.enabled || automatic.running {
                         Task { await automatic.setEnabled(false, using: manager) }

@@ -55,7 +55,7 @@ struct MapsPlacesSettingsView: View {
                     .disabled(isTesting)
                 }
                 if let message {
-                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                    Text(L10n.string(message)).font(.footnote).foregroundStyle(.secondary)
                 }
             }
             Divider()
@@ -73,7 +73,7 @@ struct MapsPlacesSettingsView: View {
                         Text(countryName(code))
                         Spacer()
                         Picker("Language for \(countryName(code))", selection: languageBinding(code)) {
-                            ForEach(PlaceLanguage.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                            ForEach(PlaceLanguage.allCases, id: \.self) { Text(L10n.string($0.rawValue)).tag($0) }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)

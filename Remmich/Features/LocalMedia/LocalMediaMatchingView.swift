@@ -15,7 +15,7 @@ struct LocalMediaMatchingView: View {
             }
             Section("匹配状态") {
                 Text(controller.status).accessibilityIdentifier("local-media-status")
-                LabeledContent("照片权限", value: permissionLabel)
+                LabeledContent("照片权限", value: L10n.string(permissionLabel))
                 LabeledContent("已检查本机项目", value: "\(controller.scanned) / \(controller.total)")
                 LabeledContent("元数据关联", value: "\(controller.metadataMatches)")
                 LabeledContent("本机校验和关联", value: "\(controller.checksumMatches)")
@@ -29,7 +29,7 @@ struct LocalMediaMatchingView: View {
                     ProgressView()
                     Button("停止扫描", role: .cancel) { controller.cancel() }.accessibilityIdentifier("local-media-cancel")
                 } else {
-                    Button(controller.enabled ? "重新扫描已授权照片" : "启用并扫描照片") { controller.scan(using: manager) }
+                    Button(L10n.string(controller.enabled ? "重新扫描已授权照片" : "启用并扫描照片")) { controller.scan(using: manager) }
                         .disabled(manager.client == nil).accessibilityIdentifier("local-media-scan")
                 }
             }

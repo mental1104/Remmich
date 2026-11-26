@@ -73,7 +73,7 @@ struct OnboardingView: View {
                         GlassEffectContainer(spacing: 16) {
                             connectionCard
                         }
-                        Label("Remmich never changes anything in your Immich library.", systemImage: "lock.shield")
+                        Label("Back up and manage your library with explicit controls.", systemImage: "lock.shield")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -118,7 +118,7 @@ struct OnboardingView: View {
             Text("Remmich")
                 .font(.largeTitle.bold())
                 .accessibilityAddTraits(.isHeader)
-            Text("Your \(Text("Re").fontWeight(.heavy))adonly I\(Text("mmich").fontWeight(.heavy)) Library")
+            Text("Photo Backup, Edits & Library")
                 .font(.system(.callout, design: .rounded).weight(.medium))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

@@ -21,7 +21,7 @@ struct AlbumSharingView: View {
                     Text("选择已有服务器账户共享相簿。成员变更会影响其他客户端；不会删除照片或修改原片。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if let error = store.error {
-                        Text(error).foregroundStyle(.red)
+                        Text(L10n.string(error)).foregroundStyle(.red)
                     }
                     if let notice = store.notice {
                         Text(notice).foregroundStyle(.secondary)

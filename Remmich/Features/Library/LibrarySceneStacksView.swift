@@ -97,7 +97,7 @@ struct LibrarySceneStacksView: View {
             ProgressView("Loading photos and scene evidence")
         }
         if let error = store.error {
-            Text(error).foregroundStyle(.red).accessibilityIdentifier("scene-stacks-error")
+            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("scene-stacks-error")
         }
         switch store.availability {
         case .unsupported?: Text("This server does not provide scene grouping. All photos remain visible.").foregroundStyle(.secondary)

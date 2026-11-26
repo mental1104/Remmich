@@ -57,7 +57,8 @@ import Testing
         let operation = try #require(fixture.controller.scan(using: fixture.manager)); await operation.value
         let association = try #require(fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision))
         #expect(association.source == .checksum && fixture.controller.metadataMatches == 0 && fixture.controller.checksumMatches == 1)
-        #expect(fixture.controller.metadataFailures == 1 && fixture.controller.status.contains("元数据不可用"))
+        let warning = L10n.language.resolvedCode() == "zh-Hans" ? "元数据不可用" : "metadata is unavailable"
+        #expect(fixture.controller.metadataFailures == 1 && fixture.controller.status.contains(warning))
         let calls = await remote.calls
         #expect(calls == ["metadata", "checksum", "asset"] && checksum.requests == 1)
         let document = try await fixture.store.load(scope: fixture.scope)
@@ -70,7 +71,8 @@ import Testing
         let remote = MatchRemote(records: [], asset: matchAsset(), metadataMode: "cancelled")
         let fixture = try matchFixture(directory: directory, remote: remote)
         let operation = try #require(fixture.controller.scan(using: fixture.manager)); await operation.value
-        #expect(fixture.controller.metadataFailures == 0 && fixture.checksum.requests == 0 && fixture.controller.status.contains("已停止"))
+        let stopped = L10n.language.resolvedCode() == "zh-Hans" ? "已停止" : "stopped"
+        #expect(fixture.controller.metadataFailures == 0 && fixture.checksum.requests == 0 && fixture.controller.status.contains(stopped))
         let calls = await remote.calls
         #expect(calls == ["metadata"] && fixture.controller.metadataMatches == 0 && fixture.controller.checksumMatches == 0)
     }

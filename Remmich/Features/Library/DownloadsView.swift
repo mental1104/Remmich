@@ -219,7 +219,7 @@ struct DownloadsView: View {
             if let message = exports.message {
                 ContentUnavailableView {
                     Label("Downloads Unavailable", systemImage: "exclamationmark.circle")
-                } description: { Text(message) } actions: {
+                } description: { Text(L10n.string(message)) } actions: {
                     Button("Try Again") { exports.retryLoading() }
                 }
             } else {
@@ -238,7 +238,7 @@ struct DownloadsView: View {
                                                  confirm: { removingJob = job.id }, remove: { removeHistory(job.id) }))
         }
         if let message = exports.message {
-            Text(message).font(.footnote).foregroundStyle(.secondary)
+            Text(L10n.string(message)).font(.footnote).foregroundStyle(.secondary)
         }
     }
 
@@ -268,7 +268,7 @@ struct DownloadsView: View {
                         .truncationMode(.middle)
                         .contentTransition(.opacity)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(job.tier.rawValue)
+                    Text(L10n.string(job.tier.rawValue))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize()
                 }
@@ -602,7 +602,7 @@ private struct MediaExportQualityView: View {
                     .buttonStyle(.plain)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: media.exports.activeJob(assetID: asset.id)?.id)
                     if let message = media.exports.message {
-                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                        Text(L10n.string(message)).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal, 20)

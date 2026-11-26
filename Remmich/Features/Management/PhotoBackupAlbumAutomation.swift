@@ -7,7 +7,12 @@ import Photos
     private(set) var enabled = false
     private(set) var configuring = false
     private(set) var running = false
-    private(set) var status = "自动相簿同步默认关闭；仅前台或已开启系统后台时使用保存的映射与相簿规则。"
+    /// 当前语言只影响展示；保留原任务、源版本和账号代际。
+    var status: String {
+        L10n.text(statusMessage)
+    }
+
+    private(set) var statusMessage: String.LocalizationValue = "自动相簿同步默认关闭；仅前台或已开启系统后台时使用保存的映射与相簿规则。"
     @ObservationIgnored private let sync: PhotoBackupAlbumSyncController
     @ObservationIgnored private let backup: PhotoBackupController
     @ObservationIgnored private let matching: LocalMediaMatchController
@@ -95,10 +100,10 @@ import Photos
             if value {
                 suppressedScopes.remove(scope.cacheNamespace)
             }
-            status = value ? "已开启自动增量补入；仅前台或有效系统后台备份租约处理安全新关系，不创建或重试未知/失败/取消项。" : "自动规则已关闭并保存；已发送请求仍可能已保存，其他实例在下次检查时停止，不回滚已有成员。"
+            statusMessage = value ? "已开启自动增量补入；仅前台或有效系统后台备份租约处理安全新关系，不创建或重试未知/失败/取消项。" : "自动规则已关闭并保存；已发送请求仍可能已保存，其他实例在下次检查时停止，不回滚已有成员。"
         } catch {
             if manager.generation == owner {
-                status = "自动相簿开关未确认保存；请重读并明确设置，不自动扩大同步范围。"
+                statusMessage = "自动相簿开关未确认保存；请重读并明确设置，不自动扩大同步范围。"
             }
         }
         await previous?.value
@@ -163,7 +168,7 @@ import Photos
         enabled = saved.automaticEnabled && !suppressedScopes.contains(scope.cacheNamespace)
         guard enabled else { monitor?.stop(); monitor = nil; return true }
         let access = authorization()
-        guard access == .authorized || access == .limited else { status = "自动相簿等待已有照片授权；不主动弹框，不从iCloud或Immich下载原片。"; return false }
+        guard access == .authorized || access == .limited else { statusMessage = "自动相簿等待已有照片授权；不主动弹框，不从iCloud或Immich下载原片。"; return false }
         if active, observePhotos, monitor == nil {
             monitor = LocalPhotoChangeMonitor { [weak self] in self?.contentsChanged() }
         }
@@ -173,15 +178,15 @@ import Photos
         await sync.load(using: manager, backup: backup); try check()
         guard let preparation = sync.prepare(using: manager, backup: backup, automatic: true, validateExternal: check) else { pending = true; return false }
         try await awaitOwned(preparation); try check()
-        guard sync.prepared else { status = sync.status; return false }
+        guard sync.prepared else { statusMessage = sync.statusMessage; return false }
         let planned = sync.previewCount
         guard planned > 0 else {
-            sync.cancel(); status = "本次没有安全的新相簿关系；失败/未知/取消及部分回执仍保留手动核查。"
+            sync.cancel(); statusMessage = "本次没有安全的新相簿关系；失败/未知/取消及部分回执仍保留手动核查。"
             return true
         }
         guard let work = sync.synchronize(using: manager, backup: backup, automatic: true, validateExternal: check) else { pending = true; return false }
         try await awaitOwned(work); try check()
-        status = sync.status
+        statusMessage = sync.statusMessage
         return sync.processed == planned && sync.confirmed == planned
     }
 
@@ -232,7 +237,7 @@ import Photos
                 } catch {
                     guard epoch == run, manager.generation == owner else { return }
                     running = false
-                    status = "本轮自动相簿已停止；未知/失败/取消项保留，需手动核查，不自动重放。"
+                    statusMessage = "本轮自动相簿已停止；未知/失败/取消项保留，需手动核查，不自动重放。"
                     return
                 }
             }

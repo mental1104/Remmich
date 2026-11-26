@@ -220,6 +220,8 @@ nonisolated struct PhotoBackupUnattemptedSummary: Sendable {
     let attemptedOrUnconfirmed: Int
     let cancelled: Int
     let completed: Int
+    /// 只计服务端身份匹配，不将其解释为新上传成功。
+    let matched: Int
 
     /// jobs来自当前账号完整冷快照；取消/失败和任何未完成尝试/回执都阻断同localID的新任务自动或批量重放。
     init(jobs: [PhotoBackupJob]) {
@@ -235,6 +237,7 @@ nonisolated struct PhotoBackupUnattemptedSummary: Sendable {
         failed = jobs.count { $0.stage == .failed }
         cancelled = jobs.count { $0.stage == .cancelled }
         completed = jobs.count { $0.stage == .completed || $0.stage == .existing }
+        matched = jobs.count { $0.stage == .existing }
         attemptedOrUnconfirmed = jobs.count - eligibleJobIDs.count - failed - cancelled - completed
     }
 }

@@ -107,7 +107,7 @@ struct AssetMetadataView: View {
                 Text(notice).foregroundStyle(.secondary)
             }
             if let error = store.error {
-                Text(error).foregroundStyle(.red)
+                Text(L10n.string(error)).foregroundStyle(.red)
             }
             if store.isLoading {
                 ProgressView("Loading current metadata")

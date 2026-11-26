@@ -192,7 +192,7 @@ struct AssetViewerInfoView: View {
                         ContentUnavailableView {
                             Label("Information Unavailable", systemImage: "exclamationmark.circle")
                         } description: {
-                            Text(message)
+                            Text(L10n.string(message))
                         } actions: {
                             Button("Try Again", action: retry)
                                 .buttonStyle(.borderedProminent)
@@ -321,7 +321,7 @@ struct AssetViewerInfoView: View {
                                 .accessibilityIdentifier("asset-viewer-media-origin")
                         }
                         if case let .failed(message)? = fullResolutionState {
-                            Text(message)
+                            Text(L10n.string(message))
                                 .font(.caption2)
                                 .foregroundStyle(.red)
                                 .accessibilityIdentifier("asset-viewer-full-resolution-error")

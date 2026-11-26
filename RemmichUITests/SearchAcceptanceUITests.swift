@@ -2,6 +2,60 @@ import XCTest
 
 /// 在独立DEBUG宿主验证真实搜索视图；全部账号、结果和像素为本地合成资料。
 final class SearchAcceptanceUITests: XCTestCase {
+    /// 真实UIKit底栏保持五项，“我的”最右；相簿和分类共享图库且记住子页选择。
+    @MainActor func testUnifiedProfileAndLibraryNavigation() {
+        let app = launchProfile(language: "en")
+        let tabs = app.tabBars.firstMatch
+        XCTAssertTrue(tabs.buttons["Me"].waitForExistence(timeout: 10))
+        XCTAssertEqual(tabs.buttons.count, 5)
+        XCTAssertTrue(tabs.buttons["Photos"].exists)
+        XCTAssertTrue(tabs.buttons["Videos"].exists)
+        XCTAssertGreaterThan(tabs.buttons["Me"].frame.midX, tabs.buttons["Search"].frame.midX)
+        tabs.buttons["Library"].tap()
+        XCTAssertTrue(element("library-section-picker", in: app).waitForExistence(timeout: 5))
+        app.segmentedControls.buttons["Collections"].tap()
+        XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
+        tabs.buttons["Me"].tap()
+        XCTAssertTrue(element("my-language", in: app).waitForExistence(timeout: 5))
+        capture("profile-english", app: app)
+        tabs.buttons["Library"].tap()
+        XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
+        capture("library-collections-english", app: app)
+    }
+
+    /// 中文启动后在应用内切回英文，保留当前导航并验证冷启动语言偏好；不修改设备语言。
+    @MainActor func testChineseProfileAndExplicitEnglishSwitch() {
+        let suite = "profile-language-ui-" + UUID().uuidString
+        let app = launchProfile(language: "zh-Hans", preferencesSuite: suite)
+        let tabs = app.tabBars.firstMatch
+        XCTAssertTrue(tabs.buttons["我的"].waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(tabs.buttons["我的"].frame.midX, tabs.buttons["搜索"].frame.midX)
+        tabs.buttons["我的"].tap()
+        element("my-language", in: app).tap()
+        XCTAssertTrue(element("app-language-picker", in: app).waitForExistence(timeout: 5))
+        capture("profile-language-chinese", app: app)
+        app.staticTexts["English"].tap()
+        XCTAssertTrue(tabs.buttons["Me"].waitForExistence(timeout: 5))
+        XCTAssertTrue(tabs.buttons["Me"].isSelected)
+        XCTAssertTrue(element("app-language-settings", in: app).exists)
+        capture("profile-language-switched-english", app: app)
+        app.terminate()
+        let restored = launchProfile(language: nil, preferencesSuite: suite)
+        XCTAssertTrue(restored.tabBars.buttons["Me"].waitForExistence(timeout: 10))
+    }
+
+    /// language仅在显式DEBUG宿主中设置应用偏好；nil保留上次选择以验证重启恢复。
+    @MainActor private func launchProfile(language: String?, preferencesSuite: String = "profile-ui-" + UUID().uuidString) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing-profile"]
+        app.launchEnvironment["REMMICH_UI_TEST_PREFERENCES_SUITE"] = preferencesSuite
+        if let language {
+            app.launchEnvironment["REMMICH_UI_TEST_LANGUAGE"] = language
+        }
+        app.launch()
+        return app
+    }
+
     /// 单个断言失败即停止，避免后续手势污染首个失败证据。
     override func setUpWithError() throws {
         continueAfterFailure = false

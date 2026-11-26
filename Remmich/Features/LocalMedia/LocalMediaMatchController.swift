@@ -34,7 +34,16 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     private(set) var enabled = false
     private(set) var revision = 0
     private(set) var permission = LocalPhotoLibraryAccess.unknown
-    private(set) var status = "点击扫描，关联本机与Immich已有照片；不会上传或删除照片。"
+    /// 当前语言只影响展示；保留原任务、源版本和账号代际。
+    var status: String {
+        L10n.text(statusMessage) + (statusSuffix.map { L10n.text($0) } ?? "")
+    }
+
+    private(set) var statusMessage: String.LocalizationValue = "点击扫描，关联本机与Immich已有照片；不会上传或删除照片。" {
+        didSet { statusSuffix = nil }
+    }
+
+    private var statusSuffix: String.LocalizationValue?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private weak var manager: LibraryManagementController?
@@ -84,7 +93,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             automaticGeneration = nil; monitor?.stop(); monitor = nil
         }
         permission = inventory.authorization
-        status = nextScope == nil ? "请先连接Immich服务器。" : "启用后自动关联本机已有照片，优先本机显示和播放。"
+        statusMessage = nextScope == nil ? "请先连接Immich服务器。" : "启用后自动关联本机已有照片，优先本机显示和播放。"
     }
 
     /// 只返回同账号、同远端精确版本、当前授权范围未变化的已确认项；媒体读取前后仍须核实Photos源版本。
@@ -157,7 +166,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     func cancel() {
         guard running else { return }
         invalidateRun()
-        status = "扫描已停止；保留已确认关联，未完成项目不算匹配成功。"
+        statusMessage = "扫描已停止；保留已确认关联，未完成项目不算匹配成功。"
     }
 
     /// root在media configure/前台恢复后调用；不弹Photos权限。相同代际只恢复/自动刷新一次，正在运行时复用任务。
@@ -206,7 +215,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 }
             } catch {
                 guard generation == run, manager.generation == owner else { return }
-                status = "无法恢复本机关联：\(error.localizedDescription)。未覆盖已有资料。"
+                statusMessage = "无法恢复本机关联：\(error.localizedDescription)。未覆盖已有资料。"
             }
         }
         task = operation; return operation
@@ -252,10 +261,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 let saved = try await persistence.save(document, scope: scope, permit: writePermit)
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
                 guard saved else { return }
-                status = value ? "已保存启用配置；连接服务器后自动匹配。" : "已关闭本机优先，不修改或删除任何照片。"
+                statusMessage = value ? "已保存启用配置；连接服务器后自动匹配。" : "已关闭本机优先，不修改或删除任何照片。"
             } catch {
                 guard generation == run else { return }
-                status = "本次设置已改变，但配置保存失败：\(error.localizedDescription)。"
+                statusMessage = "本次设置已改变，但配置保存失败：\(error.localizedDescription)。"
             }
             if generation == run {
                 task = nil
@@ -280,7 +289,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         permit.invalidate(); permit = LocalMediaSavePermit(); let writePermit = permit
         // 保留已确认映射供当前窗口/离线使用；本轮发现的变更由实际媒体reader复核，不把扫描进度当作完成。
         total = 0; scanned = 0; unmatched = 0; metadataFailures = 0
-        status = "正在确认照片访问权限…"
+        statusMessage = "正在确认照片访问权限…"
         let operation = Task {
             defer {
                 if generation == run {
@@ -320,10 +329,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                             cloudIDs.insert(id)
                         }
                     }
-                    status = "读取本机元数据 \(min(start + 64, ids.count))/\(total)…"
+                    statusMessage = "读取本机元数据 \(min(start + 64, ids.count))/\(total)…"
                     await Task.yield(); try validateContext()
                 }
-                status = "只读匹配Immich元数据…"
+                statusMessage = "只读匹配Immich元数据…"
                 var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
                 if !cloudIDs.isEmpty {
                     do {
@@ -349,7 +358,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                             throw error
                         }
                         metadataFailures += 1
-                        status = "Immich元数据暂不可用，继续仅用本机校验和匹配。"
+                        statusMessage = "Immich元数据暂不可用，继续仅用本机校验和匹配。"
                     }
                 }
                 var confirmedRemoteIDs = Set<UUID>()
@@ -383,7 +392,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                             }
                         }
                         scanned += 1
-                        status = "已检查 \(scanned)/\(total)，仅确认安全可用关联。"
+                        statusMessage = "已检查 \(scanned)/\(total)，仅确认安全可用关联。"
                     }
                     // 当前batch内最多64个本机证明；返回ID集合必须完全对应，noMatch/trashed只统计未确认。
                     if !hashes.isEmpty {
@@ -420,14 +429,14 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 try validateContext()
                 guard saved else { throw CancellationError() }
                 restoredNamespace = scope.cacheNamespace
-                status = permission == .limited ? "已完成当前授权范围匹配并保存；未授权照片未扫描。" : "已完成匹配并保存；下次启动自动恢复，本机优先显示和播放。"
+                statusMessage = permission == .limited ? "已完成当前授权范围匹配并保存；未授权照片未扫描。" : "已完成匹配并保存；下次启动自动恢复，本机优先显示和播放。"
                 if metadataFailures > 0 {
-                    status += " 部分元数据不可用，已独立尝试本机校验和。"
+                    statusSuffix = " 部分元数据不可用，已独立尝试本机校验和。"
                 }
             } catch {
                 guard generation == run, manager.generation == owner, manager.backupScope == scope else { return }
                 self.permission = inventory.authorization
-                status = error is CancellationError ? "扫描已停止，未完成项目不算匹配成功。" : "扫描未完成：\(error.localizedDescription)。只保留已确认关联，可重新扫描。"
+                statusMessage = error is CancellationError ? "扫描已停止，未完成项目不算匹配成功。" : "扫描未完成：\(error.localizedDescription)。只保留已确认关联，可重新扫描。"
             }
         }
         task = operation
@@ -551,7 +560,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         invalidateRun(); associations = [:]; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
         metadataFailures = 0
         permission = inventory.authorization
-        status = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
+        statusMessage = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
         let run = generation; let owner = manager.generation; let writePermit = permit
         changeTask = Task {
             do {
@@ -568,7 +577,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 }
             } catch {
                 guard generation == run else { return }
-                changeTask = nil; status = "照片库已变化，旧关联失效；等待下次可用刷新。"
+                changeTask = nil; statusMessage = "照片库已变化，旧关联失效；等待下次可用刷新。"
             }
         }
     }

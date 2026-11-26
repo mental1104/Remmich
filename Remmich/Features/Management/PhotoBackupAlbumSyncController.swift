@@ -18,7 +18,12 @@ import Photos
         previewIDs.count
     }
 
-    private(set) var status = "先读取目标并明确选择已有自有相簿，再预览和确认补入。只修改相簿关系。"
+    /// 当前语言只影响展示；保留原任务、源版本和账号代际。
+    var status: String {
+        L10n.text(statusMessage)
+    }
+
+    private(set) var statusMessage: String.LocalizationValue = "先读取目标并明确选择已有自有相簿，再预览和确认补入。只修改相簿关系。"
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var loadedScope: MediaAccountScope?
@@ -104,10 +109,10 @@ import Photos
             }
             let localNames = try names(Set(journal.selectedAlbumIDs).union(journal.excludedAlbumIDs ?? []))
             state = saved; targets = values; titles = localNames; loadedScope = scope; prepared = false; previewIDs = []
-            status = "已读取当前账户目标。名称相同也须明确选择；缺失或无权限目标不会自动创建或替换。"
+            statusMessage = "已读取当前账户目标。名称相同也须明确选择；缺失或无权限目标不会自动创建或替换。"
         } catch {
             if generation == run, manager.generation == owner {
-                prepared = false; status = "未能确认相簿组织配置；保留已有映射与恢复资料，请检查授权/连接后重读。"
+                prepared = false; statusMessage = "未能确认相簿组织配置；保留已有映射与恢复资料，请检查授权/连接后重读。"
             }
         }
     }
@@ -136,7 +141,7 @@ import Photos
             }
             saved.version = PhotoBackupAlbumSyncState.currentVersion
             try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
-            state = saved; prepared = false; previewIDs = []; status = "映射已保存。预览后才会补入；解除映射保留远端相簿与现有成员。"
+            state = saved; prepared = false; previewIDs = []; statusMessage = "映射已保存。预览后才会补入；解除映射保留远端相簿与现有成员。"
         }
     }
 
@@ -199,7 +204,7 @@ import Photos
             saved.version = PhotoBackupAlbumSyncState.currentVersion
             try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
             state = saved; previewIDs = planned; previewSelection = selection; unmatched = missing; prepared = true
-            status = "预览 \(planned.count) 个逻辑项目；\(missing) 项待匹配或待完整回执。确认后只补入缺失关系，不上传/下载原片。"
+            statusMessage = "预览 \(planned.count) 个逻辑项目；\(missing) 项待匹配或待完整回执。确认后只补入缺失关系，不上传/下载原片。"
         }
     }
 
@@ -250,7 +255,7 @@ import Photos
                 if operation.phase == .confirmed {
                     confirmed += 1
                 }
-                status = "已核对 \(processed)/\(selected.count) 组，完整确认 \(confirmed) 组。"
+                statusMessage = "已核对 \(processed)/\(selected.count) 组，完整确认 \(confirmed) 组。"
                 if stop {
                     break
                 }
@@ -259,14 +264,14 @@ import Photos
             let final = try await store.loadPhotoBackupAlbumSync(scope: scope); try freshCheck()
             state = final
             manager.publishChanges(ifGeneration: manager.generation)
-            status = "本轮组织已停止或完成；以逐组确认状态为准。未知/部分结果会在下次明确预览后先fresh核查，不自动重发。"
+            statusMessage = "本轮组织已停止或完成；以逐组确认状态为准。未知/部分结果会在下次明确预览后先fresh核查，不自动重发。"
         }
     }
 
     /// 页面关闭/后台/换号撤销当前操作；sending已在HTTP前落盘，迟到结果不能覆盖新上下文。
     func cancel() {
         generation = UUID(); task?.cancel(); prepared = false; monitor?.stop(); monitor = nil
-        status = "相簿组织已停止；映射及部分回执保留，未知项须重新预览核查。"
+        statusMessage = "相簿组织已停止；映射及部分回执保留，未知项须重新预览核查。"
     }
 
     /// 所有明确写流程共用manager忙门和原Coordinator；先取得管理忙门，避免自动备份抢占新组织操作。
@@ -277,7 +282,7 @@ import Photos
         guard !running, !loading, !backup.running, !manager.busy, let scope = manager.backupScope, loadedScope == scope,
               backup.hasCurrentSavedSelection(using: manager) else { return nil }
         let run = generation, owner = manager.generation, access = authorization()
-        guard access == .authorized || access == .limited else { status = "需要已有照片访问权限，未启动组织。"; return nil }
+        guard access == .authorized || access == .limited else { statusMessage = "需要已有照片访问权限，未启动组织。"; return nil }
         running = true
         if observeChanges, monitor == nil {
             monitor = LocalPhotoChangeMonitor { [weak self] in self?.cancel() }
@@ -299,7 +304,7 @@ import Photos
                 }
             } catch {
                 if generation == run, manager.generation == owner {
-                    prepared = false; status = "组织未确认完成；保留已上传状态与关系回执。检查权限/连接或重新预览后继续。"
+                    prepared = false; statusMessage = "组织未确认完成；保留已上传状态与关系回执。检查权限/连接或重新预览后继续。"
                 }
             }
         }
@@ -397,7 +402,7 @@ extension PhotoBackupAlbumSyncController {
             saved.version = PhotoBackupAlbumSyncState.currentVersion; saved.creations.append(intent)
             try await saveCreationState(saved, scope: scope, check: check)
             targets = values
-            status = "创建预览已保存：‘\(intent.name)’。当前有 \(values.count { $0.albumName == intent.name }) 本同名相簿；确认会另建空相簿，不会按名称认领。原目标及成员保留。"
+            statusMessage = "创建预览已保存：‘\(intent.name)’。当前有 \(values.count { $0.albumName == intent.name }) 本同名相簿；确认会另建空相簿，不会按名称认领。原目标及成员保留。"
         }
     }
 
@@ -421,7 +426,7 @@ extension PhotoBackupAlbumSyncController {
                     saved.creations[index].phase = .unknown
                 }
                 try await saveCreationState(saved, scope: scope, check: check)
-                status = saved.creations[index].phase == .rejected ? "创建请求被拒绝。原映射保留；修正权限/输入后可重新预览明确创建。" : "创建结果未知，未重发。请只读重核并明确选择现有目标；同名或新增列表项不能证明是本次创建。"
+                statusMessage = saved.creations[index].phase == .rejected ? "创建请求被拒绝。原映射保留；修正权限/输入后可重新预览明确创建。" : "创建结果未知，未重发。请只读重核并明确选择现有目标；同名或新增列表项不能证明是本次创建。"
                 return
             }
             try check()
@@ -447,7 +452,7 @@ extension PhotoBackupAlbumSyncController {
                 saved.creations[index].phase = .unknown
                 try await saveCreationState(saved, scope: scope, check: check)
                 targets = values
-                status = "已刷新现有目标；无法唯一核实本次创建。请在相簿选择器明确选目标，未按名称认领，也未再次POST。"
+                statusMessage = "已刷新现有目标；无法唯一核实本次创建。请在相簿选择器明确选目标，未按名称认领，也未再次POST。"
             }
         }
     }
@@ -459,7 +464,7 @@ extension PhotoBackupAlbumSyncController {
             guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared else { throw LibraryWriteError.unavailable }
             saved.creations[index].phase = .abandoned
             try await saveCreationState(saved, scope: scope, check: check)
-            status = "未发送的创建预览已取消；没有创建或删除远端相簿。"
+            statusMessage = "未发送的创建预览已取消；没有创建或删除远端相簿。"
         }
     }
 
@@ -481,7 +486,7 @@ extension PhotoBackupAlbumSyncController {
         if !targets.contains(where: { UUID(uuidString: $0.id) == id }) {
             targets.append(fresh)
         }
-        status = "新空相簿已fresh核实并保存映射；原相簿与成员保留。照片仍须另行预览并确认增量补入。"
+        statusMessage = "新空相簿已fresh核实并保存映射；原相簿与成员保留。照片仍须另行预览并确认增量补入。"
     }
 
     /// 保存同一账本的创建状态；写前后核上下文，失败上抛，不发POST或覆盖上传任务。

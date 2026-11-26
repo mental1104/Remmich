@@ -246,14 +246,14 @@ struct PhotosTimelineRegressionTests {
     }
 
     @Test @MainActor func nativeTabLayoutRetainsPhotosAndSearchIdentity() {
-        #expect(NativeTabLayout.destinations(compactOwner: nil) == [.photos, .videos, .albums, .library, .search])
-        #expect(NativeTabLayout.destinations(compactOwner: .photos) == [.photos, .weeks, .months, .years, .search])
-        #expect(NativeTabLayout.destinations(compactOwner: .videos) == [.videos, .weeks, .months, .years, .search])
+        #expect(NativeTabLayout.destinations(compactOwner: nil) == [.photos, .videos, .library, .search, .account])
+        #expect(NativeTabLayout.destinations(compactOwner: .photos) == [.photos, .weeks, .months, .years, .account])
+        #expect(NativeTabLayout.destinations(compactOwner: .videos) == [.videos, .weeks, .months, .years, .account])
         #expect(NativeTabLayout.adjacentDestination(from: .photos, direction: .previous, compactOwner: nil) == nil)
         #expect(NativeTabLayout.adjacentDestination(from: .photos, direction: .next, compactOwner: nil) == .videos)
         #expect(NativeTabLayout.adjacentDestination(from: .albums, direction: .previous, compactOwner: nil) == .videos)
-        #expect(NativeTabLayout.adjacentDestination(from: .albums, direction: .next, compactOwner: nil) == .library)
-        #expect(NativeTabLayout.adjacentDestination(from: .search, direction: .next, compactOwner: nil) == nil)
+        #expect(NativeTabLayout.adjacentDestination(from: .albums, direction: .next, compactOwner: nil) == .search)
+        #expect(NativeTabLayout.adjacentDestination(from: .search, direction: .next, compactOwner: nil) == .account)
         #expect(NativeTabLayout.adjacentDestination(from: .photos, direction: .next, compactOwner: .photos) == .weeks)
         #expect(NativeTabLayout.adjacentDestination(from: .videos, direction: .next, compactOwner: .videos) == .weeks)
         #expect(NativeTabLayout.adjacentDestination(from: .months, direction: .previous, compactOwner: .photos) == .weeks)

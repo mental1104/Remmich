@@ -35,7 +35,7 @@ struct AlbumManagementView: View {
         NavigationStack {
             Form {
                 if let error {
-                    Section { Text(error).foregroundStyle(.red) }
+                    Section { Text(L10n.string(error)).foregroundStyle(.red) }
                 }
                 Section("Album directory") {
                     Button("Manage categories and groups") { showsDirectory = true }

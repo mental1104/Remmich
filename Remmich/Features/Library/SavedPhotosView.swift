@@ -55,7 +55,7 @@ struct SavedPhotosView: View {
             navigationHeader
             VStack(spacing: 8) {
                 Picker("Saved media", selection: $media) {
-                    ForEach(SavedPhotosMedia.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(SavedPhotosMedia.allCases) { Text(L10n.string($0.rawValue)).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .accessibilityIdentifier("downloads-media-tabs")
@@ -127,7 +127,7 @@ struct SavedPhotosView: View {
             ContentUnavailableView(library.limited ? "No Visible Saved Items" : "No Saved Items", systemImage: "arrow.down.circle",
                                    description: Text("Items saved to Photos → Remmich will appear here. Check Save History for transfer activity."))
         case let .failed(message):
-            ContentUnavailableView("On Device Unavailable", systemImage: "exclamationmark.circle", description: Text(message))
+            ContentUnavailableView("On Device Unavailable", systemImage: "exclamationmark.circle", description: Text(L10n.string(message)))
         }
     }
 

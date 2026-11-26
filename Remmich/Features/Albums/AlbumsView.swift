@@ -517,14 +517,14 @@ struct AlbumsView: View {
                 Divider()
             }
             if let message = store.forkErrorMessage {
-                Text(message)
+                Text(L10n.string(message))
             }
             Picker("Sort Albums", selection: Binding(get: { sort }, set: { updateAlbumLayout(sort: $0, direction: sortDirection, metrics: metrics) })) {
-                ForEach(AlbumSort.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(AlbumSort.allCases) { Text(L10n.string($0.rawValue)).tag($0) }
             }
             Divider()
             Picker("Order", selection: Binding(get: { sortDirection }, set: { updateAlbumLayout(sort: sort, direction: $0, metrics: metrics) })) {
-                ForEach(AlbumSortDirection.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(AlbumSortDirection.allCases) { Text(L10n.string($0.rawValue)).tag($0) }
             }
             .pickerStyle(.inline)
             Divider()

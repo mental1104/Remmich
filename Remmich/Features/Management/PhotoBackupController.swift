@@ -54,7 +54,16 @@ import Photos
     private(set) var total = 0
     private(set) var processed = 0
     private(set) var jobs: [PhotoBackupJob] = []
-    private(set) var status = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
+    /// 界面读取时按当前语言格式化，不改变队列、取消代际或后台执行状态。
+    var status: String {
+        L10n.text(statusMessage)
+    }
+
+    var continuityStatus: String {
+        L10n.text(continuityMessage)
+    }
+
+    private var statusMessage: String.LocalizationValue = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
     private(set) var foregroundAutomaticEnabled = false
     private(set) var foregroundNetworkRecoveryEnabled = false
     private(set) var backgroundAutomaticEnabled = false
@@ -63,7 +72,7 @@ import Photos
     private(set) var configuringAutomatic = false
     /// 当前列表可恢复上限与跳过原因；实际继续前仍重新读取SQLite和完整保存相簿规则。
     private(set) var unattemptedSummary = PhotoBackupUnattemptedSummary(jobs: [])
-    private(set) var continuityStatus = "先核对 Immich 已有项目；旧备份记录可选导入，无需下载原片来匹配。"
+    private var continuityMessage: String.LocalizationValue = "先核对 Immich 已有项目；旧备份记录可选导入，无需下载原片来匹配。"
 
     /// 只暴露当前已加载、无草稿且没有备份/配置写入的门禁，不向组织页面传递账号凭据或私有存储。
     func hasCurrentSavedSelection(using manager: LibraryManagementController) -> Bool {
@@ -119,7 +128,7 @@ import Photos
     /// 调用取消在读取前后与发布前检查；取消或账号退役不应用迟到配置，已完成的安全暂停恢复仍保留。
     func load(using manager: LibraryManagementController) async {
         guard !configuringAutomatic else { return }
-        guard let scope = manager.backupScope else { status = "请先连接服务器。"; return }
+        guard let scope = manager.backupScope else { statusMessage = "请先连接服务器。"; return }
         let owner = manager.generation
         do {
             try Task.checkCancellation()
@@ -138,13 +147,13 @@ import Photos
             // 草稿只属于原configurationScope；切换账号的冷恢复不能把旧账号选择带入新账号。
             apply(journal, scope: scope, restoreConfiguration: configurationScope != scope || !requiresSelectionScan)
             if requiresSelectionScan {
-                status = "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
+                statusMessage = "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
             } else {
-                status = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
+                statusMessage = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
             }
         } catch {
             guard manager.generation == owner else { return }
-            status = error is CancellationError ? "队列读取已停止，现有选择和恢复资料已保留，未开始上传。" : "无法读取备份恢复资料，未清空队列或开始上传。"
+            statusMessage = error is CancellationError ? "队列读取已停止，现有选择和恢复资料已保留，未开始上传。" : "无法读取备份恢复资料，未清空队列或开始上传。"
         }
     }
 
@@ -163,10 +172,10 @@ import Photos
             guard ids.allSatisfy({ !$0.isEmpty }), Set(ids).count == ids.count else { throw AlbumReadError.invalidCatalog }
             albums = catalog.albums
             hasLoadedAlbums = true
-            status = catalog.limited ? "仅扫描当前已授权照片；不可用选择须明确移除后重新扫描。" : "相簿已读取；选择后扫描，不会自动上传。"
+            statusMessage = catalog.limited ? "仅扫描当前已授权照片；不可用选择须明确移除后重新扫描。" : "相簿已读取；选择后扫描，不会自动上传。"
         } catch {
             guard !running else { return }
-            status = (error as? AlbumReadError) == .permission
+            statusMessage = (error as? AlbumReadError) == .permission
                 ? "需要照片访问权限；已保存的相簿选择保持不变，未判断任何相簿为不可用。"
                 : "未成功读取手机相簿；已保存选择保持不变，请重新读取后再判断不可用选择。"
         }
@@ -186,7 +195,7 @@ import Photos
         selected.subtract(missing)
         excluded.subtract(missing)
         requiresSelectionScan = true
-        status = "已移除不可用的本页选择，尚未保存；请重新选择并扫描。备份队列和已上传回执保持不变。"
+        statusMessage = "已移除不可用的本页选择，尚未保存；请重新选择并扫描。备份队列和已上传回执保持不变。"
     }
 
     /// 真实权限与枚举边界；limited只返回当前授权范围，不保留PHAssetCollection作为日后扫描的旧快照。
@@ -210,14 +219,14 @@ import Photos
     @discardableResult
     func scan(using manager: LibraryManagementController) -> Task<Void, Never>? {
         guard !running, !configuringAutomatic, hasLoadedAlbums, !loadingAlbums, !selected.isEmpty, let scope = manager.backupScope else { return nil }
-        guard configurationScope == scope else { status = "请先读取当前账户的备份队列，再扫描相簿。"; return nil }
+        guard configurationScope == scope else { statusMessage = "请先读取当前账户的备份队列，再扫描相簿。"; return nil }
         let owner = manager.generation
         let albumIDs = selected
         let excludedIDs = excluded
         let cloud = allowCloud
-        guard albumIDs.union(excludedIDs).isSubset(of: Set(albums.map(\.id))) else { status = "请先重新读取手机相簿，确认包含和排除的选择仍可访问。"; return nil }
+        guard albumIDs.union(excludedIDs).isSubset(of: Set(albums.map(\.id))) else { statusMessage = "请先重新读取手机相簿，确认包含和排除的选择仍可访问。"; return nil }
         running = true
-        status = "正在核查所选相簿，可随时暂停。"
+        statusMessage = "正在核查所选相簿，可随时暂停。"
         task = Task {
             defer { running = false; task = nil; requestAutomaticWork() }
             do {
@@ -240,7 +249,7 @@ import Photos
                 }
                 try Self.validate(manager, owner: owner, scope: scope)
                 apply(journal, scope: scope)
-                status = foregroundAutomaticEnabled
+                statusMessage = foregroundAutomaticEnabled
                     ? "扫描已保存：可备份 \(scan.sources.count) 项；前台自动备份将使用本次保存的规则。"
                     : "扫描已保存：可备份 \(scan.sources.count) 项；不再符合选择的待执行项已取消。点击继续后上传。"
             } catch { showFailure(error, manager: manager, owner: owner) }
@@ -361,10 +370,10 @@ import Photos
               configurationScope == scope, let client = manager.client else { return nil }
         let authorization = authorizationStatus()
         if mode.onlyUnattempted {
-            guard !selected.isEmpty else { status = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
-            guard mode.isBackground || !unattemptedSummary.eligibleJobIDs.isEmpty else { status = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
+            guard !selected.isEmpty else { statusMessage = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
+            guard mode.isBackground || !unattemptedSummary.eligibleJobIDs.isEmpty else { statusMessage = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
             guard !mode.isBackground || (backgroundAutomaticEnabled && !backgroundSuppressedScopes.contains(scope.cacheNamespace)) else { return nil }
-            guard authorization == .authorized || authorization == .limited else { status = "请先确认照片授权，再继续未尝试项目；未启动上传。"; return nil }
+            guard authorization == .authorized || authorization == .limited else { statusMessage = "请先确认照片授权，再继续未尝试项目；未启动上传。"; return nil }
         }
         let owner = manager.generation
         running = true
@@ -428,7 +437,7 @@ import Photos
                             progress: { _, result in
                                 self.completed = result.completed; self.duplicates = result.duplicates; self.failed = result.failed
                                 self.processed = result.completed + result.failed + result.skipped + result.review
-                                self.status = "已处理 \(self.processed) 项：新备份 \(result.completed)，已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed)。"
+                                self.statusMessage = "已处理 \(self.processed) 项：新备份 \(result.completed)，已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed)。"
                             }
                         )
                     }
@@ -437,7 +446,7 @@ import Photos
                 let current = try await store.loadPhotoBackups(scope: scope)
                 try Self.validate(manager, owner: owner, scope: scope)
                 apply(current, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
-                status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮新备份 \(result.completed) 项（重复 \(result.duplicates)），已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed) 项。"
+                statusMessage = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮新备份 \(result.completed) 项（重复 \(result.duplicates)），已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed) 项。"
                 if mode.isBackground {
                     backgroundLastResult = !result.stopped && result.failed == 0 && result.review == 0
                 }
@@ -485,7 +494,7 @@ import Photos
         task?.cancel()
         automaticTask?.cancel()
         if running {
-            status = "正在停止并保存队列；再次继续会重新查重。"
+            statusMessage = "正在停止并保存队列；再次继续会重新查重。"
         }
     }
 
@@ -537,7 +546,7 @@ import Photos
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
             try await store.savePhotoBackupHistory(history, scope: scope)
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
-            continuityStatus = "已导入 \(history.records.count) 项记录。已有项目只核查，不重新下载原片。"
+            continuityMessage = "已导入 \(history.records.count) 项记录。已有项目只核查，不重新下载原片。"
         } catch { showFailure(error, manager: manager, owner: owner) }
     }
 
@@ -547,13 +556,13 @@ import Photos
     {
         let queued = journal.jobs.filter { $0.stage == .queued }
         let plan = try await preflight.plan(jobs: queued, scope: scope, client: client, verificationIDs: verificationIDs, progress: { [self] done, total in
-            continuityStatus = "正在核查 \(done) / \(total) 项，可随时暂停。"
+            continuityMessage = "正在核查 \(done) / \(total) 项，可随时暂停。"
         }, validateContext: {
             try Self.validate(manager, owner: owner, scope: scope)
         })
         try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
         try plan.validate(sources: Set(queued.map(\.source)))
-        continuityStatus = "已匹配服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，备份未确认 \(plan.review.count) 项。"
+        continuityMessage = "已匹配服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，备份未确认 \(plan.review.count) 项。"
         return plan
     }
 
@@ -567,11 +576,11 @@ import Photos
         guard manager.generation == owner else { return }
         if let error = error as? PhotoBackupContinuityError {
             switch error {
-            case .wrongAccount: status = "备份记录属于其他账户，未导入。"
-            default: status = "接续核查未完成；记录与队列保留，本次没有开始上传。"
+            case .wrongAccount: statusMessage = "备份记录属于其他账户，未导入。"
+            default: statusMessage = "接续核查未完成；记录与队列保留，本次没有开始上传。"
             }
         } else {
-            status = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
+            statusMessage = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
         }
     }
 }
@@ -659,7 +668,7 @@ extension PhotoBackupController {
             }
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
             apply(journal, scope: scope, restoreConfiguration: false)
-            status = enabled ? "已同意网络恢复后核查连接失败项；只在新路由验证后重新查重，不立即重试。" : "网络恢复重核已关闭；失败项仍需手动继续。"
+            statusMessage = enabled ? "已同意网络恢复后核查连接失败项；只在新路由验证后重新查重，不立即重试。" : "网络恢复重核已关闭；失败项仍需手动继续。"
             if !enabled {
                 automaticWaitingForNetwork = false
             }
@@ -667,7 +676,7 @@ extension PhotoBackupController {
             requestAutomaticWork()
         } catch {
             guard manager.generation == owner else { return }
-            status = "网络恢复选项未确认保存；请重新读取并明确设置，未恢复失败项。"
+            statusMessage = "网络恢复选项未确认保存；请重新读取并明确设置，未恢复失败项。"
         }
     }
 
@@ -701,10 +710,10 @@ extension PhotoBackupController {
                 backgroundSuppressedScopes.remove(scope.cacheNamespace)
             }
             apply(journal, scope: scope, restoreConfiguration: false)
-            status = enabled ? "系统后台备份已开启，等待 iOS 分配运行时间；仅使用本账户保存的相簿与 iCloud 规则。" : "系统后台备份已关闭并保存，队列和回执保留。"
+            statusMessage = enabled ? "系统后台备份已开启，等待 iOS 分配运行时间；仅使用本账户保存的相簿与 iCloud 规则。" : "系统后台备份已关闭并保存，队列和回执保留。"
         } catch {
             guard manager.generation == owner else { return }
-            status = "后台备份开关未确认保存，请重新读取并明确设置；恢复资料保留。"
+            statusMessage = "后台备份开关未确认保存，请重新读取并明确设置；恢复资料保留。"
         }
     }
 
@@ -739,15 +748,15 @@ extension PhotoBackupController {
             apply(journal, scope: scope, restoreConfiguration: false)
             if enabled {
                 automaticSuppressedScopes.remove(scope.cacheNamespace)
-                status = "已开启前台自动备份，使用最近保存的相簿与 iCloud 选项；失败、已尝试暂停及取消项仍需手动处理。"
+                statusMessage = "已开启前台自动备份，使用最近保存的相簿与 iCloud 选项；失败、已尝试暂停及取消项仍需手动处理。"
                 configuringAutomatic = false
                 requestAutomaticWork()
             } else {
-                status = "前台自动备份已关闭并保存；队列与已确认回执保留，需明确重新开启或手动继续。"
+                statusMessage = "前台自动备份已关闭并保存；队列与已确认回执保留，需明确重新开启或手动继续。"
             }
         } catch {
             guard manager.generation == owner else { return }
-            status = "自动备份开关未确认保存，当前自动任务已停止；请重新读取并明确设置。"
+            statusMessage = "自动备份开关未确认保存，当前自动任务已停止；请重新读取并明确设置。"
         }
     }
 
@@ -763,12 +772,12 @@ extension PhotoBackupController {
         do {
             let saved = try await store.loadPhotoBackups(scope: scope)
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
-            status = saved.foregroundAutomaticEnabled != true && saved.backgroundAutomaticEnabled != true
+            statusMessage = saved.foregroundAutomaticEnabled != true && saved.backgroundAutomaticEnabled != true
                 ? "已停止并关闭前台与系统后台备份，队列和回执保留。"
                 : "已停止当前任务，自动开关尚未全部确认关闭；请重新读取并设置。"
         } catch {
             guard manager.generation == owner else { return }
-            status = "已停止当前任务，但自动开关未确认保存；请重新读取并设置。"
+            statusMessage = "已停止当前任务，但自动开关未确认保存；请重新读取并设置。"
         }
     }
 
@@ -827,7 +836,7 @@ extension PhotoBackupController {
                 let owner = manager.generation
                 let authorization = authorizationStatus()
                 guard authorization == .authorized || authorization == .limited else {
-                    status = "前台自动备份等待已有照片授权，不会主动弹出授权或修改 iCloud 选项。"
+                    statusMessage = "前台自动备份等待已有照片授权，不会主动弹出授权或修改 iCloud 选项。"
                     return
                 }
                 do {
@@ -916,11 +925,11 @@ extension PhotoBackupController {
                         manager.publishChanges(ifGeneration: owner)
                     }
                     if automaticWaitingForNetwork {
-                        status = "连接失败，等待新的网络路由验证后再核查；未立即重发上传。"
+                        statusMessage = "连接失败，等待新的网络路由验证后再核查；未立即重发上传。"
                     } else if result.stopped || result.failed > 0 {
-                        status = foregroundAutomaticEnabled ? "连接恢复，正在核对待处理照片。" : "本轮有失败或未知结果，前台自动备份已关闭；请先手动检查，未自动重试。"
+                        statusMessage = foregroundAutomaticEnabled ? "连接恢复，正在核对待处理照片。" : "本轮有失败或未知结果，前台自动备份已关闭；请先手动检查，未自动重试。"
                     } else {
-                        status = "前台自动备份已确认 \(result.completed) 项；等待新的照片库变更。"
+                        statusMessage = "前台自动备份已确认 \(result.completed) 项；等待新的照片库变更。"
                     }
                     running = false; automaticRunning = false; ownsRun = false
                 } catch {
@@ -933,9 +942,9 @@ extension PhotoBackupController {
                     automaticMonitor?.stop(); automaticMonitor = nil
                     if let current = try? await persistAutomaticSetting(false, manager: manager, owner: owner, scope: scope) {
                         apply(current, scope: scope, restoreConfiguration: false)
-                        status = "前台自动备份已关闭；相簿、权限或未确认结果需明确检查后再开启，未自动重试。"
+                        statusMessage = "前台自动备份已关闭；相簿、权限或未确认结果需明确检查后再开启，未自动重试。"
                     } else {
-                        status = "前台自动备份已停止，关闭开关未确认保存；恢复资料保留，请明确检查。"
+                        statusMessage = "前台自动备份已停止，关闭开关未确认保存；恢复资料保留，请明确检查。"
                     }
                     return
                 }

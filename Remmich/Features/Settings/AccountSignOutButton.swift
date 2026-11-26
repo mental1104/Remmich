@@ -32,12 +32,13 @@ struct AccountSignOutButton<Label: View>: View {
         .presentationCompactAdaptation(.popover)
     }
 
+    /// title为应用动作键，deleteData决定本地数据清理选项；不翻译账户资料。
     private func choice(_ title: String, deleteData: Bool) -> some View {
         Button(role: deleteData ? .destructive : nil) {
             isPresented = false
             action(deleteData)
         } label: {
-            Text(title).font(.subheadline.weight(.semibold))
+            Text(L10n.string(title)).font(.subheadline.weight(.semibold))
                 .foregroundStyle(deleteData ? Color.red : Color.primary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)

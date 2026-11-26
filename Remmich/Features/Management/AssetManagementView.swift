@@ -43,7 +43,7 @@ struct AssetManagementView: View {
                     ProgressView("读取服务器状态…")
                 }
                 if let error {
-                    Section { Text(error).foregroundStyle(.red) }
+                    Section { Text(L10n.string(error)).foregroundStyle(.red) }
                 }
                 if let notice {
                     Section { Text(notice).foregroundStyle(.secondary) }

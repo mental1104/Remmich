@@ -54,7 +54,7 @@ struct SearchPresetsPanel: View {
                     }
                 }
                 if let error = conversionError ?? store.error {
-                    Text(error).font(.caption).foregroundStyle(.secondary)
+                    Text(L10n.string(error)).font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("saved-search-error")
                 }
             }

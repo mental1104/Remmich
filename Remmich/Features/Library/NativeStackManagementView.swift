@@ -263,7 +263,7 @@ private struct NativeStackPickerView: View {
                         .foregroundStyle(.secondary)
                 }
                 if let error = candidates.error {
-                    Text(error).foregroundStyle(.red)
+                    Text(L10n.string(error)).foregroundStyle(.red)
                 }
                 if candidates.busy {
                     ProgressView("Loading photos")
@@ -342,7 +342,7 @@ private struct NativeStackStatus: View {
             ProgressView("Contacting server")
         }
         if let error = store.error {
-            Text(error).foregroundStyle(.red).accessibilityIdentifier("native-stacks-error")
+            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("native-stacks-error")
             Button("Reload stacks", action: reload).disabled(store.busy)
         }
         if let notice = store.notice {

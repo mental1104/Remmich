@@ -79,7 +79,7 @@ struct LibrarySteamScenesView: View {
             ProgressView("Loading screenshots and scene evidence")
         }
         if let error = store.error {
-            Text(error).foregroundStyle(.red).accessibilityIdentifier("steam-scenes-error")
+            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("steam-scenes-error")
         }
         if let notice = store.notice {
             Text(notice).foregroundStyle(.secondary)

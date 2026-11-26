@@ -113,7 +113,7 @@ struct SearchView: View {
                             }
                         })) {
                             ForEach(NativeSearchQuery.Mode.allCases, id: \.self) { mode in
-                                Text(mode.title).tag(mode)
+                                Text(L10n.string(mode.title)).tag(mode)
                             }
                         }
                         .accessibilityIdentifier("search-mode")
@@ -153,7 +153,7 @@ struct SearchView: View {
                             Picker("Media category", selection: $query.mediaCategory) {
                                 Text("Any").tag(nil as NativeSearchMediaCategory?)
                                 ForEach(NativeSearchMediaCategory.allCases, id: \.self) { category in
-                                    Text(category.title).tag(Optional(category))
+                                    Text(L10n.string(category.title)).tag(Optional(category))
                                 }
                             }
                             Picker("Resolution", selection: $query.resolution) {
@@ -227,7 +227,7 @@ struct SearchView: View {
                     Text("Filters").accessibilityIdentifier("search-filters")
                 }.padding(.horizontal)
                 if let error = store.error {
-                    Text(error).foregroundStyle(.secondary)
+                    Text(L10n.string(error)).foregroundStyle(.secondary)
                         .accessibilityIdentifier("search-error")
                     Button("Retry") { Task {
                         if let source = activeSearchReader {
@@ -289,7 +289,7 @@ struct SearchView: View {
         .searchable(text: Binding(get: { query.text }, set: {
             query.useSearchText($0)
             referencePreview = nil
-        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
+        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(L10n.string(query.mode.title)))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in
@@ -527,7 +527,7 @@ private struct SearchDevicePicker: View {
             ForEach(NativeCaptureDeviceOption.Group.allCases, id: \.self) { group in
                 let options = devices.filter { $0.group == group }
                 if !options.isEmpty {
-                    Text(group.title).font(.caption).foregroundStyle(.secondary)
+                    Text(L10n.string(group.title)).font(.caption).foregroundStyle(.secondary)
                     ForEach(options) { option in
                         Button {
                             models = option.models
@@ -558,10 +558,10 @@ private struct SearchExifEditor: View {
     var body: some View {
         VStack {
             Picker("EXIF field", selection: $field) {
-                ForEach(NativeSearchNumericCondition.Field.allCases, id: \.self) { Text($0.title).tag($0) }
+                ForEach(NativeSearchNumericCondition.Field.allCases, id: \.self) { Text(L10n.string($0.title)).tag($0) }
             }
             Picker("Comparison", selection: $comparison) {
-                ForEach(NativeSearchNumericCondition.Comparison.allCases, id: \.self) { Text($0.title).tag($0) }
+                ForEach(NativeSearchNumericCondition.Comparison.allCases, id: \.self) { Text(L10n.string($0.title)).tag($0) }
             }
             TextField("Value", value: $value, format: .number)
             Button("Add or update condition") {

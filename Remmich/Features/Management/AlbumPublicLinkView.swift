@@ -73,7 +73,7 @@ struct AlbumPublicLinkView: View {
             Text("仅显示你创建的相簿链接。持有链接的人可按设置访问；撤销不删除照片或相簿。")
                 .font(.footnote).foregroundStyle(.secondary)
             if let error = store.error {
-                Text(error).foregroundStyle(.red)
+                Text(L10n.string(error)).foregroundStyle(.red)
             }
             if let notice = store.notice {
                 Text(notice).foregroundStyle(.secondary)

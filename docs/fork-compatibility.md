@@ -1,5 +1,13 @@
 # Client and server maintenance
 
+## Unified Me tab and application language, 2026-11-26
+
+The primary tab order is Photos, Videos, Library, Search, Me. Me remains rightmost, including timeline-range layouts. Albums and Collections share the Library tab but keep distinct navigation stacks and active-page identities. Account, backup, matching, connection, index/cache, and language settings move to Me; Library no longer hosts an expanding account overlay. Backup configuration and recovery details are separated from the current progress and primary actions. No permission, cancellation, upload admission, persistent receipt, or API contract is relaxed.
+
+Standard en/zh-Hans resources cover application labels and errors, including both existing English and Chinese keys. Language follows the supported system preference by default and can be overridden in the app. UIKit hosting controllers receive the same locale explicitly. Core backup/matching progress retains typed interpolation so changing language reformats presentation without resetting session or task identity. Server titles, account content, query values, wire enums and generated SDK sources remain unchanged. DEBUG navigation acceptance uses isolated preferences and synthetic media lanes with the production tab shell and Me view.
+
+New tests cover the bundled resources, placeholder contracts, language preference persistence, tab ordering/album aliases, and English/Chinese navigation with a live language switch and cold preference restore. The 1609 resource pairs pass the NAS key/placeholder audit; current Swift compile/test and both simulator UI results await GitHub CI. Prior c1ffa3c passes compilation, API98/24 and15 backup/matching suites but has existing full-App crop/batch/Steam failures. No signing, installation, real-device visual acceptance or production deployment is claimed for this change.
+
 ## Server iCloud matching without SQLite, 2026-11-26
 
 Run45762664081 on7f2c0f0 passes compilation, formatting/contracts, API98 and the original13 backup suites plus marker HTTP. The no-import end-to-end fixture omitted authenticated account preparation and correctly hit the store's missing-account cancellation guard; it now prepares the account, explicitly asserts no imported history, and retains all export/marker/cold-state checks. This fixture correction and matched-state wording await the new head's CI; production storage guards remain unchanged.

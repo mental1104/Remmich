@@ -309,7 +309,7 @@ struct LibraryDirectoryCard: View {
             LibraryDirectoryView(directory: directory, store: store, source: source, media: media, assetDetails: assetDetails,
                                  context: context, placesMapSource: placesMapSource)
         } label: {
-            LibraryCollectionCard(title: directory.rawValue, count: store.indexedPlaceCount ?? (store.finished ? store.entries.count : nil),
+            LibraryCollectionCard(title: L10n.string(directory.rawValue), count: store.indexedPlaceCount ?? (store.finished ? store.entries.count : nil),
                                   symbol: directory.symbol, appearance: hasCover ? .photographic : .glass)
             {
                 if directory != .places {

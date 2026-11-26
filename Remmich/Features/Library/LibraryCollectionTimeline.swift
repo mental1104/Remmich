@@ -440,7 +440,7 @@ struct LibraryAssetCollectionCard: View {
     }
 
     var body: some View {
-        LibraryCollectionCard(title: collection.rawValue, count: collection.showsCardCount ? preview?.count : nil, symbol: collection.symbol,
+        LibraryCollectionCard(title: L10n.string(collection.rawValue), count: collection.showsCardCount ? preview?.count : nil, symbol: collection.symbol,
                               appearance: preview?.cover == nil ? .glass : .photographic)
         {
             if let asset = preview?.cover {

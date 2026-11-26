@@ -53,7 +53,7 @@ struct AssetEditingView: View {
                             ProgressView("读取原图预览与编辑…")
                         }
                         if let error {
-                            Text(error).foregroundStyle(.red).accessibilityIdentifier("asset-editor-error")
+                            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("asset-editor-error")
                             Button("重新读取") {
                                 if hasChanges {
                                     confirmsReload = true

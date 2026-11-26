@@ -61,7 +61,7 @@ struct PartnerSharingView: View {
             Text("伙伴共享按方向独立。把照片分享给对方，不代表对方也分享给你；不会发送邮件或邀请消息。")
                 .font(.footnote).foregroundStyle(.secondary)
             if let error = store.error {
-                Text(error).foregroundStyle(.red)
+                Text(L10n.string(error)).foregroundStyle(.red)
             }
             if let notice = store.notice {
                 Text(notice).foregroundStyle(.secondary)

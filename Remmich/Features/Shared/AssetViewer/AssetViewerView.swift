@@ -1807,7 +1807,7 @@ struct AssetViewerView: View {
     private var refreshStatus: some View {
         HStack(spacing: 12) {
             if let message = viewerRefresh.message {
-                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                Text(L10n.string(message)).font(.caption).fixedSize(horizontal: false, vertical: true)
             } else {
                 Spacer(minLength: 0)
             }

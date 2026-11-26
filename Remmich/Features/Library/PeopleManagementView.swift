@@ -70,7 +70,7 @@ struct PeopleManagementView: View {
             ProgressView("Contacting server")
         }
         if let error = store.error {
-            Text(error).foregroundStyle(.red).accessibilityIdentifier("people-management-error")
+            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("people-management-error")
             Text("Reload people before another change.").font(.caption).foregroundStyle(.secondary)
         }
         if let notice = store.notice {
@@ -112,7 +112,7 @@ private struct PeopleManagementDetail: View {
             }
             if let error = store.error {
                 Section {
-                    Text(error).foregroundStyle(.red)
+                    Text(L10n.string(error)).foregroundStyle(.red)
                     Text("Reload people before another change.").font(.caption).foregroundStyle(.secondary)
                 }
             }
