@@ -510,7 +510,8 @@ struct AlbumsView: View {
                 Picker("相簿分组", selection: $forkGroup) {
                     Text("全部分组").tag(String?.none)
                     ForEach(directory.groupNames, id: \.self) { name in
-                        Text(L10n.string(name.isEmpty ? "未分组" : name)).tag(Optional(name))
+                        // 只翻译应用的空名称占位符；用户分组即便与资源键重名也必须保持原样。
+                        Text(name.isEmpty ? L10n.string("未分组") : name).tag(Optional(name))
                     }
                 }
                 Button("清除目录筛选") { forkCategory = nil; forkGroup = nil }
