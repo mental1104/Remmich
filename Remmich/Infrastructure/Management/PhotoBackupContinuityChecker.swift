@@ -176,7 +176,8 @@ import Foundation
                 }
                 continue
             }
-            guard let cloud, let values = candidates[cloud], values.count == 1,
+            // 官方与自有来源可能保留不同版本；只要求当前公开元组唯一匹配，重复当前候选仍由resolve拒绝。
+            guard let cloud, let values = candidates[cloud],
                   case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: values)
             else { review.insert(source); continue }
             let remote: LocalMediaRemoteAsset

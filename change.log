@@ -1197,6 +1197,7 @@
 
 ## 2026-11-26: Complete no-import backup and publish iCloud origins
 
+- 官方与自有元数据保留不同版本时，按当前公开元组筛选后要求唯一，不再因总记录数大于1拒绝已匹配；当前元组重复仍拒绝。第二设备HTTP用例加入旧官方版本与新自有版本并存。
 - 现有就绪PR链在完整App前增加同步/匹配集中验收及即时证据上传，包含真实新源/来源/跨设备/失败恢复与原片Worker/元数据套件；要求关键套件真实运行，防止零用例通过。原完整App、API及两设备UI均保留，触发条件和draft保护不变。
 - f43ea63的CI45799087407格式通过，离线契约在App编译前失败：固定swiftc清单未包含新PhotoBackupOrigin，导致找不到类型和级联Codable错误。已将实际领域文件加入原清单，保留全部检查与workflow触发；新功能尚无Swift运行通过结论。
 - NAS全范围SwiftFormat0/473（1个既有排除）、diff及1610对中英文键/占位符检查通过；没有Swift/Xcode，新增编译和执行尚待本提交CI。

@@ -368,9 +368,15 @@ struct PhotoBackupServerMatchingTests {
         let event: [String: Any] = ["type": "AssetMetadataV1", "ack": "AssetMetadataV1|22222222-2222-4222-8222-222222222222",
                                     "data": ["assetId": assetID, "key": PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId), "value": value]]
         let line = try String(decoding: JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n"
+        // 服务端可同时有旧官方元组和本次原片来源；另一设备应选中当前元组，重复当前元组仍须拒绝。
+        let stale = try LocalMediaMobileMetadata(cloudId: origin.metadata.cloudId, createdAt: origin.metadata.createdAt?.addingTimeInterval(1),
+                                                adjustmentTime: origin.metadata.adjustmentTime, latitude: origin.metadata.latitude, longitude: origin.metadata.longitude)
+        var oldEvent = event
+        oldEvent["data"] = ["assetId": assetID, "key": "mobile-app", "value": try JSONSerialization.jsonObject(with: JSONEncoder().encode(stale))]
+        let oldLine = try String(decoding: JSONSerialization.data(withJSONObject: oldEvent), as: UTF8.self) + "\n"
         let empty = continuityEmptyStream()
         let http = ChecksumLookupHTTPFixture(exchanges: [empty[0],
-                                                         .init(method: "POST", path: "sync/stream", status: 200, json: line + empty[1].json, contentType: "application/jsonlines+json"),
+                                                         .init(method: "POST", path: "sync/stream", status: 200, json: oldLine + line + empty[1].json, contentType: "application/jsonlines+json"),
                                                          .init(method: "GET", path: "assets/" + assetID, status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
                                                          continuityOriginWrite()])
         defer { http.close() }
