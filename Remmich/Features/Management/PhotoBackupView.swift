@@ -36,7 +36,7 @@ struct PhotoBackupView: View {
                     Text("队列及回执按账户保存。手动备份离开本页会停止；前台自动备份进入后台会停止。系统后台备份须另行开启并等待 iOS 调度。不会删除或修改手机原片。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
-                        ProgressView(value: Double(backup.completed + backup.failed), total: Double(max(1, backup.total)))
+                        ProgressView(value: Double(backup.processed), total: Double(max(1, backup.total)))
                         Button(backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled ? "停止并关闭自动备份" : "停止并保存队列", role: .destructive) {
                             Task { await backup.stopManually(using: controller) }
                         }

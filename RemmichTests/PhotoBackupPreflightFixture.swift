@@ -6,6 +6,7 @@ import Foundation
 @MainActor struct SyntheticBackupPreflight: PhotoBackupPreflighting {
     /// jobs只含该例合成源；scope/client不用于访问真实服务器，progress/context仍按生产协议回调。
     func plan(jobs: [PhotoBackupJob], scope _: MediaAccountScope, client _: any PhotoBackupContinuityQuerying,
+              verificationIDs _: Set<UUID>,
               progress: @MainActor (Int, Int) -> Void,
               validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {

@@ -76,10 +76,24 @@ struct PhotoBackupContinuityTests {
             validateContext: {}, progress: { _, _ in }
         )
         let cold = try await SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")).loadPhotoBackups(scope: scope)
-        #expect(exporter.calls == 0 && result.completed == 0)
+        #expect(exporter.calls == 0 && result.completed == 0 && result.skipped == 65 && result.review == 65)
         #expect(cold.jobs.count { $0.stage == .paused } == 65 && cold.jobs.count { $0.failure == .historyUnconfirmed } == 65)
         #expect(cold.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
         #expect(try await store.loadPhotoBackupHistory(scope: continuityScope(other: true)) == nil)
+    }
+
+    /// Live Photo只有主体checksum命中不能冒充完整动态备份；仍不读取原片补证明。
+    @Test @MainActor func duplicateStillDoesNotCompleteALivePhoto() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        let source = PhotoBackupSource(localID: "live", modifiedAt: Date(timeIntervalSince1970: 10), kind: .livePhoto)
+        try await seedContinuity(store, sources: [source])
+        let photos = ContinuityPhotos()
+        let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+            jobs: [.init(source: source)], scope: continuityScope(), client: ContinuityQueries(), progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.allowed.isEmpty && plan.existing.isEmpty && plan.review == [source] && photos.reads == 0)
     }
 
     /// 只允许导入之后新拍摄/修改且完整远端元数据无关联的源；导入前、已被官方客户端备份或无云ID都待核查。
@@ -99,6 +113,46 @@ struct PhotoBackupContinuityTests {
             jobs: jobs, scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
         )
         #expect(plan.allowed.map(\.localID) == ["new"] && plan.review.count == 3 && plan.existing.isEmpty)
+    }
+
+    /// 已尝试的新源只有明确单项核查才可重进完整查重；该许可仍不能放宽导入前的未知历史。
+    @Test @MainActor func explicitVerificationDoesNotAuthorizeOldHistory() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await seedContinuity(store, sources: [])
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        photos.values["new"] = continuitySnapshot("new", created: 200, cloud: true)
+        photos.values["old"] = continuitySnapshot("old", created: 90, cloud: true)
+        var new = PhotoBackupJob(source: continuitySource("new", modified: 200))
+        var old = PhotoBackupJob(source: continuitySource("old", modified: 200))
+        try new.begin(); new.pause(); new.queueForVerification()
+        try old.begin(); old.pause(); old.queueForVerification()
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos)
+        let blocked = try await checker.plan(jobs: [new, old], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(blocked.allowed.isEmpty && blocked.review.count == 2)
+        let explicit = try await checker.plan(jobs: [new, old], scope: continuityScope(), client: client, verificationIDs: [new.id, old.id], progress: { _, _ in }, validateContext: {})
+        #expect(explicit.allowed == [new.source] && explicit.review == [old.source])
+    }
+
+    /// 在线响应回来时原账号已退休，Checker拒绝整个结果，不能用旧账号命中给新页面发放许可。
+    @Test @MainActor func accountRetirementRejectsLateResults() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        let source = continuitySource("old")
+        try await seedContinuity(store, sources: [source])
+        let client = ContinuityQueries()
+        var current = true
+        client.onQuery = { current = false }
+        await #expect(throws: LibraryWriteError.changedAccount) {
+            try await PhotoBackupContinuityChecker(store: store, metadata: ContinuityPhotos()).plan(
+                jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {
+                    guard current else { throw LibraryWriteError.changedAccount }
+                }
+            )
+        }
+        #expect(client.batches.count == 1)
     }
 
     /// 查询失败或响应缺项不能返回部分许可；即使先前批次命中，也不能启动实际导出。
@@ -224,12 +278,14 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
     var fails = false
     var incomplete = false
     var associatedCloud: String?
+    var onQuery: (@MainActor () -> Void)?
     /// queries逐批记录；可模拟完整未命中、协议缺项或网络失败，不返回任何上传许可。
     func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
         if queries.isEmpty {
             return []
         }
         batches.append(queries)
+        onQuery?()
         if fails {
             throw URLError(.notConnectedToInternet)
         }

@@ -29,6 +29,8 @@ nonisolated struct PhotoBackupRunResult: Sendable {
     var completed = 0
     var duplicates = 0
     var failed = 0
+    var skipped = 0
+    var review = 0
     var stopped = false
 }
 
@@ -65,6 +67,11 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                         job.fail(.historyUnconfirmed)
                     }
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
+                    if preflight.existing.contains(job.source) {
+                        result.skipped += 1
+                    } else {
+                        result.review += 1
+                    }
                     progress(job, result)
                     continue
                 }

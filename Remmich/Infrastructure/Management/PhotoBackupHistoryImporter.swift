@@ -48,6 +48,7 @@ nonisolated enum PhotoBackupHistoryImporter {
         }
         defer { sqlite3_finalize(statement) }
         var result: [[String?]] = []
+        var receivedBytes = 0
         while true {
             try Task.checkCancellation()
             switch sqlite3_step(statement) {
@@ -55,7 +56,9 @@ nonisolated enum PhotoBackupHistoryImporter {
                 guard result.count < limit else { throw PhotoBackupContinuityError.invalidHistory }
                 var row: [String?] = []
                 for column in 0 ..< sqlite3_column_count(statement) {
-                    guard sqlite3_column_bytes(statement, column) <= 4096 else { throw PhotoBackupContinuityError.invalidHistory }
+                    let bytes = Int(sqlite3_column_bytes(statement, column))
+                    receivedBytes += bytes
+                    guard bytes <= 4096, receivedBytes <= 67_108_864 else { throw PhotoBackupContinuityError.invalidHistory }
                     row.append(sqlite3_column_text(statement, column).map { String(cString: $0) })
                 }
                 result.append(row)

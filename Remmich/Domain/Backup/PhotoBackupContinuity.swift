@@ -57,6 +57,7 @@ extension LibraryMutationClient: PhotoBackupContinuityQuerying {}
 @MainActor protocol PhotoBackupPreflighting: Sendable {
     /// jobs为实际待执行项；context必须在每次异步边界核对原账号/端点和取消，不允许发布迟到许可。
     func plan(jobs: [PhotoBackupJob], scope: MediaAccountScope, client: any PhotoBackupContinuityQuerying,
+              verificationIDs: Set<UUID>,
               progress: @MainActor (Int, Int) -> Void,
               validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
 }

@@ -52,6 +52,7 @@ import Photos
     private(set) var duplicates = 0
     private(set) var failed = 0
     private(set) var total = 0
+    private(set) var processed = 0
     private(set) var jobs: [PhotoBackupJob] = []
     private(set) var status = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
     private(set) var foregroundAutomaticEnabled = false
@@ -367,7 +368,7 @@ import Photos
         }
         let owner = manager.generation
         running = true
-        completed = 0; duplicates = 0; failed = 0
+        completed = 0; duplicates = 0; failed = 0; processed = 0
         task = Task {
             defer {
                 running = false; task = nil
@@ -406,7 +407,12 @@ import Photos
                     let cloud = journal.allowCloud
                     // management占用整个执行周期，防止多个窗口同时通过同一写通道执行队列。
                     return try await manager.perform(publishChange: false) { [journal] _ in
-                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client)
+                        let verificationIDs: Set<UUID> = if case let .verification(id?) = mode {
+                            [id]
+                        } else {
+                            []
+                        }
+                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs)
                         return try await PhotoBackupWorker(store: store, exporter: exporter).run(
                             scope: scope, userID: client.userID, allowCloud: cloud, client: client,
                             preflight: plan,
@@ -421,7 +427,8 @@ import Photos
                             },
                             progress: { _, result in
                                 self.completed = result.completed; self.duplicates = result.duplicates; self.failed = result.failed
-                                self.status = "已确认 \(result.completed) 项，失败 \(result.failed) 项。"
+                                self.processed = result.completed + result.failed + result.skipped + result.review
+                                self.status = "已处理 \(self.processed) 项：新备份 \(result.completed)，跳过 \(result.skipped)，待核查 \(result.review)，失败 \(result.failed)。"
                             }
                         )
                     }
@@ -430,9 +437,9 @@ import Photos
                 let current = try await store.loadPhotoBackups(scope: scope)
                 try Self.validate(manager, owner: owner, scope: scope)
                 apply(current, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
-                status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮已确认 \(result.completed) 项（重复 \(result.duplicates)），失败 \(result.failed) 项。"
+                status = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮已确认 \(result.completed) 项（重复 \(result.duplicates)），跳过 \(result.skipped)，待核查 \(result.review)，失败 \(result.failed) 项。"
                 if mode.isBackground {
-                    backgroundLastResult = !result.stopped && result.failed == 0
+                    backgroundLastResult = !result.stopped && result.failed == 0 && result.review == 0
                 }
             } catch {
                 if mode.isBackground, manager.generation == owner {
@@ -536,10 +543,10 @@ import Photos
 
     /// journal是Coordinator内固定的实际待执行队列；完整在线核查通过才发放Worker许可，每个await后继续核原账号。
     private func prepareContinuity(_ journal: PhotoBackupJournal, manager: LibraryManagementController, owner: UUID,
-                                   scope: MediaAccountScope, client: LibraryMutationClient) async throws -> PhotoBackupPreflightPlan
+                                   scope: MediaAccountScope, client: LibraryMutationClient, verificationIDs: Set<UUID>) async throws -> PhotoBackupPreflightPlan
     {
         let queued = journal.jobs.filter { $0.stage == .queued }
-        let plan = try await preflight.plan(jobs: queued, scope: scope, client: client, progress: { [self] done, total in
+        let plan = try await preflight.plan(jobs: queued, scope: scope, client: client, verificationIDs: verificationIDs, progress: { [self] done, total in
             continuityStatus = "正在核查 \(done) / \(total) 项，可随时暂停。"
         }, validateContext: {
             try Self.validate(manager, owner: owner, scope: scope)
@@ -849,6 +856,8 @@ extension PhotoBackupController {
                         let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                         try journal.applyAutomaticAlbumScan(scan)
+                        let verificationIDs: Set<UUID> = networkRecovery && journal.foregroundNetworkRecoveryEnabled == true
+                            ? Set(journal.jobs.filter { $0.stage == .failed && $0.failure == .network }.map(\.id)) : []
                         if networkRecovery, journal.foregroundNetworkRecoveryEnabled == true {
                             try journal.resumeNetworkFailures(scan)
                         }
@@ -857,13 +866,13 @@ extension PhotoBackupController {
                         apply(journal, scope: scope)
                         automaticRunning = true
                         total = journal.jobs.count { $0.stage == .queued }
-                        completed = 0; duplicates = 0; failed = 0
+                        completed = 0; duplicates = 0; failed = 0; processed = 0
                         guard let client = manager.client else { throw LibraryWriteError.unavailable }
                         let cloud = journal.allowCloud
                         let attempted = Set(journal.jobs.filter { $0.stage == .queued }.map(\.id))
                         let result = try await manager.perform(publishChange: false) { [self, journal] _ in
-                            let plan = try await prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client)
-                            try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                            let plan = try await prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs)
+                            try await validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                             return try await PhotoBackupWorker(store: store, exporter: exporter).run(
                                 scope: scope, userID: client.userID, allowCloud: cloud, client: client,
                                 preflight: plan,
@@ -872,7 +881,10 @@ extension PhotoBackupController {
                                     try Self.validate(manager, owner: owner, scope: scope)
                                     guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
                                 },
-                                progress: { [self] _, value in completed = value.completed; duplicates = value.duplicates; failed = value.failed }
+                                progress: { [self] _, value in
+                                    completed = value.completed; duplicates = value.duplicates; failed = value.failed
+                                    processed = value.completed + value.failed + value.skipped + value.review
+                                }
                             )
                         }
                         try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)

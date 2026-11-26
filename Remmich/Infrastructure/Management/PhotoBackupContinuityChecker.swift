@@ -10,9 +10,11 @@ import Foundation
         self.store = store; self.metadata = metadata
     }
 
-    /// jobs只含待执行版本；progress发布完成核查数，context在每次await前后验证取消、认证和端点代际。
+    /// jobs只含待执行版本；verificationIDs仅来自明确单项核查或已验证网络恢复，仍不能授权历史源。
+    /// progress发布完成核查数，context在每次await前后验证取消、认证和端点代际。
     /// 完整核查成功才返回许可；任何失败均不允许Worker以部分结果开始上传。
     func plan(jobs: [PhotoBackupJob], scope: MediaAccountScope, client: any PhotoBackupContinuityQuerying,
+              verificationIDs: Set<UUID> = [],
               progress: @MainActor (Int, Int) -> Void,
               validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {
@@ -51,8 +53,8 @@ import Foundation
                           snapshot.identity.modificationDate == source.modifiedAt,
                           let created = snapshot.creationDate, let modified = source.modifiedAt,
                           created > history.importedAt, modified > history.importedAt,
-                          job.attempts == 0, job.failure == nil, job.primaryAssetID == nil, job.motionAssetID == nil,
-                          job.rawReceipt == nil, job.jpegReceipt == nil
+                          verificationIDs.contains(job.id) || (job.attempts == 0 && job.failure == nil && job.primaryAssetID == nil && job.motionAssetID == nil
+                              && job.rawReceipt == nil && job.jpegReceipt == nil)
                 {
                     // 云ID相同的新候选不能通过字典覆盖变成唯一；两者均留待核查。
                     if let previous = newCandidates.updateValue(source, forKey: cloud) {
@@ -69,10 +71,10 @@ import Foundation
             }
             for result in results {
                 guard let source = sources[result.id] else { throw PhotoBackupContinuityError.incompleteResponse }
-                if case .existing = result.outcome {
+                if case .existing = result.outcome, source.kind == .photo || source.kind == .video {
                     existing.insert(source)
                 } else {
-                    // 历史未命中或在回收站都不是新增许可，绝不回退为下载原片后重传。
+                    // 历史未命中、回收站或只有Live/RAW主体都不是完整证明，不回退为下载原片后重传。
                     review.insert(source)
                 }
             }

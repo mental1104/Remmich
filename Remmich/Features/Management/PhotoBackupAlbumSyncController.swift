@@ -27,7 +27,7 @@ import Photos
     @ObservationIgnored private var monitor: LocalPhotoChangeMonitor?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let matching: any PhotoBackupAlbumMatchingReading
-    @ObservationIgnored private let scanner: @MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot]
+    @ObservationIgnored private let scanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private let names: @MainActor (Set<String>) throws -> [String: String]
     @ObservationIgnored private let verifySource: @MainActor (PhotoBackupSource) throws -> Void
     @ObservationIgnored private let authorization: @MainActor () -> PHAuthorizationStatus
@@ -35,7 +35,7 @@ import Photos
     @ObservationIgnored private let rawJPEGResolver: PhotoBackupRawJPEGExistingResolver
 
     /// 同步选择来自保存的日志，不引用UI草稿；cloud只用于防止确认期间意愿变化，不触发任何原片读取。
-    private struct Selection: Equatable {
+    private nonisolated struct Selection: Equatable, Sendable {
         let included: Set<String>
         let excluded: Set<String>
         let cloud: Bool
@@ -68,13 +68,14 @@ import Photos
     /// store仍是真实SQLite，observeChanges=false只用于隔离测试，绝不替换HTTP/计划/回执确认逻辑。
     /// rawJPEGReader只替换本机资源系统口；nil使用固定network=false双原图SHA1，不采纳旧metadata单图证明。
     init(matching: any PhotoBackupAlbumMatchingReading, store: SQLiteLibraryIndexStore = .init(),
-         scanner: (@MainActor (Set<String>) throws -> [PhotoBackupAlbumSnapshot])? = nil,
+         scanner: (@MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot])? = nil,
          names: (@MainActor (Set<String>) throws -> [String: String])? = nil,
          verifySource: (@MainActor (PhotoBackupSource) throws -> Void)? = nil,
          authorization: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) }, observeChanges: Bool = true,
          rawJPEGReader: (any PhotoBackupRawJPEGChecksumReading)? = nil)
     {
-        self.matching = matching; self.store = store; self.scanner = scanner ?? PhotoBackupController.albumSnapshots
+        self.matching = matching; self.store = store
+        self.scanner = scanner ?? { ids in try await PhotoBackupController.albumSnapshots(for: ids) }
         self.names = names ?? Self.albumNames; self.verifySource = verifySource ?? Self.verifyCurrentSource
         self.authorization = authorization; self.observeChanges = observeChanges
         rawJPEGResolver = .init(reader: rawJPEGReader ?? PhotoKitRawJPEGChecksumReader())
@@ -150,7 +151,7 @@ import Photos
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             let selection = Selection(journal)
             let completed = Dictionary(grouping: journal.jobs.filter { $0.stage == .completed }, by: \.source)
-            let sources = try sourcesByAlbum(selection); try check()
+            let sources = try await sourcesByAlbum(selection); try check()
             let ids = Set(sources.values.flatMap(\.self).filter { $0.kind != .rawJPEG }.map(\.localID))
             let associations = try await matching.albumOrganizationAssociations(localIDs: ids, using: manager); try check()
             let matches = Dictionary(grouping: associations, by: \.localIdentity.localIdentifier)
@@ -216,7 +217,7 @@ import Photos
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             guard Selection(journal) == selection, saved.mappings == mappings else { throw LocalMediaMetadataError.sourceChanged }
             let completed = Dictionary(grouping: journal.jobs.filter { $0.stage == .completed }, by: \.source)
-            let sources = try sourcesByAlbum(selection); try check()
+            let sources = try await sourcesByAlbum(selection); try check()
             let selected = saved.operations.filter { planned.contains($0.id) }
             let matches = try await matching.albumOrganizationAssociations(localIDs: Set(selected.filter { $0.source.kind != .rawJPEG }.map(\.source.localID)), using: manager); try check()
             let byLocal = Dictionary(grouping: matches, by: \.localIdentity.localIdentifier)
@@ -319,11 +320,20 @@ import Photos
         guard let client = manager.client else { throw LibraryWriteError.unavailable }; return client
     }
 
-    /// 同一完整包含/排除快照先走现有政策，再保留每个包含相簿成员；一图可进入多个明确映射目标。
-    private func sourcesByAlbum(_ saved: Selection) throws -> [String: [PhotoBackupSource]] {
+    /// saved固定同一包含/排除规则；先异步枚举再后台分组，返回成员快照，调用方await后重新检查账号/权限。
+    private func sourcesByAlbum(_ saved: Selection) async throws -> [String: [PhotoBackupSource]] {
+        let snapshots = try await scanner(saved.included.union(saved.excluded))
+        return try await Self.groupSources(saved, snapshots: snapshots)
+    }
+
+    /// saved和snapshots仅含可发送值；后台应用排除并保留多个映射成员，取消时不发布半份结果。
+    @concurrent private static func groupSources(_ saved: Selection, snapshots: [PhotoBackupAlbumSnapshot]) async throws -> [String: [PhotoBackupSource]] {
+        try Task.checkCancellation()
         let selection = try PhotoBackupAlbumSelection(included: saved.included, excluded: saved.excluded)
-        let snapshots = try scanner(saved.included.union(saved.excluded)), eligible = try Set(selection.scan(snapshots).sources)
-        return Dictionary(uniqueKeysWithValues: snapshots.filter { saved.included.contains($0.id) }.map { ($0.id, $0.assets.map(\.source).filter { eligible.contains($0) }) })
+        let eligible = try Set(selection.scan(snapshots).sources)
+        let result = Dictionary(uniqueKeysWithValues: snapshots.filter { saved.included.contains($0.id) }.map { ($0.id, $0.assets.map(\.source).filter { eligible.contains($0) }) })
+        try Task.checkCancellation()
+        return result
     }
 
     /// RAW优先保留已完成双回执，否则本轮完整本机双hash+双fresh远端原图证明；metadata单UUID永不成为RAW候选。
@@ -380,7 +390,7 @@ extension PhotoBackupAlbumSyncController {
             var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             guard journal.selectedAlbumIDs.contains(localID), !saved.creations.contains(where: { $0.localAlbumID == localID && $0.unresolved }) else { throw LibraryWriteError.busy }
-            _ = try sourcesByAlbum(Selection(journal)); try check()
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
             let intent = PhotoBackupAlbumCreation(localAlbumID: localID, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
             try intent.validate()
             let values = try await client.albumSyncTargets(); try check()
@@ -398,7 +408,7 @@ extension PhotoBackupAlbumSyncController {
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared,
                   journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
-            _ = try sourcesByAlbum(Selection(journal)); try check()
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
             saved.creations[index].phase = .sending
             try await saveCreationState(saved, scope: scope, check: check)
             let receipt: ManagedAlbum
@@ -429,7 +439,7 @@ extension PhotoBackupAlbumSyncController {
             let journal = try await store.loadPhotoBackups(scope: scope); try check()
             guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].unresolved, saved.creations[index].phase != .prepared,
                   journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
-            _ = try sourcesByAlbum(Selection(journal)); try check()
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
             if saved.creations[index].receiptID != nil {
                 try await confirmCreatedMapping(&saved, index: index, client: client, scope: scope, check: check)
             } else {
