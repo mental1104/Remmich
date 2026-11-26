@@ -5,20 +5,21 @@ final class SearchAcceptanceUITests: XCTestCase {
     /// 真实UIKit底栏保持五项，“我的”最右；相簿和分类共享图库且记住子页选择。
     @MainActor func testUnifiedProfileAndLibraryNavigation() {
         let app = launchProfile(language: "en")
-        let tabs = app.tabBars.firstMatch
-        XCTAssertTrue(tabs.buttons["Me"].waitForExistence(timeout: 10))
-        XCTAssertEqual(tabs.buttons.count, 5)
-        XCTAssertTrue(tabs.buttons["Photos"].exists)
-        XCTAssertTrue(tabs.buttons["Videos"].exists)
-        XCTAssertGreaterThan(tabs.buttons["Me"].frame.midX, tabs.buttons["Search"].frame.midX)
-        tabs.buttons["Library"].tap()
+        XCTAssertTrue(primaryTab("Me", in: app).waitForExistence(timeout: 10))
+        // iPad原生顶部标签会公开重复父子Button；按五个唯一标题核对入口，仍逐项验证顺序与真实操作。
+        let titles = ["Photos", "Videos", "Library", "Search", "Me"]
+        XCTAssertEqual(Set(app.buttons.allElementsBoundByIndex.map(\.label)), Set(titles))
+        for (left, right) in zip(titles, titles.dropFirst()) {
+            XCTAssertLessThan(primaryTab(left, in: app).frame.midX, primaryTab(right, in: app).frame.midX)
+        }
+        primaryTab("Library", in: app).tap()
         XCTAssertTrue(element("library-section-picker", in: app).waitForExistence(timeout: 5))
         app.segmentedControls.buttons["Collections"].tap()
         XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
-        tabs.buttons["Me"].tap()
+        primaryTab("Me", in: app).tap()
         XCTAssertTrue(element("my-language", in: app).waitForExistence(timeout: 5))
         capture("profile-english", app: app)
-        tabs.buttons["Library"].tap()
+        primaryTab("Library", in: app).tap()
         XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
         capture("library-collections-english", app: app)
     }
@@ -27,10 +28,9 @@ final class SearchAcceptanceUITests: XCTestCase {
     @MainActor func testChineseProfileAndExplicitEnglishSwitch() {
         let suite = "profile-language-ui-" + UUID().uuidString
         let app = launchProfile(language: "zh-Hans", preferencesSuite: suite)
-        let tabs = app.tabBars.firstMatch
-        XCTAssertTrue(tabs.buttons["我的"].waitForExistence(timeout: 10))
-        XCTAssertGreaterThan(tabs.buttons["我的"].frame.midX, tabs.buttons["搜索"].frame.midX)
-        tabs.buttons["我的"].tap()
+        XCTAssertTrue(primaryTab("我的", in: app).waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(primaryTab("我的", in: app).frame.midX, primaryTab("搜索", in: app).frame.midX)
+        primaryTab("我的", in: app).tap()
         element("my-language", in: app).tap()
         XCTAssertTrue(element("app-language-picker", in: app).waitForExistence(timeout: 5))
         capture("profile-language-chinese", app: app)
@@ -38,13 +38,22 @@ final class SearchAcceptanceUITests: XCTestCase {
         let english = app.buttons["English"]
         XCTAssertTrue(english.waitForExistence(timeout: 5))
         english.tap()
-        XCTAssertTrue(tabs.buttons["Me"].waitForExistence(timeout: 5))
-        XCTAssertTrue(tabs.buttons["Me"].isSelected)
+        XCTAssertTrue(primaryTab("Me", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(primaryTab("Me", in: app).isSelected)
         XCTAssertTrue(element("app-language-settings", in: app).exists)
         capture("profile-language-switched-english", app: app)
         app.terminate()
         let restored = launchProfile(language: nil, preferencesSuite: suite)
-        XCTAssertTrue(restored.tabBars.buttons["Me"].waitForExistence(timeout: 10))
+        XCTAssertTrue(primaryTab("Me", in: restored).waitForExistence(timeout: 10))
+    }
+
+    /// title为当前界面语言的标签标题；app为真实验收宿主。兼容iPhone TabBar和iPad顶部原生标签。
+    /// 返回首个实际标签按钮；排除同名导航返回键，后续断言/点击仍由XCTest验证存在、位置和选择状态。
+    @MainActor private func primaryTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
+        if app.tabBars.firstMatch.exists {
+            return app.tabBars.firstMatch.buttons.matching(identifier: title).firstMatch
+        }
+        return app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", title, "BackButton")).firstMatch
     }
 
     /// language仅在显式DEBUG宿主中设置应用偏好；nil保留上次选择以验证重启恢复。

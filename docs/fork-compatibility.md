@@ -2,6 +2,8 @@
 
 ## Unified Me tab and application language, 2026-11-26
 
+Both e69d234 simulator logs and original attachments are retained. The phone screenshot confirms the Chinese language page and rightmost Me. iPad exposes the system's top tab strip as duplicate parent/child Buttons outside a TabBar container; UI queries now follow that actual hierarchy while preserving five unique entries, every ordered position, real taps, selected-state and cold-restore assertions. Existing iPad search cases pass; the two new cases stopped at the incorrect container query before this correction, so their final acceptance remains pending.
+
 Run45778668246 on e69d234 compiles and passes API98/24, resource/preference/navigation tests and all15 backup/matching suites. The iPhone profile/library navigation case passes. The Chinese language-switch case reaches the language page but targets a StaticText instead of the inline Picker option's Button; the locator is corrected without bypassing the real selection. A legacy Live-state assertion now accepts the selected language while retaining behavior checks. Full App still reports crop/batch/Steam failures plus an invalidated test-session exception; final two-device results and the follow-up head remain unverified. String presentation now observes the shared language preference, and UIKit album-scope titles refresh in place without changing selection.
 
 First UI run45777358192 on1ace237 passes formatting/contracts but stops at app compilation: the backup settings used a title-string Section with a footer, which has no matching SwiftUI overload. Both sections now use explicit header/footer views. No tests executed in that run; the correction and conditional-label follow-up await the new head's full CI.
