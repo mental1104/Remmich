@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # 用swiftc运行内存契约检查；不读取凭据或访问生产图库，只在临时目录输出测试程序。
+# 依赖现有Xcode的swiftc/Foundation/CryptoKit；新增客户端领域依赖需显式加入清单，不过滤任何契约。
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 build_directory=$(mktemp -d "${TMPDIR:-/tmp}/remmich-contracts.XXXXXX")
 swiftc -swift-version 6 \
   Remmich/Infrastructure/Management/LibraryMutationClient.swift \
+  Remmich/Domain/Management/ManagedAlbumAccess.swift \
   Remmich/Infrastructure/Management/AssetEditList+StrictDecoding.swift \
   Remmich/Domain/Editing/AssetViewerFreshAsset.swift \
   Remmich/Domain/Albums/ForkAlbumDirectory.swift \
+  Remmich/Domain/Management/AssetMetadata.swift \
+  Remmich/Domain/Management/AssetTagManagement.swift \
+  Remmich/Domain/Management/AssetTagColor.swift \
   Remmich/Domain/Management/AlbumDirectoryManagement.swift \
+  Remmich/Domain/Management/AlbumSharing.swift \
+  Remmich/Domain/Management/AlbumPublicLink.swift \
+  Remmich/Domain/Management/PartnerSharing.swift \
   Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
+  Remmich/Domain/Backup/PhotoBackupOrigin.swift \
   Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
   Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \
   Remmich/Domain/LocalMedia/LocalMediaAssociation.swift \

@@ -101,7 +101,7 @@ struct LibrarySharedLinksCard: View {
         LibraryHubLink {
             LibrarySharedLinksView(store: store, source: source, media: media, assetDetails: assetDetails, context: context)
         } label: {
-            LibraryCollectionCard(title: "Shared Links", count: store.links?.count, symbol: "link",
+            LibraryCollectionCard(title: L10n.string("Shared Links"), count: store.links?.count, symbol: "link",
                                   appearance: cover == nil ? .glass : .photographic)
             {
                 if let cover {

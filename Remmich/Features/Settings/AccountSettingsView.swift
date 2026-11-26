@@ -1,8 +1,10 @@
 import SwiftUI
 import UIKit
 
+/// “我的”下的高级设置页；沿用账号与索引实例，允许从统一入口直达连接、索引或缓存设置。
 struct AccountSettingsView: View {
-    private enum SettingsPage: String {
+    /// 高级设置的稳定页标识；“我的”可直接进入相应页面。
+    enum SettingsPage: String {
         case home = "Profile"
         case account = "Account"
         case connection = "Connection"
@@ -127,6 +129,7 @@ struct AccountSettingsView: View {
     @State private var connectionLatency = ConnectionLatencyMonitor()
     @State private var showsBackup = false
     @State private var showsLocalMediaMatching = false
+    @State private var showsPartnerSharing = false
     @State private var isSaving = false
     @State private var saveError: String?
     @State private var pendingAccountDeletion: StoredLibraryAccount?
@@ -172,6 +175,9 @@ struct AccountSettingsView: View {
     @State private var copiedIndexFailureDiagnostics = false
     @State private var copiedThumbnailFailureDiagnostics = false
 
+    /// session/profile为当前账号与地址配置，activeRoute/routeStatus只展示已验证路由；libraryIndex复用现有索引。
+    /// saveProfile/signOut执行原鉴权动作，sessionController可选提供备份/共享能力；close覆盖默认dismiss。
+    /// showsCloseControl/drawsGlassBackground适配导航或浮层宿主，initialPage指定首次进入的高级设置页。
     init(
         session: AccountSession,
         profile: ConnectionProfile,
@@ -183,7 +189,8 @@ struct AccountSettingsView: View {
         sessionController: AppSessionController? = nil,
         close: (() -> Void)? = nil,
         showsCloseControl: Bool = true,
-        drawsGlassBackground: Bool = true
+        drawsGlassBackground: Bool = true,
+        initialPage: SettingsPage = .home
     ) {
         self.session = session
         self.activeRoute = activeRoute
@@ -195,6 +202,7 @@ struct AccountSettingsView: View {
         self.close = close
         self.showsCloseControl = showsCloseControl
         self.drawsGlassBackground = drawsGlassBackground
+        _selectedPage = State(initialValue: initialPage)
         _profile = State(initialValue: profile)
         let primary = profile.primaryEndpoint ?? (profile.endpoints.isEmpty ? activeRoute?.endpoint ?? session.apiURL : nil)
         _primaryAddress = State(initialValue: primary.map(ConnectionAddressFormatting.serverAddress) ?? "")
@@ -282,12 +290,18 @@ struct AccountSettingsView: View {
         .accessibilityIdentifier("account-settings")
         .sheet(isPresented: $showsBackup) {
             if let sessionController {
-                PhotoBackupView(controller: sessionController.media.management)
+                PhotoBackupView(controller: sessionController.media.management, backup: sessionController.media.photoBackups,
+                                albumSync: sessionController.media.photoBackupAlbumSync, albumAutomation: sessionController.media.photoBackupAlbumAutomation)
             }
         }
         .sheet(isPresented: $showsLocalMediaMatching) {
             if let sessionController {
                 LocalMediaMatchingView(controller: sessionController.media.localMediaMatches, manager: sessionController.media.management)
+            }
+        }
+        .sheet(isPresented: $showsPartnerSharing) {
+            if let sessionController {
+                PartnerSharingView(controller: sessionController.media.management, libraryIndex: sessionController.libraryIndex)
             }
         }
         .alert("Cannot Save Profile", isPresented: Binding(
@@ -444,7 +458,7 @@ struct AccountSettingsView: View {
     private func cardPresentation(_ page: SettingsPage) -> (symbol: String, color: Color, detail: String) {
         switch page {
         case .account: ("person.crop.circle", Self.accountColor, "Profile & session")
-        case .connection: ("network", Self.connectionColor, "\(activeRoute?.kind.rawValue.capitalized ?? "No route") · \(routeStatusLabel)")
+        case .connection: ("network", Self.connectionColor, "\(L10n.string(activeRoute?.kind.rawValue.capitalized ?? "No route")) · \(L10n.string(routeStatusLabel))")
         case .index: ("list.bullet.rectangle", Self.indexColor, "")
         case .cache: ("externaldrive", Self.cacheColor, "")
         case .home, .appearance, .mapsPlaces: ("", .clear, "")
@@ -480,11 +494,11 @@ struct AccountSettingsView: View {
                 .foregroundStyle(presentation.color)
                 .padding(.horizontal, inset)
             ViewThatFits(in: .horizontal) {
-                Text(page.rawValue)
+                Text(L10n.string(page.rawValue))
                     .fixedSize()
                     .padding(.horizontal, inset)
                 // Long titles may use the card's side insets before wrapping.
-                Text(page.rawValue)
+                Text(L10n.string(page.rawValue))
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 2)
@@ -503,7 +517,7 @@ struct AccountSettingsView: View {
                 } else if page == .connection {
                     animatedCardStatus(profileCardSummaries[page]?.status ?? presentation.detail)
                 } else {
-                    Text(presentation.detail)
+                    Text(L10n.string(presentation.detail))
                 }
             }
             .font(compact ? .caption2 : .caption).foregroundStyle(.secondary)
@@ -755,7 +769,7 @@ struct AccountSettingsView: View {
                         navigate(to: .appearance)
                     }
                 }
-                .accessibilityLabel(selectedPage == .home ? "Change app icon" : "Remmich logo")
+                .accessibilityLabel(L10n.string(selectedPage == .home ? "Change app icon" : "Remmich logo"))
                 .accessibilityHint(selectedPage == .home ? "Touch and hold to choose an app icon" : "")
                 .accessibilityAction(named: "Change app icon") { navigate(to: .appearance) }
             VStack(spacing: 4) {
@@ -792,7 +806,7 @@ struct AccountSettingsView: View {
             .buttonBorderShape(.circle)
             .accessibilityLabel("Back")
             .accessibilityIdentifier("profile-back")
-            Text(selectedPage.rawValue).font(.title3.bold())
+            Text(L10n.string(selectedPage.rawValue)).font(.title3.bold())
                 .foregroundStyle(Self.cardPages.contains(selectedPage) ? cardPresentation(selectedPage).color : Color.primary)
             Spacer(minLength: 0)
         }
@@ -827,7 +841,7 @@ struct AccountSettingsView: View {
                     } label: {
                         VStack(spacing: 8) {
                             RemmichLogoView(icon: icon, isAnimating: false).frame(width: 76, height: 76)
-                            Text(icon.rawValue).font(.caption.weight(.semibold))
+                            Text(L10n.string(icon.rawValue)).font(.caption.weight(.semibold))
                             Image(systemName: appIcons.selectedIcon == icon ? "checkmark.circle.fill" : "circle")
                                 .foregroundStyle(appIcons.selectedIcon == icon ? Color.accentColor : .secondary)
                         }
@@ -967,6 +981,11 @@ struct AccountSettingsView: View {
             }
             .buttonStyle(.plain)
             if sessionController != nil {
+                sectionCaption("伙伴共享").padding(.top, 24)
+                Button { showsPartnerSharing = true } label: {
+                    profileValueRow("伙伴关系与时间线", value: "查看与管理", symbol: "person.2.wave.2", showsChevron: true)
+                }
+                .buttonStyle(.plain)
                 sectionCaption("本机优先浏览").padding(.top, 24)
                 Button { showsLocalMediaMatching = true } label: {
                     profileValueRow("匹配本机照片与视频", value: "优先本机", symbol: "iphone.and.arrow.forward", showsChevron: true)
@@ -1007,18 +1026,20 @@ struct AccountSettingsView: View {
         return "\(activeRoute.kind.rawValue.capitalized) · \(routeStatusLabel)"
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func sectionCaption(_ title: String) -> some View {
-        Text(title).font(.caption2.weight(.semibold)).tracking(1.1)
+        Text(L10n.string(title)).font(.caption2.weight(.semibold)).tracking(1.1)
             .foregroundStyle(.secondary).padding(.bottom, 10)
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func profileValueRow(_ title: String, value: String, symbol: String? = nil, showsChevron: Bool = false) -> some View {
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 if let symbol {
                     Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 20)
                 }
-                Text(title).foregroundStyle(.primary).fixedSize(horizontal: true, vertical: false)
+                Text(L10n.string(title)).foregroundStyle(.primary).fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 8)
                 Group {
                     if showsChevron {
@@ -1042,7 +1063,7 @@ struct AccountSettingsView: View {
 
     private func statistic(_ title: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
-            Text(title).foregroundStyle(.secondary)
+            Text(L10n.string(title)).foregroundStyle(.secondary)
             Spacer(minLength: 4)
             Text(value).fontWeight(.medium).multilineTextAlignment(.trailing).textSelection(.enabled)
                 .layoutPriority(1)
@@ -1071,7 +1092,7 @@ struct AccountSettingsView: View {
         @ViewBuilder content: () -> some View
     ) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(title)
+            Text(L10n.string(title))
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.primary)
             content()
@@ -1081,7 +1102,7 @@ struct AccountSettingsView: View {
     private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 20) {
             if routeStatus != .connected {
-                Text("\(routeStatusLabel). \(routeStatusDetail)").font(.footnote).foregroundStyle(.secondary)
+                Text("\(L10n.string(routeStatusLabel)). \(L10n.string(routeStatusDetail))").font(.footnote).foregroundStyle(.secondary)
             }
             connectionField("Primary address", address: primaryAddress) {
                 TextField("https://photos.example.com:2283", text: $primaryAddress, axis: .vertical)
@@ -1138,7 +1159,7 @@ struct AccountSettingsView: View {
         let connected = isConnectedAddress(address)
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(label).foregroundStyle(.secondary)
+                Text(L10n.string(label)).foregroundStyle(.secondary)
                 if connected {
                     Label("Connected", systemImage: "checkmark.circle.fill").labelStyle(.iconOnly).foregroundStyle(.green)
                 }
@@ -1155,7 +1176,7 @@ struct AccountSettingsView: View {
                                 Text("ms")
                             }
                         case .checking, .unavailable:
-                            Text(sample.label)
+                            Text(L10n.string(sample.label))
                         }
                     }
                     .monospacedDigit().foregroundStyle(.secondary)
@@ -1230,7 +1251,7 @@ struct AccountSettingsView: View {
                 statistic("Last synced", Self.syncedDate(index.lastSyncedAt))
             }
             if case let .failed(message) = index.status {
-                Text(message).font(.footnote).foregroundStyle(.red)
+                Text(L10n.string(message)).font(.footnote).foregroundStyle(.red)
             }
             summaryActionButton(actionTitle, width: 96) {
                 switch index.status {
@@ -1312,7 +1333,7 @@ struct AccountSettingsView: View {
             Text("Remaining time is estimated from processed asset memberships across all albums. Thumbnails use the shared cache.")
                 .font(.caption2).foregroundStyle(.secondary)
             if !message.isEmpty {
-                Text(message)
+                Text(L10n.string(message))
                     .font(.footnote).foregroundStyle(.red)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1372,7 +1393,7 @@ struct AccountSettingsView: View {
                 .font(.caption2).foregroundStyle(.secondary)
                 .padding(.top, 10)
             if case let .failed(message) = libraryIndex.status {
-                Text(message).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
+                Text(L10n.string(message)).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
                     .padding(.top, 10)
             }
             Text("This rebuilds local metadata. Offline cached files remain separate.")
@@ -1420,7 +1441,7 @@ struct AccountSettingsView: View {
                 syncHeading(thumbnailCacheStatusPresentation, active: libraryIndex.thumbnailWarmingStatus == .warming,
                             diagnostics: assetFailureDiagnostics)
                 if let reason = libraryIndex.thumbnailWarmingWaitingReason {
-                    Text(reason.message).font(.footnote).foregroundStyle(.secondary)
+                    Text(L10n.string(reason.message)).font(.footnote).foregroundStyle(.secondary)
                 }
                 progressMeter(displayedThumbnailFractionCompleted, tint: Self.cacheColor, label: "Offline caching progress", value: thumbnailWarmingProgressText)
                 progressCaption(
@@ -1438,7 +1459,7 @@ struct AccountSettingsView: View {
                     statistic("Last synced", Self.syncedDate(libraryIndex.thumbnailWarmingLastUpdatedAt))
                 }
                 if case let .failed(message) = libraryIndex.thumbnailWarmingStatus {
-                    Text(message).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
+                    Text(L10n.string(message)).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
                 }
                 summaryActionButton(assetCachePhase.action.title) {
                     if assetCachePhase.action == .pause {
@@ -1469,7 +1490,7 @@ struct AccountSettingsView: View {
                     Text("Place names are fetched when you view assets with the default Photon service.")
                         .font(.footnote).foregroundStyle(.secondary)
                 } else if let reason = libraryIndex.placeCacheWaitingReason {
-                    Text(reason.message).font(.footnote).foregroundStyle(.secondary)
+                    Text(L10n.string(reason.message)).font(.footnote).foregroundStyle(.secondary)
                 }
                 progressMeter(Self.progressFraction(completed: progress.resolved, total: progress.eligible), tint: Self.cacheColor,
                               label: "Place caching progress", value: "\(progress.resolved) of \(progress.eligible) GPS assets completed")
@@ -1491,7 +1512,7 @@ struct AccountSettingsView: View {
                     statistic("Last synced", Self.syncedDate(libraryIndex.automaticPlacesAllowed ? libraryIndex.placeCacheRun.lastSyncedAt : nil))
                 }
                 if let error = libraryIndex.placeStorageError {
-                    Text(error).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
+                    Text(L10n.string(error)).font(.footnote).foregroundStyle(.red).textSelection(.enabled)
                 }
                 summaryActionButton(placeCachePhase.action.title) {
                     if placeCachePhase.action == .pause {
@@ -1548,18 +1569,20 @@ struct AccountSettingsView: View {
         .font(.caption).monospacedDigit()
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func summaryActionButton(_ title: String, width: CGFloat? = nil, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(title).font(.caption.weight(.semibold)).frame(width: width).frame(minHeight: 28) }
+        Button(action: action) { Text(L10n.string(title)).font(.caption.weight(.semibold)).frame(width: width).frame(minHeight: 28) }
             .buttonStyle(.glass)
             .buttonBorderShape(.capsule)
             .frame(minHeight: 44)
             .padding(.horizontal, 16)
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func actionRow(_ title: String, symbol: String, showsChevron: Bool = false) -> some View {
         HStack(spacing: 10) {
             Image(systemName: symbol).frame(width: 20).foregroundStyle(.secondary)
-            Text(title)
+            Text(L10n.string(title))
             Spacer(minLength: 4)
             if showsChevron {
                 Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
@@ -1579,9 +1602,10 @@ struct AccountSettingsView: View {
         return mediaBytes + libraryIndex.storageReport.cacheMetadataBytes
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func syncHeading(_ presentation: StatusPresentation, active: Bool, diagnostics: String?, title: String? = nil) -> some View {
         HStack(spacing: 8) {
-            Text(title ?? presentation.accessibilityValue).font(.title3.weight(.semibold))
+            Text(L10n.string(title ?? presentation.accessibilityValue)).font(.title3.weight(.semibold))
             Spacer(minLength: 4)
             if libraryIndex.thumbnailWarmingThermalState != nil, selectedPage == .cache {
                 Image(systemName: "thermometer.high").foregroundStyle(thumbnailCacheThermalWarningTint)
@@ -1751,7 +1775,7 @@ struct AccountSettingsView: View {
     ) -> some View {
         HStack(spacing: 8) {
             settingsIcon(systemImage)
-            Text(title)
+            Text(L10n.string(title))
                 .fontWeight(weight)
         }
     }
@@ -1791,6 +1815,7 @@ struct AccountSettingsView: View {
         .foregroundStyle(role == .destructive ? Color.red : Color.primary)
     }
 
+    /// 界面标签按当前语言解析；数值、账户资料与外部文本保持原值。
     private func settingsActionLabel(_ title: String, systemImage: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: systemImage)
@@ -1801,7 +1826,7 @@ struct AccountSettingsView: View {
                     height: SettingsIconLayout.actionFrame
                 )
                 .accessibilityHidden(true)
-            Text(title)
+            Text(L10n.string(title))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2059,7 +2084,7 @@ struct AccountSettingsView: View {
 
     private func statusLabel(_ label: String, note: StatusNote) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(label)
+            Text(L10n.string(label))
                 .bold()
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { statusNotes(note) }

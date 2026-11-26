@@ -27,7 +27,7 @@ struct MediaShareButton<Content: View>: View {
         } label: { label(preparing) }
             .buttonStyle(.plain)
             .disabled(selection == nil && !preparing)
-            .accessibilityLabel(preparing ? "Cancel share preparation" : "Share")
+            .accessibilityLabel(L10n.string(preparing ? "Cancel share preparation" : "Share"))
             .accessibilityValue(percent.map { "\($0) percent" } ?? "")
             .sheet(item: $activity, onDismiss: {
                 if errorMessage == nil {

@@ -21,6 +21,13 @@ nonisolated struct LocalMediaMetadataStreamDecoder {
     private var line: [UInt8] = []
     private var completed = false
     private var records: [LocalMediaRemoteMetadataRecord] = []
+    private var backupRecords: [LocalMediaRemoteMetadataRecord] = []
+
+    /// 相同资产/公开元组可由官方和本客户端同时记录；只合并跨来源的相同事实，不吞掉官方重复候选歧义。
+    private struct CandidateIdentity: Hashable {
+        let assetID: UUID
+        let metadata: LocalMediaMobileMetadata
+    }
 
     /// cloudIDs为本机公开Photos映射的完整不透明ID；两个字节上限分别限制单行和全响应，不截断后继续匹配。
     init(cloudIDs: Set<String>, maximumLineBytes: Int = 262_144, maximumResponseBytes: Int = 268_435_456) throws {
@@ -65,7 +72,16 @@ nonisolated struct LocalMediaMetadataStreamDecoder {
     /// 仅在HTTP正常EOF调用；必须既收到终止标记又无残行。返回候选仍需本机版本及fresh资产状态验证。
     func finish() throws -> [LocalMediaRemoteMetadataRecord] {
         guard completed, line.isEmpty else { throw LocalMediaMetadataStreamError.incomplete }
-        return records
+        guard !backupRecords.isEmpty else { return records }
+        let decoder = JSONDecoder()
+        let official = Set(records.compactMap { record -> CandidateIdentity? in
+            guard let metadata = try? decoder.decode(LocalMediaMobileMetadata.self, from: record.value) else { return nil }
+            return .init(assetID: record.assetID, metadata: metadata)
+        })
+        return try records + backupRecords.filter { record in
+            let metadata = try decoder.decode(LocalMediaMobileMetadata.self, from: record.value)
+            return !official.contains(.init(assetID: record.assetID, metadata: metadata))
+        }
     }
 
     /// data为一条完整UTF8 JSON行；只接受实际请求的实体，未知协议/错误内容不静默变成空匹配。
@@ -89,6 +105,14 @@ nonisolated struct LocalMediaMetadataStreamDecoder {
             guard let id = payload["assetId"] as? String, let assetID = UUID(uuidString: id),
                   let key = payload["key"] as? String,
                   let value = payload["value"] as? [String: Any] else { throw LocalMediaMetadataStreamError.invalidResponse }
+            if key.hasPrefix(PhotoBackupOrigin.keyPrefix) {
+                let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: JSONSerialization.data(withJSONObject: value))
+                try origin.validate()
+                guard key == PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId) else { throw LocalMediaMetadataStreamError.invalidResponse }
+                guard cloudIDs.contains(origin.metadata.cloudId) else { return }
+                try backupRecords.append(.init(assetID: assetID, value: JSONEncoder().encode(origin.metadata)))
+                return
+            }
             guard key == "mobile-app", let cloudID = value["iCloudId"] as? String, cloudIDs.contains(cloudID) else { return }
             // 不按asset或cloud ID去重：多个候选必须留给领域匹配器明确判为歧义。
             try records.append(.init(assetID: assetID, value: JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])))

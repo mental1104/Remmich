@@ -28,8 +28,8 @@ struct SettingsSectionPager<Context: View, Page: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Picker(title, selection: Binding(get: { selection }, set: select)) {
-                ForEach(labels.indices, id: \.self) { index in Text(labels[index]).tag(index) }
+            Picker(L10n.string(title), selection: Binding(get: { selection }, set: select)) {
+                ForEach(labels.indices, id: \.self) { index in Text(L10n.string(labels[index])).tag(index) }
             }
             .pickerStyle(.segmented)
             .padding(.bottom, 20)

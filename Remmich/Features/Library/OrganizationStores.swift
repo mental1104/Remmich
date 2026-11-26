@@ -8,40 +8,69 @@ final class RandomPhotosStore {
     private(set) var isLoading = false
     private(set) var hasLoaded = false
     private(set) var error: String?
+    private(set) var wasCancelled = false
     private var generation = UUID()
+    private var operation: Task<Void, Never>?
 
     /// 账号/端点变化清空结果并撤销所有旧响应的发布权，不取消或改写共享索引。
     func invalidate() {
         generation = UUID()
+        operation?.cancel()
+        operation = nil
         assets = []
         isLoading = false
         hasLoaded = false
         error = nil
+        wasCancelled = false
     }
 
-    /// source是当前账号读取器；同一代际只允许一次抽样，成功去重保留服务器随机顺序。
+    /// 用户停止等待时退休当前抽样；保留已确认批次，不把取消伪装成空结果或服务端失败。
+    func cancel() {
+        guard isLoading else { return }
+        generation = UUID()
+        operation?.cancel()
+        operation = nil
+        isLoading = false
+        wasCancelled = true
+        error = nil
+    }
+
+    /// source是当前账号读取器；每次明确抽样取消旧Task并取代发布权，去重保留服务端顺序。
+    /// 调用方取消也向实际读取传播；不合作的迟到成功/失败仍由本轮代际拒绝。
     func refresh(source: any OrganizationReading) async {
-        guard !isLoading else { return }
+        operation?.cancel()
+        generation = UUID()
         let owner = generation
         isLoading = true
         error = nil
-        defer {
-            if owner == generation {
-                isLoading = false
+        wasCancelled = false
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if owner == generation {
+                    isLoading = false
+                    operation = nil
+                }
+            }
+            do {
+                let values = try await source.randomPhotos()
+                try Task.checkCancellation()
+                guard owner == generation else { return }
+                var seen = Set<String>()
+                assets = values.filter { seen.insert($0.id.lowercased()).inserted }
+                hasLoaded = true
+            } catch {
+                guard owner == generation, !Task.isCancelled, !(error is CancellationError),
+                      (error as? TimelineReadError) != .staleGeneration else { return }
+                self.error = (error as? NativeSearchError)?.errorDescription
+                    ?? "Random photos could not be loaded. Check permissions and connection."
             }
         }
-        do {
-            let values = try await source.randomPhotos()
-            try Task.checkCancellation()
-            guard owner == generation else { return }
-            var seen = Set<String>()
-            assets = values.filter { seen.insert($0.id).inserted }
-            hasLoaded = true
-        } catch {
-            guard owner == generation, !Task.isCancelled, !(error is CancellationError),
-                  (error as? TimelineReadError) != .staleGeneration else { return }
-            self.error = (error as? NativeSearchError)?.errorDescription
-                ?? "Random photos could not be loaded. Check permissions and connection."
+        operation = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 }

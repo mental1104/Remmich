@@ -5,13 +5,22 @@ import Observation
 nonisolated protocol LocalMediaMatchingReading: Sendable {
     /// cloudIDs完整不截断；只接收完整只读metadata流，不能ACK/reset或发布半截候选。
     func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord]
-    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝。
+    /// id是候选远端UUID；返回绕过缓存的新鲜账号状态，缺字段仍由领域层拒绝；明确不可读抛LocalMediaCandidateError。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset
     /// queries最多64项，只查SHA1；noMatch绝不触发上传。
     func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup]
 }
 
 extension LibraryMutationClient: LocalMediaMatchingReading {}
+
+/// 明确相簿组织只读取当前已启用关联并重新核证；不调用原片checksum reader，不把结果写为备份完成。
+@MainActor protocol PhotoBackupAlbumMatchingReading: Sendable {
+    var revision: Int { get }
+    var albumOrganizationGeneration: UUID { get }
+    func albumOrganizationAssociations(localIDs: Set<String>, using manager: LibraryManagementController) async throws -> [LocalMediaAssociation]
+}
+
+extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
 /// 显式前台本机关联扫描；账号代际隔离、批量有界，不将进度/哈希查重写成备份成功。
 @MainActor @Observable final class LocalMediaMatchController {
@@ -25,7 +34,16 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
     private(set) var enabled = false
     private(set) var revision = 0
     private(set) var permission = LocalPhotoLibraryAccess.unknown
-    private(set) var status = "点击扫描，关联本机与Immich已有照片；不会上传或删除照片。"
+    /// 当前语言只影响展示；保留原任务、源版本和账号代际。
+    var status: String {
+        L10n.text(statusMessage) + (statusSuffix.map { L10n.text($0) } ?? "")
+    }
+
+    private(set) var statusMessage: String.LocalizationValue = "点击扫描，关联本机与Immich已有照片；不会上传或删除照片。" {
+        didSet { statusSuffix = nil }
+    }
+
+    private var statusSuffix: String.LocalizationValue?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private weak var manager: LibraryManagementController?
@@ -75,7 +93,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
             automaticGeneration = nil; monitor?.stop(); monitor = nil
         }
         permission = inventory.authorization
-        status = nextScope == nil ? "请先连接Immich服务器。" : "启用后自动关联本机已有照片，优先本机显示和播放。"
+        statusMessage = nextScope == nil ? "请先连接Immich服务器。" : "启用后自动关联本机已有照片，优先本机显示和播放。"
     }
 
     /// 只返回同账号、同远端精确版本、当前授权范围未变化的已确认项；媒体读取前后仍须核实Photos源版本。
@@ -87,11 +105,68 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         return association
     }
 
+    /// 只暴露不透明证明epoch；新扫描/关闭/权限或账号退役都撤销尚未完成的明确组织操作。
+    var albumOrganizationGeneration: UUID {
+        generation
+    }
+
+    /// localIDs只来自已保存包含减排除后的当前相簿源；只重核已有匹配，不发起新字节匹配或请求Photos授权。
+    /// metadata来源重新取当前完整metadata证据链；缺本机hash不等于缺组织依据，但旧UUID/旧revision单独不够。
+    func albumOrganizationAssociations(localIDs: Set<String>, using manager: LibraryManagementController) async throws -> [LocalMediaAssociation] {
+        guard self.manager === manager, let scope, manager.backupScope == scope, enabled,
+              let access, inventory.authorization == access, access == .full || access == .limited else { return [] }
+        let owner = manager.generation, run = generation, stamp = revision
+        let validateContext: @MainActor () throws -> Void = {
+            try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: access)
+            guard self.enabled, self.revision == stamp else { throw LocalMediaMetadataError.sourceChanged }
+        }
+        let remote: any LocalMediaMatchingReading
+        if let remoteOverride {
+            remote = remoteOverride
+        } else if let client = manager.client {
+            remote = client
+        } else {
+            throw LibraryWriteError.unavailable
+        }
+        let selected = associations.values.filter { localIDs.contains($0.localIdentity.localIdentifier) }
+        let ids = Array(Set(selected.map(\.localIdentity.localIdentifier))).sorted()
+        var snapshots: [String: LocalPhotoSnapshot] = [:]
+        for start in stride(from: 0, to: ids.count, by: 64) {
+            let batch = Array(ids[start ..< min(start + 64, ids.count)])
+            let values = try await metadata.snapshots(for: batch, validateContext: validateContext)
+            try validateContext(); try validateSnapshots(values, requested: batch)
+            for value in values {
+                snapshots[value.identity.localIdentifier] = value
+            }
+        }
+        var result: [LocalMediaAssociation] = []
+        for association in selected {
+            try validateContext()
+            guard let snapshot = snapshots[association.localIdentity.localIdentifier], snapshot.identity == association.localIdentity else { continue }
+            if association.source == .mobileMetadata {
+                guard let client = manager.client else { throw LibraryWriteError.unavailable }
+                // 已有精确UUID不需重扫全库stream；官方单资产GET提供当前mobile-app，仍逐字段与当前Photos metadata比较。
+                let current = try await client.albumSyncMetadata(association.remoteID)
+                try validateContext()
+                let candidateValue = LocalMediaRemoteCandidate(assetID: association.remoteID, metadata: current)
+                guard case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: association.localIdentity, snapshot: snapshot, candidates: [candidateValue]),
+                      candidate.assetID == association.remoteID else { continue }
+            }
+            guard let fresh = try await freshCandidate(association.remoteID, using: remote, validateContext: validateContext),
+                  fresh.updatedAt == association.remoteRevision,
+                  let verified = LocalMediaAssociation.verified(remote: fresh, requestedID: association.remoteID, ownerID: scope.userID,
+                                                                local: snapshot.identity, source: association.source, expectedChecksum: association.checksum) else { continue }
+            result.append(verified)
+        }
+        try validateContext()
+        return result
+    }
+
     /// 明确停止当前前台扫描；只保留此前已经完成fresh验证的内存关联，不宣称扫描完成。
     func cancel() {
         guard running else { return }
         invalidateRun()
-        status = "扫描已停止；保留已确认关联，未完成项目不算匹配成功。"
+        statusMessage = "扫描已停止；保留已确认关联，未完成项目不算匹配成功。"
     }
 
     /// root在media configure/前台恢复后调用；不弹Photos权限。相同代际只恢复/自动刷新一次，正在运行时复用任务。
@@ -140,10 +215,29 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 }
             } catch {
                 guard generation == run, manager.generation == owner else { return }
-                status = "无法恢复本机关联：\(error.localizedDescription)。未覆盖已有资料。"
+                statusMessage = "无法恢复本机关联：\(error.localizedDescription)。未覆盖已有资料。"
             }
         }
         task = operation; return operation
+    }
+
+    /// headless组织专用冷恢复：只读取同账号已保存关联，不启动全库扫描/hash、Photos授权或iCloud媒体访问。
+    /// manager/scope是当前processing租约身份；应使用独立Controller，所有关联随后仍由组织路径逐项fresh核证。
+    func restoreForAlbumOrganization(using manager: LibraryManagementController, scope: MediaAccountScope) async throws {
+        configure(using: manager, scope: scope)
+        guard !running else { throw LibraryWriteError.busy }
+        let run = generation, owner = manager.generation
+        let document = try await persistence.load(scope: scope)
+        try validate(manager, owner: owner, scope: scope, run: run)
+        enabled = document?.enabled ?? false
+        access = document?.access
+        if enabled, document?.access == inventory.authorization {
+            associations = Dictionary(uniqueKeysWithValues: (document?.associations ?? []).map { ($0.remoteID, $0) })
+        } else {
+            associations = [:]
+        }
+        restoredNamespace = scope.cacheNamespace
+        publishCounts(); revision += 1
     }
 
     /// 仅用户操作改变启用配置；关闭立即失效关联并保存，启用后显式扫描可请求初次Photos授权。
@@ -167,10 +261,10 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 let saved = try await persistence.save(document, scope: scope, permit: writePermit)
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
                 guard saved else { return }
-                status = value ? "已保存启用配置；连接服务器后自动匹配。" : "已关闭本机优先，不修改或删除任何照片。"
+                statusMessage = value ? "已保存启用配置；连接服务器后自动匹配。" : "已关闭本机优先，不修改或删除任何照片。"
             } catch {
                 guard generation == run else { return }
-                status = "本次设置已改变，但配置保存失败：\(error.localizedDescription)。"
+                statusMessage = "本次设置已改变，但配置保存失败：\(error.localizedDescription)。"
             }
             if generation == run {
                 task = nil
@@ -195,7 +289,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         permit.invalidate(); permit = LocalMediaSavePermit(); let writePermit = permit
         // 保留已确认映射供当前窗口/离线使用；本轮发现的变更由实际媒体reader复核，不把扫描进度当作完成。
         total = 0; scanned = 0; unmatched = 0; metadataFailures = 0
-        status = "正在确认照片访问权限…"
+        statusMessage = "正在确认照片访问权限…"
         let operation = Task {
             defer {
                 if generation == run {
@@ -235,10 +329,10 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                             cloudIDs.insert(id)
                         }
                     }
-                    status = "读取本机元数据 \(min(start + 64, ids.count))/\(total)…"
+                    statusMessage = "读取本机元数据 \(min(start + 64, ids.count))/\(total)…"
                     await Task.yield(); try validateContext()
                 }
-                status = "只读匹配Immich元数据…"
+                statusMessage = "只读匹配Immich元数据…"
                 var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
                 if !cloudIDs.isEmpty {
                     do {
@@ -264,7 +358,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                             throw error
                         }
                         metadataFailures += 1
-                        status = "Immich元数据暂不可用，继续仅用本机校验和匹配。"
+                        statusMessage = "Immich元数据暂不可用，继续仅用本机校验和匹配。"
                     }
                 }
                 var confirmedRemoteIDs = Set<UUID>()
@@ -279,11 +373,12 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         if case let .resolved(cloudID) = snapshot.cloudIdentity,
                            case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: candidates[cloudID] ?? [])
                         {
-                            let fresh = try await remote.localMediaAsset(candidate.assetID.uuidString)
-                            try validateContext()
-                            if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata) {
+                            if let fresh = try await freshCandidate(candidate.assetID, using: remote, validateContext: validateContext),
+                               let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata)
+                            {
                                 accept(value); confirmedRemoteIDs.insert(value.remoteID); confirmed = true
                             } else {
+                                // 明确不可读只撤销此候选；独立本机字节仍可能找到另一个当前可读副本。
                                 removeAssociation(candidate.assetID)
                             }
                         }
@@ -297,7 +392,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                             }
                         }
                         scanned += 1
-                        status = "已检查 \(scanned)/\(total)，仅确认安全可用关联。"
+                        statusMessage = "已检查 \(scanned)/\(total)，仅确认安全可用关联。"
                     }
                     // 当前batch内最多64个本机证明；返回ID集合必须完全对应，noMatch/trashed只统计未确认。
                     if !hashes.isEmpty {
@@ -308,9 +403,8 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                         for item in hashes {
                             guard let lookup = byID[item.query.id] else { throw LocalMediaMetadataError.invalidMetadata }
                             if case let .existing(id) = lookup.outcome {
-                                let fresh = try await remote.localMediaAsset(id.uuidString)
-                                try validateContext()
-                                if let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
+                                if let fresh = try await freshCandidate(id, using: remote, validateContext: validateContext),
+                                   let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
                                                                               source: .checksum, expectedChecksum: item.proof.digest.sha1Base64)
                                 {
                                     accept(value); confirmedRemoteIDs.insert(value.remoteID)
@@ -335,18 +429,37 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 try validateContext()
                 guard saved else { throw CancellationError() }
                 restoredNamespace = scope.cacheNamespace
-                status = permission == .limited ? "已完成当前授权范围匹配并保存；未授权照片未扫描。" : "已完成匹配并保存；下次启动自动恢复，本机优先显示和播放。"
+                statusMessage = permission == .limited ? "已完成当前授权范围匹配并保存；未授权照片未扫描。" : "已完成匹配并保存；下次启动自动恢复，本机优先显示和播放。"
                 if metadataFailures > 0 {
-                    status += " 部分元数据不可用，已独立尝试本机校验和。"
+                    statusSuffix = " 部分元数据不可用，已独立尝试本机校验和。"
                 }
             } catch {
                 guard generation == run, manager.generation == owner, manager.backupScope == scope else { return }
                 self.permission = inventory.authorization
-                status = error is CancellationError ? "扫描已停止，未完成项目不算匹配成功。" : "扫描未完成：\(error.localizedDescription)。只保留已确认关联，可重新扫描。"
+                statusMessage = error is CancellationError ? "扫描已停止，未完成项目不算匹配成功。" : "扫描未完成：\(error.localizedDescription)。只保留已确认关联，可重新扫描。"
             }
         }
         task = operation
         return operation
+    }
+
+    /// id来自本轮metadata/precheck；remote只读候选，validateContext在解释成功或错误前重验Task/账号/权限。
+    /// 仅窄typed不可读返回nil，由调用方撤销该ID并继续；其他HTTP、解码和网络错误原样抛出。
+    private func freshCandidate(_ id: UUID, using remote: any LocalMediaMatchingReading,
+                                validateContext: @MainActor () throws -> Void) async throws -> LocalMediaRemoteAsset?
+    {
+        try validateContext()
+        let fresh: LocalMediaRemoteAsset
+        do { fresh = try await remote.localMediaAsset(id.uuidString) }
+        catch {
+            try validateContext()
+            if case LocalMediaCandidateError.inaccessible = error {
+                return nil
+            }
+            throw error
+        }
+        try validateContext()
+        return fresh
     }
 
     /// run/manager/scope均绑定本次明确操作；expectedAccess开启后禁止在授权范围改变时继续发布旧清单。
@@ -447,7 +560,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
         invalidateRun(); associations = [:]; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
         metadataFailures = 0
         permission = inventory.authorization
-        status = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
+        statusMessage = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
         let run = generation; let owner = manager.generation; let writePermit = permit
         changeTask = Task {
             do {
@@ -464,7 +577,7 @@ extension LibraryMutationClient: LocalMediaMatchingReading {}
                 }
             } catch {
                 guard generation == run else { return }
-                changeTask = nil; status = "照片库已变化，旧关联失效；等待下次可用刷新。"
+                changeTask = nil; statusMessage = "照片库已变化，旧关联失效；等待下次可用刷新。"
             }
         }
     }

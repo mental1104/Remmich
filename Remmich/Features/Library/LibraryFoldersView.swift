@@ -128,7 +128,7 @@ struct LibraryFoldersCard: View {
         LibraryHubLink {
             LibraryFoldersView(folder: nil, store: store, source: source, media: media, assetDetails: assetDetails, context: context)
         } label: {
-            LibraryCollectionCard(title: "Folders", count: store.tree?.assetPaths.count, symbol: "folder",
+            LibraryCollectionCard(title: L10n.string("Folders"), count: store.tree?.assetPaths.count, symbol: "folder",
                                   appearance: store.covers.isEmpty ? .glass : .photographic)
             {
                 let covers = store.covers

@@ -31,7 +31,7 @@ struct EmptyStateView: View {
     let systemImage: String
 
     var body: some View {
-        ContentUnavailableView(title, systemImage: systemImage, description: Text(message))
+        ContentUnavailableView(L10n.string(title), systemImage: systemImage, description: Text(L10n.string(message)))
             .accessibilityIdentifier("empty-state")
     }
 }
@@ -42,7 +42,7 @@ struct ErrorStateView: View {
 
     var body: some View {
         ContentUnavailableView {
-            Label(title, systemImage: "exclamationmark.icloud")
+            Label(L10n.string(title), systemImage: "exclamationmark.icloud")
         } description: {
             Text("Check the server connection and try again.")
         } actions: {

@@ -89,8 +89,8 @@ private nonisolated let takeoverMotionAssetJSON = #"{"id":"11111111-1111-4111-81
         self.liveJobID = liveJobID; otherJobID = journal.jobs.dropFirst().first?.id
         self.exporter = exporter; self.script = script
         self.firstManager = firstManager; self.waitingManager = waitingManager
-        first = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: databaseURL), exporter: exporter)
-        waiting = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: databaseURL), exporter: exporter)
+        first = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: databaseURL), exporter: exporter, preflight: SyntheticBackupPreflight())
+        waiting = PhotoBackupController(store: SQLiteLibraryIndexStore(databaseURL: databaseURL), exporter: exporter, preflight: SyntheticBackupPreflight())
     }
 
     /// 返回只拦截本测试会话的配置；无全局注册、真实Cookie或真实网络回退。

@@ -82,7 +82,7 @@ struct SavedAccountsView: View {
                         .transition(.opacity)
                 }
                 if let error = controller.accountActionError {
-                    Text(error).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                    Text(L10n.string(error)).font(.footnote).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                 }
                 if currentSession != nil {
                     Button { Task { await controller.addAccount() } } label: {

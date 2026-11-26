@@ -219,7 +219,7 @@ struct DownloadsView: View {
             if let message = exports.message {
                 ContentUnavailableView {
                     Label("Downloads Unavailable", systemImage: "exclamationmark.circle")
-                } description: { Text(message) } actions: {
+                } description: { Text(L10n.string(message)) } actions: {
                     Button("Try Again") { exports.retryLoading() }
                 }
             } else {
@@ -238,7 +238,7 @@ struct DownloadsView: View {
                                                  confirm: { removingJob = job.id }, remove: { removeHistory(job.id) }))
         }
         if let message = exports.message {
-            Text(message).font(.footnote).foregroundStyle(.secondary)
+            Text(L10n.string(message)).font(.footnote).foregroundStyle(.secondary)
         }
     }
 
@@ -268,7 +268,7 @@ struct DownloadsView: View {
                         .truncationMode(.middle)
                         .contentTransition(.opacity)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(job.tier.rawValue)
+                    Text(L10n.string(job.tier.rawValue))
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize()
                 }
@@ -346,7 +346,7 @@ struct DownloadsView: View {
                                     Image(systemName: job.stage == .paused ? "play.fill" : "pause.fill")
                                         .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
                                 }
-                                .accessibilityLabel(job.stage == .paused ? "Resume download" : "Pause download")
+                                .accessibilityLabel(L10n.string(job.stage == .paused ? "Resume download" : "Pause download"))
                                 .buttonStyle(.glass)
                                 .buttonBorderShape(.capsule)
                                 .controlSize(.small)
@@ -398,7 +398,7 @@ struct MediaDownloadButton<Content: View>: View {
                 .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
                 .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: saved)
         }
-        .accessibilityLabel(saved ? "Saved to Photos. Choose quality" : "Save to Photos")
+        .accessibilityLabel(L10n.string(saved ? "Saved to Photos. Choose quality" : "Save to Photos"))
         .sheet(item: $presentation) { selection in
             GeometryReader { container in
                 ZStack {
@@ -602,7 +602,7 @@ private struct MediaExportQualityView: View {
                     .buttonStyle(.plain)
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: media.exports.activeJob(assetID: asset.id)?.id)
                     if let message = media.exports.message {
-                        Text(message).font(.footnote).foregroundStyle(.secondary)
+                        Text(L10n.string(message)).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.horizontal, 20)
@@ -674,7 +674,7 @@ struct MediaExportProgressBadge: View {
                         if job.stage == .downloading, let fraction = job.fraction {
                             Text(fraction, format: .percent.precision(.fractionLength(0)))
                         } else {
-                            Text(job.stage == .paused ? "Paused" : job.stage == .saving ? "Saving" : job.stage == .queued ? "Queued" : job.stage == .waiting ? "Waiting" : job.stage == .awaitingPhotos ? "Open to save" : "Preparing")
+                            Text(L10n.string(job.stage == .paused ? "Paused" : job.stage == .saving ? "Saving" : job.stage == .queued ? "Queued" : job.stage == .waiting ? "Waiting" : job.stage == .awaitingPhotos ? "Open to save" : "Preparing"))
                         }
                     }
                     .font(.caption2.weight(.semibold)).monospacedDigit().foregroundStyle(.white)

@@ -1,0 +1,595 @@
+import Foundation
+import Observation
+import Photos
+
+/// 明确的单向增量组织流程；拥有同账号SQLite账本，所有副作用复用既有管理client和唯一备份Coordinator。
+@MainActor @Observable final class PhotoBackupAlbumSyncController {
+    private(set) var loading = false
+    private(set) var running = false
+    private(set) var prepared = false
+    private(set) var targets: [ManagedAlbum] = []
+    private(set) var titles: [String: String] = [:]
+    private(set) var state = PhotoBackupAlbumSyncState(namespace: "unloaded")
+    private(set) var unmatched = 0
+    private(set) var processed = 0
+    private(set) var confirmed = 0
+    /// 数量按逻辑源乘映射计算；RAW/JPEG两主体均确认才算一组完成。
+    var previewCount: Int {
+        previewIDs.count
+    }
+
+    /// 当前语言只影响展示；保留原任务、源版本和账号代际。
+    var status: String {
+        L10n.text(statusMessage)
+    }
+
+    private(set) var statusMessage: String.LocalizationValue = "先读取目标并明确选择已有自有相簿，再预览和确认补入。只修改相簿关系。"
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var loadedScope: MediaAccountScope?
+    @ObservationIgnored private var previewIDs: Set<UUID> = []
+    @ObservationIgnored private var previewSelection: Selection?
+    @ObservationIgnored private var monitor: LocalPhotoChangeMonitor?
+    @ObservationIgnored private let store: SQLiteLibraryIndexStore
+    @ObservationIgnored private let matching: any PhotoBackupAlbumMatchingReading
+    @ObservationIgnored private let scanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
+    @ObservationIgnored private let names: @MainActor (Set<String>) throws -> [String: String]
+    @ObservationIgnored private let verifySource: @MainActor (PhotoBackupSource) throws -> Void
+    @ObservationIgnored private let authorization: @MainActor () -> PHAuthorizationStatus
+    @ObservationIgnored private let observeChanges: Bool
+    @ObservationIgnored private let rawJPEGResolver: PhotoBackupRawJPEGExistingResolver
+
+    /// 同步选择来自保存的日志，不引用UI草稿；cloud只用于防止确认期间意愿变化，不触发任何原片读取。
+    private nonisolated struct Selection: Equatable, Sendable {
+        let included: Set<String>
+        let excluded: Set<String>
+        let cloud: Bool
+        /// journal必须已从当前账号冷读；只复制已保存意愿，不采纳页面草稿。
+        init(_ journal: PhotoBackupJournal) {
+            included = Set(journal.selectedAlbumIDs); excluded = Set(journal.excludedAlbumIDs ?? []); cloud = journal.allowCloud
+        }
+    }
+
+    /// 计划阶段以完整源/角色证明定位历史组，避免每个成员反复扫描全部历史。
+    private struct OperationKey: Hashable {
+        let localAlbumID: String
+        let targetID: UUID
+        let source: PhotoBackupSource
+        let assets: [PhotoBackupAlbumSyncAsset]
+        /// operation的完整身份作为历史索引键，不以本地ID或目标名称合并不同版本。
+        init(_ operation: PhotoBackupAlbumSyncOperation) {
+            localAlbumID = operation.localAlbumID; targetID = operation.targetID; source = operation.source; assets = operation.assets
+        }
+    }
+
+    /// 自动历史门按逻辑ID/映射定位，源版本变化也不自动重放；一次构建Set避免逐源扫描全部历史。
+    private struct SourceTargetKey: Hashable {
+        let localAlbumID: String
+        let targetID: UUID
+        let localID: String
+    }
+
+    /// matching返回当前fresh匹配证据；其余可选端口只隔离Photos元数据，默认均为真实公开系统读取。
+    /// store仍是真实SQLite，observeChanges=false只用于隔离测试，绝不替换HTTP/计划/回执确认逻辑。
+    /// rawJPEGReader只替换本机资源系统口；nil使用固定network=false双原图SHA1，不采纳旧metadata单图证明。
+    init(matching: any PhotoBackupAlbumMatchingReading, store: SQLiteLibraryIndexStore = .init(),
+         scanner: (@MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot])? = nil,
+         names: (@MainActor (Set<String>) throws -> [String: String])? = nil,
+         verifySource: (@MainActor (PhotoBackupSource) throws -> Void)? = nil,
+         authorization: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) }, observeChanges: Bool = true,
+         rawJPEGReader: (any PhotoBackupRawJPEGChecksumReading)? = nil)
+    {
+        self.matching = matching; self.store = store
+        self.scanner = scanner ?? { ids in try await PhotoBackupController.albumSnapshots(for: ids) }
+        self.names = names ?? Self.albumNames; self.verifySource = verifySource ?? Self.verifyCurrentSource
+        self.authorization = authorization; self.observeChanges = observeChanges
+        rawJPEGResolver = .init(reader: rawJPEGReader ?? PhotoKitRawJPEGChecksumReader())
+    }
+
+    /// 冷读映射/操作及当前自有目标；sending只显示为unknown，不自动执行或据旧UUID建立新映射。
+    func load(using manager: LibraryManagementController, backup: PhotoBackupController) async {
+        guard !loading, !running, !backup.running, !manager.busy, let scope = manager.backupScope else { return }
+        let owner = manager.generation, run = generation, access = authorization()
+        loading = true
+        defer { loading = false }
+        do {
+            try validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+            let client = try currentClient(manager)
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope)
+            try validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+            let journal = try await store.loadPhotoBackups(scope: scope)
+            try validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+            let values = try await client.albumSyncTargets()
+            try validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+            for index in saved.operations.indices where saved.operations[index].phase == .sending {
+                saved.operations[index].phase = .unknown; saved.operations[index].failure = .unconfirmed
+            }
+            for index in saved.creations.indices where saved.creations[index].phase == .sending {
+                saved.creations[index].phase = .unknown
+            }
+            let localNames = try names(Set(journal.selectedAlbumIDs).union(journal.excludedAlbumIDs ?? []))
+            state = saved; targets = values; titles = localNames; loadedScope = scope; prepared = false; previewIDs = []
+            statusMessage = "已读取当前账户目标。名称相同也须明确选择；缺失或无权限目标不会自动创建或替换。"
+        } catch {
+            if generation == run, manager.generation == owner {
+                prepared = false; statusMessage = "未能确认相簿组织配置；保留已有映射与恢复资料，请检查授权/连接后重读。"
+            }
+        }
+    }
+
+    /// 明确映射或解除映射；仅保存UUID，不创建/改名/删除相簿或移除任何远端成员。
+    @discardableResult func setMapping(localID: String, targetID: UUID?, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard journal.selectedAlbumIDs.contains(localID) else { throw LocalMediaMetadataError.sourceChanged }
+            let target: ManagedAlbum?
+            if let targetID {
+                target = try await client.albumSyncTarget(targetID); try check()
+            } else {
+                target = nil
+            }
+            saved.mappings.removeAll { $0.localAlbumID == localID }
+            if let targetID, let target {
+                saved.mappings.append(.init(localAlbumID: localID, targetID: targetID, targetName: target.albumName))
+                for index in saved.creations.indices where saved.creations[index].localAlbumID == localID && saved.creations[index].unresolved {
+                    saved.creations[index].phase = .mapped; saved.creations[index].mappedTargetID = targetID
+                }
+            }
+            for index in saved.operations.indices where saved.operations[index].localAlbumID == localID && saved.operations[index].phase != .confirmed {
+                saved.operations[index].phase = .cancelled
+            }
+            saved.version = PhotoBackupAlbumSyncState.currentVersion
+            try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
+            state = saved; prepared = false; previewIDs = []; statusMessage = "映射已保存。预览后才会补入；解除映射保留远端相簿与现有成员。"
+        }
+    }
+
+    /// 只建立组织计划；RAW无完整回执时仅哈希本机双原图，不上传/下载iCloud。automatic不能重排失败/未知/部分历史。
+    /// validateExternal默认nil；processing调用方可把固定租约检查接入每个内部await，而非只在整Task完成后检查。
+    @discardableResult func prepare(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                    validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
+        start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            guard !automatic || saved.automaticEnabled else { prepared = false; previewIDs = []; return }
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            let selection = Selection(journal)
+            let completed = Dictionary(grouping: journal.jobs.filter { $0.stage == .completed }, by: \.source)
+            let sources = try await sourcesByAlbum(selection); try check()
+            let ids = Set(sources.values.flatMap(\.self).filter { $0.kind != .rawJPEG }.map(\.localID))
+            let associations = try await matching.albumOrganizationAssociations(localIDs: ids, using: manager); try check()
+            let matches = Dictionary(grouping: associations, by: \.localIdentity.localIdentifier)
+            var rawCandidates: [PhotoBackupSource: [PhotoBackupAlbumSyncAsset]] = [:]
+            var planned = Set<UUID>(); var missing = 0
+            var indexed: [OperationKey: Int] = [:]
+            var blockedAutomatic = Set<SourceTargetKey>()
+            for (index, operation) in saved.operations.enumerated() {
+                guard indexed.updateValue(index, forKey: OperationKey(operation)) == nil else { throw PhotoBackupStateError.invalidJournal }
+                if automatic, operation.phase != .queued || !operation.confirmedAssetIDs.isEmpty {
+                    blockedAutomatic.insert(.init(localAlbumID: operation.localAlbumID, targetID: operation.targetID, localID: operation.source.localID))
+                }
+            }
+            for mapping in saved.mappings where selection.included.contains(mapping.localAlbumID) {
+                _ = try await client.albumSyncTarget(mapping.targetID); try check()
+                for source in sources[mapping.localAlbumID] ?? [] {
+                    if blockedAutomatic.contains(.init(localAlbumID: mapping.localAlbumID, targetID: mapping.targetID, localID: source.localID)) {
+                        continue
+                    }
+                    let assets: [PhotoBackupAlbumSyncAsset]?
+                    if source.kind == .rawJPEG, let cached = rawCandidates[source] {
+                        assets = cached.isEmpty ? nil : cached
+                    } else {
+                        assets = try await candidateAssets(source, completed: completed, matches: matches[source.localID] ?? [], client: client, ownerID: scope.userID, check: check)
+                        try check()
+                        if source.kind == .rawJPEG {
+                            rawCandidates[source] = assets ?? []
+                        }
+                    }
+                    guard let assets else { missing += 1; continue }
+                    let candidate = PhotoBackupAlbumSyncOperation(localAlbumID: mapping.localAlbumID, targetID: mapping.targetID, source: source, assets: assets)
+                    let key = OperationKey(candidate)
+                    var operation = indexed[key].map { saved.operations[$0] } ?? candidate
+                    operation.phase = .queued; operation.failure = nil
+                    try operation.validate()
+                    if let index = indexed[key] {
+                        saved.operations[index] = operation
+                    } else {
+                        indexed[key] = saved.operations.count
+                        saved.operations.append(operation)
+                    }
+                    planned.insert(operation.id)
+                }
+            }
+            saved.version = PhotoBackupAlbumSyncState.currentVersion
+            try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
+            state = saved; previewIDs = planned; previewSelection = selection; unmatched = missing; prepared = true
+            statusMessage = "预览 \(planned.count) 个逻辑项目；\(missing) 项待匹配或待完整回执。确认后只补入缺失关系，不上传/下载原片。"
+        }
+    }
+
+    /// 手动确认或automatic独立同意后重核源/metadata；自动路径每项实际发送与检查点还须fresh磁盘意愿。
+    /// manager/backup绑定当前会话与保存选择；automatic默认false保留手动路径，返回实际任务或门禁拒绝时nil。
+    /// validateExternal默认nil保留手动确认；系统租约变化必须在真实成员GET返回后及PUT前同步拒绝。
+    @discardableResult func synchronize(using manager: LibraryManagementController, backup: PhotoBackupController, automatic: Bool = false,
+                                        validateExternal: (@MainActor () throws -> Void)? = nil) -> Task<Void, Never>?
+    {
+        guard prepared, !previewIDs.isEmpty, let selection = previewSelection else { return nil }
+        let planned = previewIDs, mappings = state.mappings
+        return start(using: manager, backup: backup, validateExternal: validateExternal) { [self] client, scope, check in
+            let saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            guard !automatic || saved.automaticEnabled else { throw PhotoBackupAlbumAutomaticRevoked() }
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard Selection(journal) == selection, saved.mappings == mappings else { throw LocalMediaMetadataError.sourceChanged }
+            let completed = Dictionary(grouping: journal.jobs.filter { $0.stage == .completed }, by: \.source)
+            let sources = try await sourcesByAlbum(selection); try check()
+            let selected = saved.operations.filter { planned.contains($0.id) }
+            let matches = try await matching.albumOrganizationAssociations(localIDs: Set(selected.filter { $0.source.kind != .rawJPEG }.map(\.source.localID)), using: manager); try check()
+            let byLocal = Dictionary(grouping: matches, by: \.localIdentity.localIdentifier)
+            let stamp = matching.revision
+            let matchEpoch = matching.albumOrganizationGeneration
+            let freshCheck: @MainActor () throws -> Void = {
+                try check()
+                guard self.matching.revision == stamp, self.matching.albumOrganizationGeneration == matchEpoch else { throw LocalMediaMetadataError.sourceChanged }
+            }
+            processed = 0; confirmed = 0
+            for var operation in selected {
+                try freshCheck()
+                let eligible = sources[operation.localAlbumID]?.contains(operation.source) == true
+                var currentAssets: [PhotoBackupAlbumSyncAsset]?
+                if eligible {
+                    currentAssets = try await candidateAssets(operation.source, completed: completed, matches: byLocal[operation.source.localID] ?? [],
+                                                              client: client, ownerID: scope.userID, check: freshCheck)
+                    try freshCheck()
+                }
+                guard eligible, currentAssets == operation.assets
+                else {
+                    operation.phase = .failed; operation.failure = .sourceChanged
+                    try await checkpoint(operation, scope: scope, check: freshCheck, automatic: automatic)
+                    processed += 1
+                    continue
+                }
+                try verifySource(operation.source)
+                let stop = try await synchronizeOperation(&operation, client: client, scope: scope, check: freshCheck, automatic: automatic)
+                processed += 1
+                if operation.phase == .confirmed {
+                    confirmed += 1
+                }
+                statusMessage = "已核对 \(processed)/\(selected.count) 组，完整确认 \(confirmed) 组。"
+                if stop {
+                    break
+                }
+            }
+            try freshCheck(); prepared = false
+            let final = try await store.loadPhotoBackupAlbumSync(scope: scope); try freshCheck()
+            state = final
+            manager.publishChanges(ifGeneration: manager.generation)
+            statusMessage = "本轮组织已停止或完成；以逐组确认状态为准。未知/部分结果会在下次明确预览后先fresh核查，不自动重发。"
+        }
+    }
+
+    /// 页面关闭/后台/换号撤销当前操作；sending已在HTTP前落盘，迟到结果不能覆盖新上下文。
+    func cancel() {
+        generation = UUID(); task?.cancel(); prepared = false; monitor?.stop(); monitor = nil
+        statusMessage = "相簿组织已停止；映射及部分回执保留，未知项须重新预览核查。"
+    }
+
+    /// 所有明确写流程共用manager忙门和原Coordinator；先取得管理忙门，避免自动备份抢占新组织操作。
+    /// validateExternal是窄系统租约端口，默认nil；其撤销错误与原账号/Photos门一样阻止后续HTTP与checkpoint。
+    private func start(using manager: LibraryManagementController, backup: PhotoBackupController, validateExternal: (@MainActor () throws -> Void)? = nil,
+                       operation: @escaping @MainActor (LibraryMutationClient, MediaAccountScope, @escaping @MainActor () throws -> Void) async throws -> Void) -> Task<Void, Never>?
+    {
+        guard !running, !loading, !backup.running, !manager.busy, let scope = manager.backupScope, loadedScope == scope,
+              backup.hasCurrentSavedSelection(using: manager) else { return nil }
+        let run = generation, owner = manager.generation, access = authorization()
+        guard access == .authorized || access == .limited else { statusMessage = "需要已有照片访问权限，未启动组织。"; return nil }
+        running = true
+        if observeChanges, monitor == nil {
+            monitor = LocalPhotoChangeMonitor { [weak self] in self?.cancel() }
+        }
+        let current = Task { [self] in
+            defer {
+                running = false; task = nil; if !prepared {
+                    monitor?.stop(); monitor = nil
+                }
+            }
+            do {
+                let check: @MainActor () throws -> Void = {
+                    try self.validate(manager, backup: backup, scope: scope, owner: owner, run: run, access: access)
+                    try validateExternal?()
+                }
+                try check()
+                try await manager.perform(publishChange: false) { client in
+                    try await PhotoBackupRunCoordinator.perform(scope: scope) { try check(); try await operation(client, scope, check) }
+                }
+            } catch {
+                if generation == run, manager.generation == owner {
+                    prepared = false; statusMessage = "组织未确认完成；保留已上传状态与关系回执。检查权限/连接或重新预览后继续。"
+                }
+            }
+        }
+        task = current; return current
+    }
+
+    /// check同时约束页面epoch、账号/端点、Photos权限和未保存草稿；每次await前后都使用同一捕获上下文。
+    private func validate(_ manager: LibraryManagementController, backup: PhotoBackupController, scope: MediaAccountScope,
+                          owner: UUID, run: UUID, access: PHAuthorizationStatus) throws
+    {
+        try Task.checkCancellation()
+        guard generation == run, manager.generation == owner, manager.backupScope == scope, backup.hasCurrentSavedSelection(using: manager),
+              access == .authorized || access == .limited, authorization() == access else { throw LocalMediaMetadataError.sourceChanged }
+    }
+
+    /// manager必须仍有当前client，读流程也不使用旧缓存会话。
+    private func currentClient(_ manager: LibraryManagementController) throws -> LibraryMutationClient {
+        guard let client = manager.client else { throw LibraryWriteError.unavailable }; return client
+    }
+
+    /// saved固定同一包含/排除规则；先异步枚举再后台分组，返回成员快照，调用方await后重新检查账号/权限。
+    private func sourcesByAlbum(_ saved: Selection) async throws -> [String: [PhotoBackupSource]] {
+        let snapshots = try await scanner(saved.included.union(saved.excluded))
+        return try await Self.groupSources(saved, snapshots: snapshots)
+    }
+
+    /// saved和snapshots仅含可发送值；后台应用排除并保留多个映射成员，取消时不发布半份结果。
+    @concurrent private static func groupSources(_ saved: Selection, snapshots: [PhotoBackupAlbumSnapshot]) async throws -> [String: [PhotoBackupSource]] {
+        try Task.checkCancellation()
+        let selection = try PhotoBackupAlbumSelection(included: saved.included, excluded: saved.excluded)
+        let eligible = try Set(selection.scan(snapshots).sources)
+        let result = Dictionary(uniqueKeysWithValues: snapshots.filter { saved.included.contains($0.id) }.map { ($0.id, $0.assets.map(\.source).filter { eligible.contains($0) }) })
+        try Task.checkCancellation()
+        return result
+    }
+
+    /// RAW优先保留已完成双回执，否则本轮完整本机双hash+双fresh远端原图证明；metadata单UUID永不成为RAW候选。
+    /// 普通媒体沿用fresh关联，缺关联时仅接受同源completed任务已有SHA1；check在所有异步前后守住原上下文。
+    private func candidateAssets(_ source: PhotoBackupSource, completed: [PhotoBackupSource: [PhotoBackupJob]], matches: [LocalMediaAssociation],
+                                 client: LibraryMutationClient, ownerID: String, check: @MainActor () throws -> Void) async throws -> [PhotoBackupAlbumSyncAsset]?
+    {
+        try check()
+        guard let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite else { return nil }
+        let jobs = completed[source] ?? []
+        let job = jobs.count == 1 ? jobs.first : nil
+        if source.kind == .rawJPEG {
+            if let job, let raw = job.rawReceipt, let jpeg = job.jpegReceipt {
+                return [.init(role: .raw, assetID: raw.assetID, checksum: raw.checksum, revision: nil, proof: .originalReceipt),
+                        .init(role: .jpeg, assetID: jpeg.assetID, checksum: jpeg.checksum, revision: nil, proof: .originalReceipt)]
+            }
+            try verifySource(source)
+            let proof = try await rawJPEGResolver.resolve(source, using: client, ownerID: ownerID, check: check)
+            try check(); try verifySource(source)
+            return proof?.assets
+        }
+        let kind: LocalPhotoIdentity.MediaKind = source.kind == .video ? .video : source.kind == .livePhoto ? .livePhoto : .image
+        let current = matches.filter { $0.localIdentity == .init(localIdentifier: source.localID, modificationDate: source.modifiedAt, mediaKind: kind) }
+        guard current.count == 1, let match = current.first else {
+            guard current.isEmpty, let job,
+                  let id = job.primaryAssetID, let checksum = job.primaryChecksum,
+                  let bytes = Data(base64Encoded: checksum), bytes.count == 20, bytes.base64EncodedString() == checksum else { return nil }
+            return [.init(role: .primary, assetID: id, checksum: checksum, revision: nil, proof: .originalReceipt)]
+        }
+        return [.init(role: .primary, assetID: match.remoteID, checksum: match.checksum, revision: match.remoteRevision,
+                      proof: match.source == .mobileMetadata ? .metadataAssociation : .checksumAssociation)]
+    }
+
+    /// 只核公开Photos身份/完整资源描述，不请求媒体字节或下载iCloud。
+    private static func verifyCurrentSource(_ source: PhotoBackupSource) throws {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject,
+              PhotoKitBackupResourceExporter.source(for: asset) == source else { throw LocalMediaMetadataError.sourceChanged }
+    }
+
+    /// 名称仅展示；包含/排除集合缺失仍报错，不能拿空排除继续。
+    private static func albumNames(_ ids: Set<String>) throws -> [String: String] {
+        let collections = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: Array(ids), options: nil)
+        var values: [String: String] = [:]
+        collections.enumerateObjects { value, _, _ in values[value.localIdentifier] = value.localizedTitle ?? "未命名相簿" }
+        guard Set(values.keys) == ids else { throw PhotoBackupAlbumSelectionError.unavailableAlbum }
+        return values
+    }
+}
+
+extension PhotoBackupAlbumSyncController {
+    /// localID/name来自明确输入；先fresh检查保存规则和目标列表，只保存待确认意图，不发POST或同名认领。
+    @discardableResult func prepareCreation(localID: String, name: String, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard journal.selectedAlbumIDs.contains(localID), !saved.creations.contains(where: { $0.localAlbumID == localID && $0.unresolved }) else { throw LibraryWriteError.busy }
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
+            let intent = PhotoBackupAlbumCreation(localAlbumID: localID, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+            try intent.validate()
+            let values = try await client.albumSyncTargets(); try check()
+            saved.version = PhotoBackupAlbumSyncState.currentVersion; saved.creations.append(intent)
+            try await saveCreationState(saved, scope: scope, check: check)
+            targets = values
+            statusMessage = "创建预览已保存：‘\(intent.name)’。当前有 \(values.count { $0.albumName == intent.name }) 本同名相簿；确认会另建空相簿，不会按名称认领。原目标及成员保留。"
+        }
+    }
+
+    /// id只能是尚未发送的已保存意图；sending在POST前落盘，取消/坏回执/未知网络结果都禁止重发。
+    @discardableResult func createAndMap(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared,
+                  journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
+            saved.creations[index].phase = .sending
+            try await saveCreationState(saved, scope: scope, check: check)
+            let receipt: ManagedAlbum
+            do { receipt = try await client.albumSyncCreate(name: saved.creations[index].name) }
+            catch {
+                try check()
+                if case let LibraryWriteError.http(status) = error, [400, 401, 403].contains(status) {
+                    saved.creations[index].phase = .rejected
+                } else {
+                    saved.creations[index].phase = .unknown
+                }
+                try await saveCreationState(saved, scope: scope, check: check)
+                statusMessage = saved.creations[index].phase == .rejected ? "创建请求被拒绝。原映射保留；修正权限/输入后可重新预览明确创建。" : "创建结果未知，未重发。请只读重核并明确选择现有目标；同名或新增列表项不能证明是本次创建。"
+                return
+            }
+            try check()
+            guard let targetID = UUID(uuidString: receipt.id) else { throw LibraryWriteError.malformedResponse }
+            saved.creations[index].receiptID = targetID; saved.creations[index].phase = .received
+            try await saveCreationState(saved, scope: scope, check: check)
+            try await confirmCreatedMapping(&saved, index: index, client: client, scope: scope, check: check)
+        }
+    }
+
+    /// 恢复只GET；有持久201 UUID才核同一对象并自动完成映射，无UUID只刷新目标供明确选择，绝不POST。
+    @discardableResult func recoverCreation(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] client, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            let journal = try await store.loadPhotoBackups(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].unresolved, saved.creations[index].phase != .prepared,
+                  journal.selectedAlbumIDs.contains(saved.creations[index].localAlbumID) else { throw LibraryWriteError.unavailable }
+            _ = try await sourcesByAlbum(Selection(journal)); try check()
+            if saved.creations[index].receiptID != nil {
+                try await confirmCreatedMapping(&saved, index: index, client: client, scope: scope, check: check)
+            } else {
+                let values = try await client.albumSyncTargets(); try check()
+                saved.creations[index].phase = .unknown
+                try await saveCreationState(saved, scope: scope, check: check)
+                targets = values
+                statusMessage = "已刷新现有目标；无法唯一核实本次创建。请在相簿选择器明确选目标，未按名称认领，也未再次POST。"
+            }
+        }
+    }
+
+    /// 仅未发送预览可撤销，保留终态历史；未知/已发送意图须只读核查或明确映射，不能以撤销绕过防重放。
+    @discardableResult func abandonPreparedCreation(_ id: UUID, using manager: LibraryManagementController, backup: PhotoBackupController) -> Task<Void, Never>? {
+        start(using: manager, backup: backup) { [self] _, scope, check in
+            var saved = try await store.loadPhotoBackupAlbumSync(scope: scope); try check()
+            guard let index = saved.creations.firstIndex(where: { $0.id == id }), saved.creations[index].phase == .prepared else { throw LibraryWriteError.unavailable }
+            saved.creations[index].phase = .abandoned
+            try await saveCreationState(saved, scope: scope, check: check)
+            statusMessage = "未发送的创建预览已取消；没有创建或删除远端相簿。"
+        }
+    }
+
+    /// index必须持有本次201的精确UUID；fresh相同owner/name才原子保存映射，不能用列表同名填补丢失回执。
+    private func confirmCreatedMapping(_ saved: inout PhotoBackupAlbumSyncState, index: Int, client: LibraryMutationClient,
+                                       scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws
+    {
+        guard let id = saved.creations[index].receiptID else { throw LibraryWriteError.unavailable }
+        let fresh = try await client.albumSyncTarget(id, ownerOnly: true); try check()
+        guard fresh.albumName == saved.creations[index].name else { throw LibraryWriteError.malformedResponse }
+        let localID = saved.creations[index].localAlbumID
+        saved.mappings.removeAll { $0.localAlbumID == localID }
+        saved.mappings.append(.init(localAlbumID: localID, targetID: id, targetName: fresh.albumName))
+        saved.creations[index].phase = .mapped; saved.creations[index].mappedTargetID = id
+        for offset in saved.operations.indices where saved.operations[offset].localAlbumID == localID && saved.operations[offset].phase != .confirmed {
+            saved.operations[offset].phase = .cancelled
+        }
+        try await saveCreationState(saved, scope: scope, check: check)
+        if !targets.contains(where: { UUID(uuidString: $0.id) == id }) {
+            targets.append(fresh)
+        }
+        statusMessage = "新空相簿已fresh核实并保存映射；原相簿与成员保留。照片仍须另行预览并确认增量补入。"
+    }
+
+    /// 保存同一账本的创建状态；写前后核上下文，失败上抛，不发POST或覆盖上传任务。
+    private func saveCreationState(_ snapshot: PhotoBackupAlbumSyncState, scope: MediaAccountScope, check: @MainActor () throws -> Void) async throws {
+        var saved = snapshot
+        // 冷恢复旧v2创建意图也先升级再发送，避免并发自动偏好升级导致201身份检查点被格式降级门拦下。
+        saved.version = PhotoBackupAlbumSyncState.currentVersion
+        try check(); try await store.savePhotoBackupAlbumSyncPlan(saved, scope: scope); try check()
+        state = saved; prepared = false; previewIDs = []
+    }
+}
+
+/// 组织账本保存失败必须退出，不得再以网络/权限错误覆盖未确认恢复资料。
+private nonisolated struct PhotoBackupAlbumSyncStorageError: Error { let underlying: any Error }
+
+/// 自动意愿在另一实例中已关闭；只退役当前自动操作，不将其改为成功或用错误处理继续写检查点。
+private nonisolated struct PhotoBackupAlbumAutomaticRevoked: Error {}
+
+extension PhotoBackupAlbumSyncController {
+    /// operation可包含两份RAW/JPEG；client/scope/check绑定当前账号，automatic要求每次fresh读取保存同意。
+    /// 每份都先核当前身份/成员，发送前保存sending，独立fresh存在才确认。
+    /// 返回true表示未知/连接问题，停止后续组；下一次明确恢复仍先查成员，绝不盲目重发。
+    private func synchronizeOperation(_ operation: inout PhotoBackupAlbumSyncOperation, client: LibraryMutationClient,
+                                      scope: MediaAccountScope, check: @escaping @MainActor () throws -> Void, automatic: Bool) async throws -> Bool
+    {
+        // 旧逐项回执保留作恢复资料；本轮只有重新fresh核过全部主体才可再次记整组confirmed。
+        var freshConfirmed = Set<UUID>()
+        let consent: @MainActor () async throws -> Void = {
+            try check()
+            if automatic {
+                let enabled = try await self.store.photoBackupAlbumSyncAutomaticEnabled(scope: scope)
+                try check()
+                guard enabled else { throw PhotoBackupAlbumAutomaticRevoked() }
+            }
+        }
+        do {
+            for asset in operation.assets {
+                try await consent(); try verifySource(operation.source)
+                _ = try await client.albumSyncTarget(operation.targetID); try await consent()
+                let before = try await client.albumSyncAsset(asset.assetID); try await consent()
+                try verifyRemote(before, proof: asset, source: operation.source, owner: scope.userID)
+                let present = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try await consent()
+                if !present {
+                    operation.confirmedAssetIDs.remove(asset.assetID); operation.phase = .sending; operation.failure = nil
+                    try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+                    try await consent()
+                    try verifySource(operation.source)
+                    let receipt: PhotoBackupAlbumMemberReceipt?
+                    do { receipt = try await client.albumSyncAdd(asset.assetID, target: operation.targetID) }
+                    catch { try check(); receipt = nil }
+                    try await consent()
+                    if case .denied = receipt {
+                        operation.phase = .failed; operation.failure = .permission
+                        try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+                        return false
+                    }
+                    // success、duplicate或响应未知都fresh核实际期望状态；不会因HTTP200/旧回执直接记完成。
+                    try verifySource(operation.source)
+                    _ = try await client.albumSyncTarget(operation.targetID); try await consent()
+                    let after = try await client.albumSyncAsset(asset.assetID); try await consent()
+                    try verifyRemote(after, proof: asset, source: operation.source, owner: scope.userID)
+                    let confirmed = try await client.albumSyncContains(asset.assetID, target: operation.targetID); try await consent()
+                    guard confirmed else {
+                        operation.phase = .unknown; operation.failure = .unconfirmed
+                        try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+                        return true
+                    }
+                }
+                // 即使成员原本已存在，也须在提交本轮确认前重核当前角色，不能沿用较早的编辑权限。
+                _ = try await client.albumSyncTarget(operation.targetID); try await consent()
+                try verifySource(operation.source)
+                freshConfirmed.insert(asset.assetID)
+                operation.confirmedAssetIDs.insert(asset.assetID)
+                operation.phase = freshConfirmed.count == operation.assets.count ? .confirmed : .queued
+                operation.failure = nil
+                try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+            }
+            return false
+        } catch {
+            try check()
+            if error is PhotoBackupAlbumSyncStorageError || error is PhotoBackupAlbumAutomaticRevoked {
+                throw error
+            }
+            operation.phase = operation.phase == .sending ? .unknown : .failed
+            operation.failure = operation.phase == .unknown ? .unconfirmed : .unavailable
+            try await checkpoint(operation, scope: scope, check: check, automatic: automatic)
+            return true
+        }
+    }
+
+    /// expected revision属于当前匹配证据；RAW回执只要求原图SHA1，组织不会把编辑表示或旧UUID当作原片一致证明。
+    private func verifyRemote(_ value: LocalMediaRemoteAsset, proof: PhotoBackupAlbumSyncAsset, source: PhotoBackupSource, owner: String) throws {
+        guard value.id == proof.assetID, value.ownerId == UUID(uuidString: owner), value.isTrashed == false, value.isOffline == false,
+              value.type == (source.kind == .video ? "VIDEO" : "IMAGE"), value.checksum == proof.checksum,
+              proof.revision == nil || value.updatedAt == proof.revision else { throw LocalMediaMetadataError.sourceChanged }
+    }
+
+    /// 逐组热写之前/之后都核上下文；磁盘失败不能被后续错误处理抹成另一种成功/失败事实。
+    /// operation/scope/check绑定当前计划与账号；automatic默认false，true要求同一SQL事务内意愿仍开启。
+    private func checkpoint(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope, check: @MainActor () throws -> Void, automatic: Bool = false) async throws {
+        try check()
+        do { try await store.savePhotoBackupAlbumSyncOperation(operation, scope: scope, requiresAutomaticConsent: automatic) }
+        catch { throw PhotoBackupAlbumSyncStorageError(underlying: error) }
+        try check()
+    }
+}

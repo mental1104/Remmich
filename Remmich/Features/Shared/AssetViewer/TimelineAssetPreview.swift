@@ -251,7 +251,7 @@ struct TimelineAssetPreview: View {
                 .modifier(AssetViewerTransitionOpacity(value: session.handoffOpacity))
                 .modifier(AssetViewerTransitionOpacity(value: reduceMotion || target == nil ? session.transitionProgress : 1))
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(session.playback == nil ? "Photo preview" : "Muted motion preview")
+                .accessibilityLabel(L10n.string(session.playback == nil ? "Photo preview" : "Muted motion preview"))
                 .accessibilityValue(session.playback == nil ? "Still image" : (session.isPlaybackIntended ? "Playing" : "Paused"))
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction {
@@ -359,7 +359,7 @@ struct TimelineAssetPreview: View {
     private func actionButton(_ action: AssetViewerExportAction, rowHeight: CGFloat) -> some View {
         if action == .download {
             MediaDownloadButton(asset: session.asset, media: media) { saved in
-                Label(saved ? "Saved to Photos" : "Save to Photos", systemImage: saved ? "checkmark" : action.systemImage)
+                Label(L10n.string(saved ? "Saved to Photos" : "Save to Photos"), systemImage: saved ? "checkmark" : action.systemImage)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: rowHeight).padding(.horizontal, 16).contentShape(.rect)
             }.buttonStyle(.plain).accessibilityIdentifier("timeline-preview-download")

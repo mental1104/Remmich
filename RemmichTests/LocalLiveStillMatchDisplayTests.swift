@@ -60,7 +60,8 @@ import UIKit
         let operation = try #require(fixture.matches.scan(using: fixture.media.management)); await operation.value
         #expect(fixture.matches.association(assetID: stillDisplayAssetID.uuidString, revision: stillDisplayRevision) == nil)
         #expect(fixture.matches.checksumMatches == 0 && fixture.matches.metadataMatches == 0 && !fixture.matches.running)
-        #expect(fixture.matches.status.contains("扫描未完成"))
+        let incomplete = L10n.language.resolvedCode() == "zh-Hans" ? "扫描未完成" : "Scan incomplete"
+        #expect(fixture.matches.status.contains(incomplete))
         #expect(fixture.hash.sourceReads == 2 && fixture.hash.resources.count == 1 && fixture.hash.resources.first?.descriptor.role == .originalPhoto)
         #expect(fixture.hash.network == [false] && fixture.images.imageRequests == 0 && fixture.images.videoRequests == 0 && fixture.loader.requests.isEmpty)
         let reads = await fixture.remote.reads

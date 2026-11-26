@@ -12,6 +12,29 @@ nonisolated struct PhotoBackupResources: Sendable {
     let created: Date
     let modified: Date
     let favorite: Bool
+    let jpeg: File?
+
+    /// rawJPEG时primary明确是RAW、jpeg是第二份原始图；旧媒体缺省nil，不挤占Live Photo motion字段。
+    init(directory: URL, primary: File, motion: File?, created: Date, modified: Date, favorite: Bool, jpeg: File? = nil) {
+        self.directory = directory; self.primary = primary; self.motion = motion
+        self.created = created; self.modified = modified; self.favorite = favorite; self.jpeg = jpeg
+    }
+}
+
+/// 两份导出前后的公开源观察；只有完整source/日期/收藏一致才发布临时文件，不跨Actor传PHAsset对象。
+nonisolated struct PhotoBackupRawJPEGObservation: Equatable, Sendable {
+    let source: PhotoBackupSource
+    let created: Date
+    let modified: Date
+    let favorite: Bool
+}
+
+/// 双原图的系统读取窄端口；测试仅替换Photos元数据/字节读取，真实导出生命周期仍由Exporter执行。
+@MainActor protocol PhotoBackupRawJPEGResourceReading: Sendable {
+    /// source必须仍属于当前授权库及完整原始版本，失败抛安全分类；不读取媒体字节。
+    func observe(_ source: PhotoBackupSource) throws -> PhotoBackupRawJPEGObservation
+    /// role指定已分类原始成员，file是调用方新建私有路径；allowCloud只遵从当前用户确认，可取消实际读取。
+    func read(_ role: PhotoBackupImageRole, source: PhotoBackupSource, file: URL, allowCloud: Bool) async throws
 }
 
 /// 导出边界只接受当前任务的源快照，不替换上传/判重；测试可用合成磁盘文件替代PhotoKit。
@@ -25,11 +48,21 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
     let reason: PhotoBackupFailure
 }
 
-/// 重新从授权照片库读取原始照片/视频及Live Photo动态资源；不改手机原片，不猜RAW+JPEG完整性。
+/// 重新从授权照片库读取原始照片/视频、Live Photo动态及明确的RAW+JPEG双图；不改原片，不猜复杂资源完整性。
 @MainActor struct PhotoKitBackupResourceExporter: PhotoBackupResourceExporting {
+    private let rawJPEGReader: any PhotoBackupRawJPEGResourceReading
+
+    /// 默认真实公开PhotoKit；隔离测试仅注入系统观察/读取端口，不替换资源选择、导出或Worker。
+    init(rawJPEGReader: any PhotoBackupRawJPEGResourceReading = PhotoKitBackupRawJPEGResourceReader()) {
+        self.rawJPEGReader = rawJPEGReader
+    }
+
     /// source必须仍可读且修改日期/媒体类型一致；下载选项每次从当前队列配置读取，不隐式允许iCloud。
     func export(_ source: PhotoBackupSource, allowCloud: Bool) async throws -> PhotoBackupResources {
         try Task.checkCancellation()
+        if source.kind == .rawJPEG {
+            return try await exportRawJPEG(source, allowCloud: allowCloud)
+        }
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { throw PhotoBackupExportError(reason: .permission) }
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject else {
@@ -67,6 +100,51 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
         }
     }
 
+    /// 扫描只读取公开资源描述；仅明确无调整双原图升级source类型，其他复杂形状仍走原有明确拒绝路径。
+    nonisolated static func source(for asset: PHAsset) -> PhotoBackupSource {
+        let pair: PhotoBackupRawJPEGSource? = if asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive),
+                                                 let modified = asset.modificationDate, modified.timeIntervalSince1970.isFinite
+        {
+            try? rawJPEGSource(for: asset)
+        } else {
+            nil
+        }
+        return .init(localID: asset.localIdentifier, modifiedAt: asset.modificationDate,
+                     kind: pair != nil ? .rawJPEG : asset.mediaType == .video ? .video : asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .photo,
+                     rawJPEG: pair)
+    }
+
+    /// asset资源必须完整恰两份；公开type/UTI各自确认，不使用私有isCurrent或资源数组位置。
+    fileprivate nonisolated static func rawJPEGSource(for asset: PHAsset) throws -> PhotoBackupRawJPEGSource {
+        let values = PHAssetResource.assetResources(for: asset).map { resource in
+            PhotoBackupOriginalImage(kind: resource.type == .photo ? .photo : resource.type == .alternatePhoto ? .alternatePhoto : .unsupported,
+                                     uniformTypeIdentifier: resource.uniformTypeIdentifier, originalFilename: resource.originalFilename,
+                                     pixelWidth: resource.pixelWidth, pixelHeight: resource.pixelHeight)
+        }
+        do { return try .init(originals: values, hasAdjustments: asset.hasAdjustments, adjustmentTime: asset.adjustmentTimestamp) }
+        catch { throw PhotoBackupExportError(reason: .unsupportedResources) }
+    }
+
+    /// 两份必须完整导出且前后观察一致；任一失败回收整个临时目录，旧部分回执由持久队列保留。
+    private func exportRawJPEG(_ source: PhotoBackupSource, allowCloud: Bool) async throws -> PhotoBackupResources {
+        let before = try rawJPEGReader.observe(source)
+        guard before.source == source, source.rawJPEG != nil else { throw PhotoBackupExportError(reason: .sourceChanged) }
+        let directory = FileManager.default.temporaryDirectory.appending(path: "RemmichBackup-\(UUID())", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            guard let pair = source.rawJPEG else { throw PhotoBackupExportError(reason: .unsupportedResources) }
+            let raw = directory.appending(path: "original-raw"); let jpeg = directory.appending(path: "original-jpeg")
+            try await rawJPEGReader.read(.raw, source: source, file: raw, allowCloud: allowCloud)
+            try Task.checkCancellation()
+            try await rawJPEGReader.read(.jpeg, source: source, file: jpeg, allowCloud: allowCloud)
+            try Task.checkCancellation()
+            guard try rawJPEGReader.observe(source) == before else { throw PhotoBackupExportError(reason: .sourceChanged) }
+            return .init(directory: directory, primary: .init(file: raw, name: pair.raw.originalFilename), motion: nil,
+                         created: before.created, modified: before.modified, favorite: before.favorite,
+                         jpeg: .init(file: jpeg, name: pair.jpeg.originalFilename))
+        } catch { try? FileManager.default.removeItem(at: directory); throw error }
+    }
+
     /// asset为当前PhotoKit对象，source为扫描快照；仅同版本、同资源组合可继续本次任务。
     private func validate(_ asset: PHAsset, against source: PhotoBackupSource) throws {
         let kind: PhotoBackupSource.Kind = asset.mediaType == .video ? .video : asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .photo
@@ -84,6 +162,46 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
         try await writer.read(resource, options: options)
         try Task.checkCancellation()
         return .init(file: file, name: resource.originalFilename)
+    }
+}
+
+/// 默认双原图系统适配；每次请求重新取授权PHAsset并对完整描述，沿用真正可取消的流式原始资源writer。
+@MainActor struct PhotoKitBackupRawJPEGResourceReader: PhotoBackupRawJPEGResourceReading {
+    /// 只接受有限且已冻结的修改版本；缺失版本/Photos调整/成员变化不能被当成完整原始组合。
+    func observe(_ source: PhotoBackupSource) throws -> PhotoBackupRawJPEGObservation {
+        let asset = try asset(for: source)
+        guard let modified = asset.modificationDate else { throw PhotoBackupExportError(reason: .sourceChanged) }
+        return .init(source: source, created: asset.creationDate ?? modified, modified: modified, favorite: asset.isFavorite)
+    }
+
+    /// 每份读取前复核相同原始资源，读取后由Exporter独立observe再次复核；不请求缩略图/渲染图或覆盖原片。
+    func read(_ role: PhotoBackupImageRole, source: PhotoBackupSource, file: URL, allowCloud: Bool) async throws {
+        let asset = try asset(for: source)
+        guard let pair = source.rawJPEG else { throw PhotoBackupExportError(reason: .unsupportedResources) }
+        let expected = role == .raw ? pair.raw : pair.jpeg
+        let candidates = PHAssetResource.assetResources(for: asset).filter {
+            $0.uniformTypeIdentifier == expected.uniformTypeIdentifier && $0.originalFilename == expected.originalFilename
+                && $0.pixelWidth == expected.pixelWidth && $0.pixelHeight == expected.pixelHeight
+                && $0.type == (expected.kind == .photo ? .photo : .alternatePhoto)
+        }
+        guard candidates.count == 1, let resource = candidates.first else { throw PhotoBackupExportError(reason: .sourceChanged) }
+        let writer = try PhotoBackupResourceFileWriter(file: file)
+        let options = PHAssetResourceRequestOptions(); options.isNetworkAccessAllowed = allowCloud
+        try await writer.read(resource, options: options)
+    }
+
+    /// Task与权限均即时检查；相同localID必须仍是相同的非Live、无调整双图完整快照。
+    private func asset(for source: PhotoBackupSource) throws -> PHAsset {
+        try Task.checkCancellation()
+        let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard permission == .authorized || permission == .limited else { throw PhotoBackupExportError(reason: .permission) }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject else {
+            throw PhotoBackupExportError(reason: .sourceMissing)
+        }
+        guard let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
+              source.kind == .rawJPEG, asset.mediaType == .image, !asset.mediaSubtypes.contains(.photoLive),
+              PhotoKitBackupResourceExporter.source(for: asset) == source else { throw PhotoBackupExportError(reason: .sourceChanged) }
+        return asset
     }
 }
 

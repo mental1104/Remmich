@@ -10,6 +10,7 @@ struct SearchView: View {
     private let searchReader: (any NativeSearchReading)?
     #if DEBUG
         private var searchCompletion: ((NativeSearchQuery) -> Void)?
+        private var presetManagerOverride: LibraryManagementController?
     #endif
     @State private var query = NativeSearchQuery()
     /// 搜索展示与查询、请求分开持有；退出只恢复导航控件，不完成请求或切换账号。
@@ -43,6 +44,15 @@ struct SearchView: View {
     }
 
     #if DEBUG
+        /// 隔离UI宿主注入真实管理器；只替换会话配置，Panel/Store/写入客户端继续运行原实现。
+        /// 其他参数沿用正常页面；发布构建没有此入口，也不会选用测试管理器。
+        init(source: ImmichTimelineRepository, media: MediaLibraryController, assetDetails: any AssetDetailReading,
+             showAccount: @escaping () -> Void, presetManager: LibraryManagementController)
+        {
+            self.init(source: source, media: media, assetDetails: assetDetails, showAccount: showAccount)
+            presetManagerOverride = presetManager
+        }
+
         /// 仅DEBUG的观察重载；source/media/details/account/reader语义同正常初始化。
         /// searchCompletion接收已结束store发布检查的条件，不改结果；Release没有此回调接口。
         init(source: ImmichTimelineRepository?, media: MediaLibraryController, assetDetails: any AssetDetailReading,
@@ -60,6 +70,16 @@ struct SearchView: View {
             return searchReader
         }
         return source
+    }
+
+    /// 正常/发布搜索始终使用当前媒体账号管理器，只有明确DEBUG宿主能注入隔离会话。
+    private var activePresetManager: LibraryManagementController {
+        #if DEBUG
+            if let presetManagerOverride {
+                return presetManagerOverride
+            }
+        #endif
+        return media.management
     }
 
     /// 固定点击时的结果和查看器状态，不被后续分页改变。
@@ -82,7 +102,7 @@ struct SearchView: View {
                 if let reference = query.queryAssetID {
                     referenceCard(reference)
                 }
-                SearchPresetsPanel(query: $query, manager: media.management).padding(.horizontal)
+                SearchPresetsPanel(query: $query, manager: activePresetManager).padding(.horizontal)
                 DisclosureGroup {
                     VStack {
                         Picker("Search mode", selection: Binding(get: { query.mode }, set: { mode in
@@ -93,7 +113,7 @@ struct SearchView: View {
                             }
                         })) {
                             ForEach(NativeSearchQuery.Mode.allCases, id: \.self) { mode in
-                                Text(mode.title).tag(mode)
+                                Text(L10n.string(mode.title)).tag(mode)
                             }
                         }
                         .accessibilityIdentifier("search-mode")
@@ -108,7 +128,7 @@ struct SearchView: View {
                             if let deviceError {
                                 Text(deviceError).font(.caption)
                             }
-                            Button(loadingDevices ? "Loading devices" : "Load capture devices") { Task { await loadDevices() } }
+                            Button(L10n.string(loadingDevices ? "Loading devices" : "Load capture devices")) { Task { await loadDevices() } }
                                 .disabled(loadingDevices)
                                 .accessibilityIdentifier("search-load-devices")
                         }
@@ -125,7 +145,7 @@ struct SearchView: View {
                         if let suggestionError {
                             Text(suggestionError).font(.caption)
                         }
-                        Button(loadingSuggestions ? "Loading choices" : "Load filter choices") { Task { await loadChoices() } }
+                        Button(L10n.string(loadingSuggestions ? "Loading choices" : "Load filter choices")) { Task { await loadChoices() } }
                             .disabled(loadingSuggestions)
                         DateFilterRow(title: "Taken on or after", date: $query.takenAfter)
                         DateFilterRow(title: "Taken on or before", date: $query.takenBefore)
@@ -133,7 +153,7 @@ struct SearchView: View {
                             Picker("Media category", selection: $query.mediaCategory) {
                                 Text("Any").tag(nil as NativeSearchMediaCategory?)
                                 ForEach(NativeSearchMediaCategory.allCases, id: \.self) { category in
-                                    Text(category.title).tag(Optional(category))
+                                    Text(L10n.string(category.title)).tag(Optional(category))
                                 }
                             }
                             Picker("Resolution", selection: $query.resolution) {
@@ -184,7 +204,7 @@ struct SearchView: View {
                                     }
                                 }.frame(maxHeight: 240)
                             }
-                            Button(loadingTags ? "Loading tags" : "Load tags") { Task { await loadTags() } }
+                            Button(L10n.string(loadingTags ? "Loading tags" : "Load tags")) { Task { await loadTags() } }
                                 .disabled(loadingTags)
                         }
                         DisclosureGroup("People") {
@@ -207,7 +227,7 @@ struct SearchView: View {
                     Text("Filters").accessibilityIdentifier("search-filters")
                 }.padding(.horizontal)
                 if let error = store.error {
-                    Text(error).foregroundStyle(.secondary)
+                    Text(L10n.string(error)).foregroundStyle(.secondary)
                         .accessibilityIdentifier("search-error")
                     Button("Retry") { Task {
                         if let source = activeSearchReader {
@@ -235,7 +255,7 @@ struct SearchView: View {
                             SearchResultCover(assetID: asset.id, revision: asset.thumbnailRevision, media: media)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(asset.mediaKind == .video ? "Open video" : "Open photo")
+                        .accessibilityLabel(L10n.string(asset.mediaKind == .video ? "Open video" : "Open photo"))
                         .accessibilityIdentifier("search-result-\(asset.id)")
                         .contextMenu {
                             Button("Find similar photos", systemImage: "photo.on.rectangle.angled") {
@@ -269,7 +289,7 @@ struct SearchView: View {
         .searchable(text: Binding(get: { query.text }, set: {
             query.useSearchText($0)
             referencePreview = nil
-        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(query.mode.title))
+        }), isPresented: $isSearchPresented, placement: .navigationBarDrawer(displayMode: .always), prompt: Text(L10n.string(query.mode.title)))
         .toolbar { AccountToolbarButton(action: showAccount) }
         .task(id: query) { await search() }
         .onChange(of: media.management.generation) { _, _ in
@@ -507,7 +527,7 @@ private struct SearchDevicePicker: View {
             ForEach(NativeCaptureDeviceOption.Group.allCases, id: \.self) { group in
                 let options = devices.filter { $0.group == group }
                 if !options.isEmpty {
-                    Text(group.title).font(.caption).foregroundStyle(.secondary)
+                    Text(L10n.string(group.title)).font(.caption).foregroundStyle(.secondary)
                     ForEach(options) { option in
                         Button {
                             models = option.models
@@ -538,10 +558,10 @@ private struct SearchExifEditor: View {
     var body: some View {
         VStack {
             Picker("EXIF field", selection: $field) {
-                ForEach(NativeSearchNumericCondition.Field.allCases, id: \.self) { Text($0.title).tag($0) }
+                ForEach(NativeSearchNumericCondition.Field.allCases, id: \.self) { Text(L10n.string($0.title)).tag($0) }
             }
             Picker("Comparison", selection: $comparison) {
-                ForEach(NativeSearchNumericCondition.Comparison.allCases, id: \.self) { Text($0.title).tag($0) }
+                ForEach(NativeSearchNumericCondition.Comparison.allCases, id: \.self) { Text(L10n.string($0.title)).tag($0) }
             }
             TextField("Value", value: $value, format: .number)
             Button("Add or update condition") {

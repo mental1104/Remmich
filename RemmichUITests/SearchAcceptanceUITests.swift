@@ -2,6 +2,72 @@ import XCTest
 
 /// 在独立DEBUG宿主验证真实搜索视图；全部账号、结果和像素为本地合成资料。
 final class SearchAcceptanceUITests: XCTestCase {
+    /// 真实UIKit底栏保持五项，“我的”最右；相簿和分类共享图库且记住子页选择。
+    @MainActor func testUnifiedProfileAndLibraryNavigation() {
+        let app = launchProfile(language: "en")
+        XCTAssertTrue(primaryTab("Me", in: app).waitForExistence(timeout: 10))
+        // iPad原生顶部标签会公开重复父子Button；按五个唯一标题核对入口，仍逐项验证顺序与真实操作。
+        let titles = ["Photos", "Videos", "Library", "Search", "Me"]
+        XCTAssertEqual(Set(app.buttons.allElementsBoundByIndex.map(\.label)), Set(titles))
+        for (left, right) in zip(titles, titles.dropFirst()) {
+            XCTAssertLessThan(primaryTab(left, in: app).frame.midX, primaryTab(right, in: app).frame.midX)
+        }
+        primaryTab("Library", in: app).tap()
+        XCTAssertTrue(element("library-section-picker", in: app).waitForExistence(timeout: 5))
+        app.segmentedControls.buttons["Collections"].tap()
+        XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
+        primaryTab("Me", in: app).tap()
+        XCTAssertTrue(element("my-language", in: app).waitForExistence(timeout: 5))
+        capture("profile-english", app: app)
+        primaryTab("Library", in: app).tap()
+        XCTAssertTrue(element("profile-fixture-collections", in: app).waitForExistence(timeout: 5))
+        capture("library-collections-english", app: app)
+    }
+
+    /// 中文启动后在应用内切回英文，保留当前导航并验证冷启动语言偏好；不修改设备语言。
+    @MainActor func testChineseProfileAndExplicitEnglishSwitch() {
+        let suite = "profile-language-ui-" + UUID().uuidString
+        let app = launchProfile(language: "zh-Hans", preferencesSuite: suite)
+        XCTAssertTrue(primaryTab("我的", in: app).waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(primaryTab("我的", in: app).frame.midX, primaryTab("搜索", in: app).frame.midX)
+        primaryTab("我的", in: app).tap()
+        element("my-language", in: app).tap()
+        XCTAssertTrue(element("app-language-picker", in: app).waitForExistence(timeout: 5))
+        capture("profile-language-chinese", app: app)
+        // inline Picker把选项公开为可选按钮，而非独立StaticText；通过可交互选项执行真实切换。
+        let english = app.buttons["English"]
+        XCTAssertTrue(english.waitForExistence(timeout: 5))
+        english.tap()
+        XCTAssertTrue(primaryTab("Me", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(primaryTab("Me", in: app).isSelected)
+        XCTAssertTrue(element("app-language-settings", in: app).exists)
+        capture("profile-language-switched-english", app: app)
+        app.terminate()
+        let restored = launchProfile(language: nil, preferencesSuite: suite)
+        XCTAssertTrue(primaryTab("Me", in: restored).waitForExistence(timeout: 10))
+    }
+
+    /// title为当前界面语言的标签标题；app为真实验收宿主。兼容iPhone TabBar和iPad顶部原生标签。
+    /// 返回首个实际标签按钮；排除同名导航返回键，后续断言/点击仍由XCTest验证存在、位置和选择状态。
+    @MainActor private func primaryTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
+        if app.tabBars.firstMatch.exists {
+            return app.tabBars.firstMatch.buttons.matching(identifier: title).firstMatch
+        }
+        return app.buttons.matching(NSPredicate(format: "label == %@ AND identifier != %@", title, "BackButton")).firstMatch
+    }
+
+    /// language仅在显式DEBUG宿主中设置应用偏好；nil保留上次选择以验证重启恢复。
+    @MainActor private func launchProfile(language: String?, preferencesSuite: String = "profile-ui-" + UUID().uuidString) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing-profile"]
+        app.launchEnvironment["REMMICH_UI_TEST_PREFERENCES_SUITE"] = preferencesSuite
+        if let language {
+            app.launchEnvironment["REMMICH_UI_TEST_LANGUAGE"] = language
+        }
+        app.launch()
+        return app
+    }
+
     /// 单个断言失败即停止，避免后续手势污染首个失败证据。
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -115,10 +181,12 @@ final class SearchAcceptanceUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
-    /// 以谓词等待指定ID的精确label，避免用固定sleep推断异步请求已经完成。
+    /// identifier和精确label合成一次远程查询，再等待其存在，保留原10秒及完整成功条件。
+    /// 分别读取exists/label会请求两次AX快照：首快照已匹配也可能被第二次读取耗尽等待预算。
     @MainActor private func assertLabel(_ label: String, identifier: String, in app: XCUIApplication) {
-        let item = element(identifier, in: app)
-        let predicate = NSPredicate(format: "exists == true AND label == %@", label)
+        let item = app.descendants(matching: .any).matching(identifier: identifier)
+            .matching(NSPredicate(format: "label == %@", label)).firstMatch
+        let predicate = NSPredicate(format: "exists == true")
         expectation(for: predicate, evaluatedWith: item)
         waitForExpectations(timeout: 10)
     }

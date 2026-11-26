@@ -90,7 +90,7 @@ final class AlbumDirectoryManagementStore {
             guard let album = directory.albums.first(where: { $0.id.lowercased() == id.lowercased() }) else {
                 throw AlbumDirectoryManagementError.invalidSelection
             }
-            guard album.ownerId.lowercased() == client.userID.lowercased() else { throw AlbumDirectoryManagementError.notOwned }
+            guard album.access.allows(.update, userID: client.userID) else { throw AlbumDirectoryManagementError.notOwned }
             let name = groupName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             normalized = .moveAlbum(id: album.id, groupName: name.isEmpty ? nil : name); title = "Move album?"
             message = "Move \(album.albumName) to \(name.isEmpty ? "Ungrouped" : name). This album property is visible to other clients. Photos and sharing are preserved."

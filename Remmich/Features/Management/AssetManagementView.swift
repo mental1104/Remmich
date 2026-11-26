@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 单张资源的显式管理入口；媒体控制器只向可视编辑页提供同账号的未编辑预览。
+/// 单张资源的显式管理入口；元数据页独立fresh预检，媒体控制器只向可视编辑页提供未编辑预览。
 struct AssetManagementView: View {
     let assetID: String
     let controller: LibraryManagementController
@@ -20,6 +20,8 @@ struct AssetManagementView: View {
     @State private var confirmsTrash = false
     @State private var confirmsReset = false
     @State private var editing = false
+    @State private var managingMetadata = false
+    @State private var managingTags = false
 
     /// assetID/controller保留原管理契约，media/revision来自查看器；editsChanged可区分需有限读取派生版本的编辑。
     /// 缺省媒体仍可管理但不盲保存可视编辑，缺省专用回调继续使用changed，保留原有管理宿主兼容。
@@ -41,7 +43,7 @@ struct AssetManagementView: View {
                     ProgressView("读取服务器状态…")
                 }
                 if let error {
-                    Section { Text(error).foregroundStyle(.red) }
+                    Section { Text(L10n.string(error)).foregroundStyle(.red) }
                 }
                 if let notice {
                     Section { Text(notice).foregroundStyle(.secondary) }
@@ -50,7 +52,11 @@ struct AssetManagementView: View {
                     Section("照片管理") {
                         LabeledContent("文件", value: asset.originalFileName)
                         if asset.ownerId == controller.client?.userID {
-                            Button(asset.isFavorite ? "取消收藏" : "收藏") {
+                            Button("Date, location and rating") { managingMetadata = true }
+                                .disabled(asset.isTrashed)
+                            Button("Tags") { managingTags = true }
+                                .disabled(asset.isTrashed)
+                            Button(L10n.string(asset.isFavorite ? "取消收藏" : "收藏")) {
                                 run { try await $0.update(assetID, favorite: !asset.isFavorite) }
                             }
                             Button(asset.visibility == "archive" ? "移回时间线" : "归档") {
@@ -74,9 +80,9 @@ struct AssetManagementView: View {
                     Section("加入相簿") {
                         ForEach(albums) { album in
                             if membership.contains(album.id) {
-                                Button("从 \(album.albumName) 移除") { run { try await $0.remove(assetID, from: album.id) } }
+                                Button("从 \(album.albumName) 移除") { run { try await $0.performAlbumManagement(.remove(id: album.id, assetID: assetID)) } }
                             } else {
-                                Button("加入 \(album.albumName)") { run { try await $0.add(assetID, to: album.id) } }
+                                Button("加入 \(album.albumName)") { run { try await $0.performAlbumManagement(.add(id: album.id, assetID: assetID)) } }
                             }
                         }
                         TextField("新相簿名称", text: $albumName)
@@ -115,6 +121,13 @@ struct AssetManagementView: View {
                 }
             }
         }
+        // 元数据页自行门控写入；挂在未禁用的NavigationStack上，确保保存中仍可点击停止等待。
+        .sheet(isPresented: $managingMetadata, onDismiss: { Task { await load() } }) {
+            AssetMetadataView(assetID: assetID, controller: controller, changed: changed)
+        }
+        .sheet(isPresented: $managingTags, onDismiss: { Task { await load() } }) {
+            AssetTagManagementView(assetID: assetID, controller: controller, changed: changed)
+        }
     }
 
     private func load() async {
@@ -129,7 +142,7 @@ struct AssetManagementView: View {
             guard owner == controller.generation, !Task.isCancelled else { return }
             asset = fresh
             caption = fresh.exifInfo?.description ?? ""
-            albums = availableAlbums.filter { $0.ownerId == client.userID }
+            albums = availableAlbums.filter { $0.access.allows(.assets, userID: client.userID) }
             membership = Set(containing.map(\.id))
             error = nil
         } catch {

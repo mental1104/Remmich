@@ -1768,7 +1768,7 @@ struct AssetViewerView: View {
                         Image(systemName: showsInfo ? "info.circle.fill" : "info.circle")
                             .frame(width: controlHitSize, height: controlHitSize)
                     }
-                    .accessibilityLabel(showsInfo ? "Hide Info" : "Show Info")
+                    .accessibilityLabel(L10n.string(showsInfo ? "Hide Info" : "Show Info"))
                     .accessibilityValue(showsInfo ? "Shown" : "Hidden")
                     .accessibilityIdentifier("asset-viewer-info")
 
@@ -1807,7 +1807,7 @@ struct AssetViewerView: View {
     private var refreshStatus: some View {
         HStack(spacing: 12) {
             if let message = viewerRefresh.message {
-                Text(message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                Text(L10n.string(message)).font(.caption).fixedSize(horizontal: false, vertical: true)
             } else {
                 Spacer(minLength: 0)
             }
@@ -4151,7 +4151,7 @@ private struct AssetViewerFitPage: View {
         }
         .frame(width: pageSize.width, height: pageSize.height)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(asset.mediaKind == .video ? "Video" : "Photo")
+        .accessibilityLabel(L10n.string(asset.mediaKind == .video ? "Video" : "Photo"))
         .accessibilityIdentifier("asset-viewer-page-\(asset.id)")
     }
 }

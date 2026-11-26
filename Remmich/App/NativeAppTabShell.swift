@@ -81,11 +81,13 @@ final class TimelineRotationState {
     }
 }
 
+/// 导航身份不使用本地化标题；相簿与分类共用图库位置，账户入口始终独立。
 enum NativeTabDestination: Hashable {
     case photos
     case videos
     case albums
     case library
+    case account
     case years
     case months
     case weeks
@@ -149,40 +151,48 @@ enum NativeTabTransitionTrace {
     }
 }
 
+/// 生成五项底栏；时间范围模式和主模式都将“我的”放在最右，避免产生More溢出入口。
 enum NativeTabLayout {
     static let primaryDestinations: [NativeTabDestination] = [
-        .photos, .videos, .albums, .library, .search,
+        .photos, .videos, .library, .search, .account,
     ]
 
+    /// compactOwner选择照片或视频的时间范围布局；nil返回完整主布局，数组顺序即显示顺序。
     static func destinations(compactOwner: NativeTabDestination?) -> [NativeTabDestination] {
         switch compactOwner {
         case .photos:
-            [.photos, .weeks, .months, .years, .search]
+            [.photos, .weeks, .months, .years, .account]
         case .videos:
-            [.videos, .weeks, .months, .years, .search]
+            [.videos, .weeks, .months, .years, .account]
         default:
             primaryDestinations
         }
     }
 
+    /// destination为当前逻辑页，direction给出滑动方向，compactOwner限定可见布局；边界返回nil。
     static func adjacentDestination(
         from destination: NativeTabDestination,
         direction: NativeTabPageDirection,
         compactOwner: NativeTabDestination?
     ) -> NativeTabDestination? {
         let destinations = destinations(compactOwner: compactOwner)
-        guard let index = destinations.firstIndex(of: destination) else { return nil }
+        // 相簿与分类共享图库底栏位置，仍保留各自导航和手势身份。
+        let canonical = destination == .albums ? NativeTabDestination.library : destination
+        guard let index = destinations.firstIndex(of: canonical) else { return nil }
         let adjacentIndex = direction == .next ? index + 1 : index - 1
         guard destinations.indices.contains(adjacentIndex) else { return nil }
         return destinations[adjacentIndex]
     }
 
+    /// source/destination为逻辑身份，compactOwner限定当前布局；同一物理标签或不存在时不产生页面动画。
     static func pageDirection(
         from source: NativeTabDestination,
         to destination: NativeTabDestination,
         compactOwner: NativeTabDestination?
     ) -> NativeTabPageDirection? {
         let destinations = destinations(compactOwner: compactOwner)
+        let source = source == .albums ? NativeTabDestination.library : source
+        let destination = destination == .albums ? NativeTabDestination.library : destination
         guard let sourceIndex = destinations.firstIndex(of: source),
               let destinationIndex = destinations.firstIndex(of: destination),
               sourceIndex != destinationIndex
@@ -231,6 +241,7 @@ nonisolated struct NativeLibraryContentRevision: Equatable {
     )
 }
 
+/// UIKit拥有底栏和既有手势转场；SwiftUI提供各页与语言，更新根内容时保留导航和任务实例。
 struct NativeAppTabShell: UIViewControllerRepresentable {
     @Binding var selection: NativeTabDestination
     @Binding var tabBarTop: CGFloat
@@ -248,12 +259,17 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
     let groupedScrollRequests: [NativeTabDestination: Int]
     let groupedMediaOwner: NativeTabDestination
     var timelineRangeRequestGeneration = 0
+    var languageCode: String = L10n.language.resolvedCode()
+    var librarySection: NativeTabDestination = .albums
+    var libraryAtRoot = true
+    var selectLibrarySection: (NativeTabDestination) -> Void = { _ in }
     let libraryContentRevision: NativeLibraryContentRevision
     let photosRetapped: () -> Void
     let videosRetapped: () -> Void
     var albumsRetapped: () -> Void = {}
     let libraryRetapped: () -> Void
     let groupedTabRetapped: (NativeTabDestination) -> Void
+    var account: AnyView = .init(EmptyView())
     let photos: AnyView
     let videos: AnyView
     let albums: AnyView
@@ -299,7 +315,6 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
         private var installedTabs: [NativeTabDestination]?
         private var isUpdatingTabs = false
         private var didResolveLibrary = false
-        private var didResolveAlbums = false
         private var tabBarInteractionBlockedByViewer = false
         private var didResolveVideos = false
         private var laidOutPreparedDestinations: Set<NativeTabDestination> = []
@@ -334,15 +349,15 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             destination: .videos,
             ignoresContainerSafeArea: true
         )
-        private lazy var albumsController = {
-            self.didResolveAlbums = true
-            return self.tabHostingController(rootView: self.parent.albums, destination: .albums)
-        }()
+        private lazy var libraryController = tabHostingController(rootView: libraryRoot, destination: parent.librarySection)
+        private lazy var accountController = tabHostingController(rootView: parent.account, destination: .account)
 
-        private lazy var libraryController = tabHostingController(
-            rootView: parent.library,
-            destination: .library
-        )
+        /// 两个图库子页保持挂载，以保留独立滚动、相簿搜索与导航历史。
+        private var libraryRoot: AnyView {
+            AnyView(LibraryTabContent(selection: parent.librarySection, atRoot: parent.libraryAtRoot,
+                                      select: parent.selectLibrarySection, albums: parent.albums, collections: parent.library))
+        }
+
         private lazy var yearsController = tabHostingController(
             rootView: parent.years,
             destination: .years,
@@ -378,24 +393,21 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             return controller
         }
 
+        /// view为已有页面；独立HostingController显式接收位置服务和应用语言，不依赖跨UIKit的环境继承。
         private func hostedRoot(_ view: AnyView) -> AnyView {
-            AnyView(view.environment(\.assetLocations, parent.locations))
+            AnyView(view.environment(\.assetLocations, parent.locations).environment(\.locale, Locale(identifier: parent.languageCode)))
         }
 
         private lazy var photosTab = UITab(
-            title: "Photos", image: UIImage(systemName: "photo.on.rectangle.angled"), identifier: "photos"
+            title: L10n.string("Photos", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "photo.on.rectangle.angled"), identifier: "photos"
         ) { [weak self] _ in self?.photosController ?? UIViewController() }
 
         private lazy var videosTab = UITab(
-            title: "Videos", image: UIImage(systemName: "play.rectangle"), identifier: "videos"
+            title: L10n.string("Videos", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "play.rectangle"), identifier: "videos"
         ) { [weak self] _ in self?.videosController ?? UIViewController() }
 
-        private lazy var albumsTab = UITab(
-            title: "Albums", image: UIImage(systemName: "rectangle.stack"), identifier: "albums"
-        ) { [weak self] _ in self?.albumsController ?? UIViewController() }
-
         private lazy var libraryTab = UITab(
-            title: "Library", image: UIImage(systemName: "square.grid.2x2"), identifier: "library"
+            title: L10n.string("Library", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "square.grid.2x2"), identifier: "library"
         ) { [weak self] _ in
             guard let self else { return UIViewController() }
             didResolveLibrary = true
@@ -403,19 +415,24 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
         }
 
         private lazy var yearsTab = UITab(
-            title: "Years", image: UIImage(systemName: "calendar.circle"), identifier: "years"
+            title: L10n.string("Years", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "calendar.circle"), identifier: "years"
         ) { [weak self] _ in self?.yearsController ?? UIViewController() }
 
         private lazy var monthsTab = UITab(
-            title: "Months", image: UIImage(systemName: "calendar"), identifier: "months"
+            title: L10n.string("Months", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "calendar"), identifier: "months"
         ) { [weak self] _ in self?.monthsController ?? UIViewController() }
 
         private lazy var weeksTab = UITab(
-            title: "Weeks", image: UIImage(systemName: "7.circle"), identifier: "weeks"
+            title: L10n.string("Weeks", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "7.circle"), identifier: "weeks"
         ) { [weak self] _ in self?.weeksController ?? UIViewController() }
 
-        private lazy var searchTab = UISearchTab { [weak self] _ in
+        /// 普通搜索标签遵循数组顺序，保证“我的”始终在最右；不使用系统独立的尾部搜索槽。
+        private lazy var searchTab = UITab(title: L10n.string("Search", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "magnifyingglass"), identifier: "search") { [weak self] _ in
             self?.searchController ?? UIViewController()
+        }
+
+        private lazy var accountTab = UITab(title: L10n.string("Me", language: AppLanguage(rawValue: parent.languageCode)), image: UIImage(systemName: "person.crop.circle"), identifier: "account") { [weak self] _ in
+            self?.accountController ?? UIViewController()
         }
 
         init(_ parent: NativeAppTabShell) {
@@ -479,17 +496,12 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             }
         }
 
+        /// next为最新页面快照；animated只控制标签换组。语言变更更新文案环境，不重置页面身份或备份协调器。
         func update(_ next: NativeAppTabShell, animated: Bool) {
             let previous = parent
             parent = next
 
             let mediaLayoutChanged = previous.tabBarTop != next.tabBarTop
-            if didResolveAlbums,
-               previous.libraryContentRevision != next.libraryContentRevision || mediaLayoutChanged
-               || previous.albumsScrollRequest != next.albumsScrollRequest
-            {
-                albumsController.rootView = hostedRoot(next.albums)
-            }
             let rangeRequestChanged = previous.timelineRangeRequestGeneration != next.timelineRangeRequestGeneration
             if previous.photosScrollRequest != next.photosScrollRequest || rangeRequestChanged {
                 photosController.rootView = hostedRoot(next.photos)
@@ -498,9 +510,10 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
                 videosController.rootView = hostedRoot(next.videos)
             }
             if didResolveLibrary,
-               previous.libraryContentRevision != next.libraryContentRevision
+               previous.libraryContentRevision != next.libraryContentRevision || previous.librarySection != next.librarySection
+               || previous.libraryAtRoot != next.libraryAtRoot || previous.albumsScrollRequest != next.albumsScrollRequest || mediaLayoutChanged
             {
-                libraryController.rootView = hostedRoot(next.library)
+                libraryController.rootView = hostedRoot(libraryRoot)
             }
             if mediaLayoutChanged
                 || previous.groupedScrollRequests != next.groupedScrollRequests
@@ -511,6 +524,29 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
                 weeksController.rootView = hostedRoot(next.weeks)
             }
 
+            accountController.rootView = hostedRoot(next.account)
+            if previous.languageCode != next.languageCode {
+                photosController.rootView = hostedRoot(next.photos)
+                videosController.rootView = hostedRoot(next.videos)
+                libraryController.rootView = hostedRoot(libraryRoot)
+                searchController.rootView = hostedRoot(next.search)
+                yearsController.rootView = hostedRoot(next.years)
+                monthsController.rootView = hostedRoot(next.months)
+                weeksController.rootView = hostedRoot(next.weeks)
+                for (tab, title) in [(photosTab, "Photos"), (videosTab, "Videos"), (libraryTab, "Library"), (searchTab, "Search"), (accountTab, "Me"), (yearsTab, "Years"), (monthsTab, "Months"), (weeksTab, "Weeks")] {
+                    tab.title = L10n.string(title, language: AppLanguage(rawValue: next.languageCode))
+                }
+                if let controller {
+                    // UITab的模型标题改变后，iPhone仍可能保留已创建的UITabBarItem文案；同步实际项目而不重建导航宿主。
+                    if let items = controller.tabBar.items, items.count == controller.tabs.count {
+                        for (item, tab) in zip(items, controller.tabs) {
+                            item.title = tab.title
+                        }
+                    }
+                    controller.setTabs(controller.tabs, animated: false)
+                    controller.tabBar.setNeedsLayout()
+                }
+            }
             guard let controller else { return }
             if tabBarInteractionBlockedByViewer != next.isViewerPresented {
                 tabBarInteractionBlockedByViewer = next.isViewerPresented
@@ -540,7 +576,7 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             let bounds = controller.view.bounds
             guard bounds.width > 0, bounds.height > 0, controller.transitionCoordinator == nil else { return }
             let tabs: [(NativeTabDestination, AnyView)] = [
-                (.videos, parent.videos), (.albums, parent.albums), (.library, parent.library), (.search, parent.search),
+                (.videos, parent.videos), (.library, libraryRoot), (.search, parent.search), (.account, parent.account),
             ]
             for (destination, root) in tabs
                 where parent.preparedDestinations.contains(destination)
@@ -618,8 +654,8 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             _ tabBarController: UITabBarController,
             shouldSelectTab tab: UITab
         ) -> Bool {
-            if !isUpdatingTabs, tab !== albumsTab, tabBarController.selectedTab === albumsTab,
-               parent.albumSearchExpanded(), let outgoingView = albumsTab.viewController?.viewIfLoaded
+            if !isUpdatingTabs, tab !== libraryTab, tabBarController.selectedTab === libraryTab,
+               parent.albumSearchExpanded(), let outgoingView = libraryTab.viewController?.viewIfLoaded
             {
                 outgoingView.endEditing(true)
             }
@@ -666,6 +702,7 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             }
         }
 
+        /// recognizer提供当前窗口方向，controller拥有交互转场；图库别名映射到当前子页，取消仍恢复原标签。
         private func beginPageInteraction(
             using recognizer: UIPanGestureRecognizer,
             in controller: UITabBarController
@@ -676,11 +713,13 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
 
             let velocity = recognizer.velocity(in: controller.view)
             let direction: NativeTabPageDirection = velocity.x < 0 ? .next : .previous
-            guard let destination = NativeTabLayout.adjacentDestination(
+            guard let adjacent = NativeTabLayout.adjacentDestination(
                 from: parent.selection,
                 direction: direction,
                 compactOwner: parent.compactOwner
             ) else { return }
+            // 图库标签的相簿/分类共用物理位置，滑入时恢复当前子页而不是发布错误的活动身份。
+            let destination = adjacent == .library ? parent.librarySection : adjacent
 
             let interaction = UIPercentDrivenInteractiveTransition()
             interaction.completionCurve = .easeOut
@@ -850,10 +889,12 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
                 parent.photosRetapped()
             } else if selectedTab === videosTab, previousTab === videosTab {
                 parent.videosRetapped()
-            } else if selectedTab === albumsTab, previousTab === albumsTab {
-                parent.albumsRetapped()
             } else if selectedTab === libraryTab, previousTab === libraryTab {
-                parent.libraryRetapped()
+                if parent.librarySection == .albums {
+                    parent.albumsRetapped()
+                } else {
+                    parent.libraryRetapped()
+                }
             } else if selectedTab === previousTab,
                       destination == .weeks || destination == .months || destination == .years
             {
@@ -949,12 +990,14 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             pageInteractionController
         }
 
+        /// destination是逻辑页面；albums/library返回同一个图库标签，其他页面各自保持稳定UIKit身份。
         private func tab(for destination: NativeTabDestination) -> UITab {
             switch destination {
             case .photos: photosTab
             case .videos: videosTab
-            case .albums: albumsTab
+            case .albums: libraryTab
             case .library: libraryTab
+            case .account: accountTab
             case .years: yearsTab
             case .months: monthsTab
             case .weeks: weeksTab
@@ -962,6 +1005,7 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             }
         }
 
+        /// tab必须属于本宿主；图库返回当前子页身份，外部或未知标签返回nil。
         private func destination(for tab: UITab) -> NativeTabDestination? {
             if tab === photosTab {
                 return .photos
@@ -969,11 +1013,11 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
             if tab === videosTab {
                 return .videos
             }
-            if tab === albumsTab {
-                return .albums
-            }
             if tab === libraryTab {
-                return .library
+                return parent.librarySection
+            }
+            if tab === accountTab {
+                return .account
             }
             if tab === yearsTab {
                 return .years

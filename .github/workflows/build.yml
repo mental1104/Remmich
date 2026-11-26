@@ -64,6 +64,28 @@ jobs:
       - name: Select available iPhone simulator
         run: bash Scripts/select-ci-simulator.sh
 
+      - name: Verify shared app and UI schemes
+        run: |
+          scheme_json="$RUNNER_TEMP/remmich-project-schemes.json"
+          scheme_log="$RUNNER_TEMP/remmich-project-schemes.log"
+          # quiet的JSON stdout单独保存；包解析进度和诊断保留在stderr，避免污染jq输入或隐藏Xcode失败。
+          if ! xcodebuild -list -project Remmich.xcodeproj -json -quiet \
+            > "$scheme_json" 2> "$scheme_log"; then
+            cat "$scheme_log" "$scheme_json"
+            exit 1
+          fi
+          cat "$scheme_log"
+          # PR仍构建SearchUI，但必须由实际Xcode同时发现dev所需的App方案；缺项/坏JSON均保持失败。
+          if ! jq -e '.project.schemes as $schemes |
+            if ($schemes | type) == "array" and
+               ($schemes | index("Remmich")) != null and
+               ($schemes | index("RemmichSearchUI")) != null
+            then {required: ["Remmich", "RemmichSearchUI"], discovered: $schemes}
+            else error("Required shared schemes are missing") end' "$scheme_json"; then
+            cat "$scheme_json"
+            exit 1
+          fi
+
       - name: Build app and test bundles
         id: test-build
         env:
@@ -129,6 +151,46 @@ jobs:
         with:
           name: remmich-pr-api-test-evidence
           path: ${{ runner.temp }}/RemmichAPITests.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # 先保留当天核心同步/匹配验收；后面的完整App及两设备UI继续执行，不缩减既有检查。
+      - name: Test backup and matching before full app tests
+        id: backup-tests
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && steps.test-build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Remmich.xcodeproj \
+            -scheme RemmichSearchUI \
+            -configuration Debug \
+            -destination "$IPHONE_DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -resultBundlePath "$RUNNER_TEMP/RemmichBackupTests.xcresult" \
+            -jobs 2 \
+            -parallel-testing-enabled NO \
+            -only-testing:RemmichTests/PhotoBackupServerMatchingTests \
+            -only-testing:RemmichTests/PhotoBackupOriginTests \
+            -only-testing:RemmichTests/PhotoBackupContinuityTests \
+            -only-testing:RemmichTests/PhotoBackupWorkerTests \
+            -only-testing:RemmichTests/PhotoBackupICloudMarkerHTTPTests \
+            -only-testing:RemmichTests/LocalMediaMetadataStreamTests \
+            -only-testing:RemmichTests/LocalMediaMetadataHTTPTests \
+            COMPILER_INDEX_STORE_ENABLE=NO 2>&1 \
+            | tee "$RUNNER_TEMP/RemmichBackupTests.log" \
+            | xcbeautify
+          # 防止筛选拼写错误造成零用例假通过；仍以原始测试退出码和真实套件完成行为准。
+          grep -F 'Suite "Server iCloud backup matching without imports" passed' "$RUNNER_TEMP/RemmichBackupTests.log"
+          grep -F 'Suite "Backup iCloud origin and cross-client metadata" passed' "$RUNNER_TEMP/RemmichBackupTests.log"
+
+      - name: Upload backup and matching evidence immediately
+        if: ${{ always() && github.event_name == 'pull_request' && steps.backup-tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remmich-pr-backup-test-evidence
+          path: |
+            ${{ runner.temp }}/RemmichBackupTests.log
+            ${{ runner.temp }}/RemmichBackupTests.xcresult
           if-no-files-found: ignore
           retention-days: 3
 
@@ -209,6 +271,8 @@ jobs:
           name: remmich-pr-test-results
           path: |
             ${{ runner.temp }}/RemmichAPITests.log
+            ${{ runner.temp }}/RemmichBackupTests.log
+            ${{ runner.temp }}/RemmichBackupTests.xcresult
             ${{ runner.temp }}/RemmichPRTests.log
             ${{ runner.temp }}/RemmichPRTests.xcresult
             ${{ runner.temp }}/RemmichSearchUI-phone/SearchUI.xcresult

@@ -3,7 +3,7 @@ import Synchronization
 import Testing
 @testable import Remmich
 
-/// 一次固定HTTP响应，held仅控制在途时序，authorization用于换账号后的真实新Bearer断言。
+/// 一次固定HTTP响应；held控制在途时序，authorization核Bearer，responseJSON可按随机nonce生成查重回执，contentType保留真实流类型。
 nonisolated struct ChecksumLookupExchange: Sendable {
     let method: String
     let path: String
@@ -11,6 +11,12 @@ nonisolated struct ChecksumLookupExchange: Sendable {
     let json: String
     var held = false
     var authorization = "Bearer checksum-owner"
+    var responseJSON: (@Sendable (ChecksumLookupRequest) throws -> String)?
+    var contentType = "application/json"
+    /// 明确查询参数与路径分开核对；默认空数组保留所有既有无query场景。
+    var query: [URLQueryItem] = []
+    /// 仅磁盘multipart上传场景设置前缀；nil保持既有GET/JSON精确检查，不放宽其他用例。
+    var requestContentTypePrefix: String?
 }
 
 /// 有限JSON请求快照；不把Foundation输入流跨actor共享。
@@ -75,9 +81,23 @@ actor ChecksumLookupHTTPScript {
         let index = captured.count; captured.append(request)
         guard exchanges.indices.contains(index) else { throw URLError(.badServerResponse) }
         let exchange = exchanges[index]
-        guard request.method == exchange.method, request.url == endpoint.appending(path: exchange.path),
+        let expectedURL: URL?
+        if exchange.query.isEmpty {
+            // 原无query调用保留同一URL构造表达式，不经过新增的组件重写分支。
+            expectedURL = endpoint.appending(path: exchange.path)
+        } else {
+            var expected = URLComponents(url: endpoint.appending(path: exchange.path), resolvingAgainstBaseURL: false)
+            expected?.queryItems = exchange.query
+            expectedURL = expected?.url
+        }
+        let contentTypeMatches = if let prefix = exchange.requestContentTypePrefix {
+            request.contentType?.hasPrefix(prefix) == true
+        } else {
+            request.contentType == (request.body == nil ? nil : "application/json")
+        }
+        guard request.method == exchange.method, request.url == expectedURL,
               request.authorization == exchange.authorization, request.cookie == nil,
-              request.contentType == (request.body == nil ? nil : "application/json") else { throw URLError(.badServerResponse) }
+              contentTypeMatches else { throw URLError(.badServerResponse) }
         if exchange.held {
             heldRequestID = request.id
             await withCheckedContinuation { continuation in
@@ -203,9 +223,10 @@ private final nonisolated class ChecksumLookupURLProtocol: URLProtocol, @uncheck
                     let exchange = try await entry.script.response(capturedRequest, endpoint: entry.endpoint)
                     guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }
                     guard let response = HTTPURLResponse(url: capturedRequest.url, statusCode: exchange.status, httpVersion: nil,
-                                                         headerFields: ["Content-Type": "application/json"]) else { throw URLError(.badServerResponse) }
+                                                         headerFields: ["Content-Type": exchange.contentType]) else { throw URLError(.badServerResponse) }
+                    let json = try exchange.responseJSON?(capturedRequest) ?? exchange.json
                     client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                    client?.urlProtocol(self, didLoad: Data(exchange.json.utf8))
+                    client?.urlProtocol(self, didLoad: Data(json.utf8))
                     client?.urlProtocolDidFinishLoading(self)
                 } catch {
                     guard let self, !Task.isCancelled, !self.loading.withLock({ $0.stopped }) else { return }

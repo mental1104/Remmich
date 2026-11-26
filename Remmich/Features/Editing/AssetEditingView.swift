@@ -22,6 +22,7 @@ struct AssetEditingView: View {
     @State private var validSource = false
     @State private var forceReset = false
     @State private var showsOriginal = false
+    @State private var cropFocusRequest = 0
     @State private var error: String?
     @State private var loadID = UUID()
     @State private var reloadID = 0
@@ -52,7 +53,7 @@ struct AssetEditingView: View {
                             ProgressView("读取原图预览与编辑…")
                         }
                         if let error {
-                            Text(error).foregroundStyle(.red).accessibilityIdentifier("asset-editor-error")
+                            Text(L10n.string(error)).foregroundStyle(.red).accessibilityIdentifier("asset-editor-error")
                             Button("重新读取") {
                                 if hasChanges {
                                     confirmsReload = true
@@ -141,6 +142,11 @@ struct AssetEditingView: View {
         canEdit && sourceImage != nil && hasChanges
     }
 
+    /// 键盘入口只属于当前活跃、有效且没有确认弹层的裁剪页，不让背后控件接管其他页面输入。
+    private var canFocusCrop: Bool {
+        canEdit && draft?.crop != nil && scenePhase == .active && !confirmsSave && !confirmsDiscard && !confirmsReload
+    }
+
     /// image为同版本未编辑预览，draft为原图像素草稿；宽窗口并排取景和结果，小窗口上下排列。
     private func preview(_ image: UIImage, draft: AssetEditDraft, size: CGSize) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -151,14 +157,14 @@ struct AssetEditingView: View {
                 Text("原图对照").tag(true)
             }.pickerStyle(.segmented).accessibilityIdentifier("asset-editor-comparison")
             if draft.crop != nil {
-                if size.width >= 760, !dynamicTypeSize.isAccessibilitySize {
-                    HStack(alignment: .top, spacing: 14) {
-                        cropCanvas(image, draft: draft).frame(maxWidth: .infinity)
-                        resultPreview(image, draft: draft).frame(maxWidth: .infinity)
-                    }.frame(height: min(440, max(260, size.height * 0.6)))
-                } else {
-                    cropCanvas(image, draft: draft).frame(height: min(340, max(220, size.height * 0.42)))
-                    resultPreview(image, draft: draft).frame(height: min(300, max(180, size.height * 0.32)))
+                let horizontal = size.width >= 760 && !dynamicTypeSize.isAccessibilitySize
+                let layout = horizontal ? AnyLayout(HStackLayout(alignment: .top, spacing: 14)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
+                let canvasHeight = horizontal ? min(440, max(260, size.height * 0.6)) : min(340, max(220, size.height * 0.42))
+                let resultHeight = horizontal ? canvasHeight : min(300, max(180, size.height * 0.32))
+                // 只换布局策略，不换Canvas结构身份，窗口/Dynamic Type变化保留焦点、手势和当前草稿。
+                layout {
+                    cropCanvas(image, draft: draft).frame(maxWidth: .infinity).frame(height: canvasHeight)
+                    resultPreview(image, draft: draft).frame(maxWidth: .infinity).frame(height: resultHeight)
                 }
                 Text("拖动选框或四角，双指捏合调整取景范围。左侧／上方选框使用原图坐标，先裁剪再应用旋转与镜像。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -173,8 +179,9 @@ struct AssetEditingView: View {
     /// 只在已开启裁剪时绑定区域；旧手势在账号失效后不能重新写入草稿。
     private func cropCanvas(_ image: UIImage, draft: AssetEditDraft) -> some View {
         AssetEditCropCanvas(image: image, sourceSize: draft.sourceSize,
-                            crop: Binding(get: { self.draft?.crop ?? .full(draft.sourceSize) }, set: { value in edit { $0.crop = value } }))
-            .clipShape(RoundedRectangle(cornerRadius: 12)).disabled(!canEdit)
+                            crop: Binding(get: { self.draft?.crop ?? .full(draft.sourceSize) }, set: { value in edit { $0.crop = value } }),
+                            focusRequest: cropFocusRequest)
+            .clipShape(RoundedRectangle(cornerRadius: 12)).disabled(!canFocusCrop)
     }
 
     /// 显示原图或当前结果；同一像素源用于对照，不请求另一份可能过期的已编辑缩略图。
@@ -198,6 +205,14 @@ struct AssetEditingView: View {
             Toggle("裁剪", isOn: Binding(get: { self.draft?.crop != nil }, set: { enabled in edit { $0.crop = enabled ? .full($0.sourceSize) : nil } }))
                 .accessibilityIdentifier("asset-editor-crop-toggle")
             if let crop = draft.crop {
+                Button("用键盘调整裁剪", systemImage: "keyboard") {
+                    guard canFocusCrop else { return }
+                    cropFocusRequest &+= 1
+                }
+                .keyboardShortcut("k", modifiers: [.command, .option])
+                .buttonStyle(.bordered).hoverEffect(.highlight)
+                .disabled(!canFocusCrop)
+                .accessibilityHint("Command-Option-K focuses the crop. Arrow keys move; Shift changes ten pixels; Option resizes.")
                 DisclosureGroup("精确像素调整") {
                     VStack(spacing: 10) {
                         Stepper("X：\(crop.x)", value: cropBinding(.x), in: 0 ... (draft.sourceSize.width - crop.width))

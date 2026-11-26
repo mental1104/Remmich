@@ -67,6 +67,8 @@ final class AppSessionController {
     private var hasReceivedNetworkPath = false
     private var lastNetworkPathSignature: NetworkPathSignature?
     private var validatedNetworkPathSignature: NetworkPathSignature?
+    private var backupNetworkPathEvent: UUID?
+    private var backupNetworkPathEventScope: MediaAccountScope?
     private var isRestoringSession = false
     private var routeGeneration = 0
     private var pendingPathChangeTask: Task<Void, Never>?
@@ -154,6 +156,7 @@ final class AppSessionController {
         }
         photos = PhotosTimelineStore(
             reader: photosReader,
+            sceneSource: previewReader == nil ? timeline : nil,
             persistentRefreshPolicy: .acceptedIndexPublication
         )
         videos = PhotosTimelineStore(
@@ -185,6 +188,8 @@ final class AppSessionController {
             photos.promoteBootstrapGroupedCatalogs(bootstrap.photos)
             videos.promoteBootstrapGroupedCatalogs(bootstrap.videos)
         }
+        // 真正接受索引与AppShell revision桥接均存在后，才允许元数据页发出日期定向刷新需求。
+        media.management.metadataDateRefreshAvailable = true
     }
 
     func start() async {
@@ -507,6 +512,8 @@ final class AppSessionController {
         routeStatus = .waitingForNetwork
         validatedNetworkPathSignature = nil
         connectionProfile = .init()
+        backupNetworkPathEvent = nil
+        backupNetworkPathEventScope = nil
         libraryIndex.suspend()
         locations.reset()
         media.clearAll()
@@ -671,13 +678,23 @@ final class AppSessionController {
     }
 
     private func reevaluateRoute(trigger: RouteEvaluationTrigger, startIndex: Bool = true) async {
-        guard !isPreparingAccountSelection, automaticSyncAllowed, !Task.isCancelled, case .signedIn = state else { return }
+        guard !isPreparingAccountSelection, automaticSyncAllowed, !Task.isCancelled, case let .signedIn(session) = state else { return }
         let pathSignature = lastNetworkPathSignature
+        let backupEvent = backupNetworkPathEvent
         await routeEvaluationGate.submit { [weak self] in
             await self?.performRouteEvaluation(trigger: trigger, startIndex: startIndex)
         }
-        if automaticSyncAllowed, !Task.isCancelled, routeStatus == .connected, pathSignature == lastNetworkPathSignature {
+        if automaticSyncAllowed, !Task.isCancelled, routeStatus == .connected, pathSignature == lastNetworkPathSignature,
+           case let .signedIn(current) = state, current == session
+        {
             validatedNetworkPathSignature = pathSignature
+            // 原路径事件在前台真实验证后只交付同一token；保留同endpoint也必须通知，后台变化等前台重新验证才交付。
+            if isAppInForeground, pathSignature?.status == "satisfied", let backupEvent, backupEvent == backupNetworkPathEvent,
+               backupNetworkPathEventScope == MediaAccountScope(session: session),
+               let route = activeRoute, media.management.client?.apiURL == route.endpoint
+            {
+                media.photoBackups.networkRouteValidated(using: media.management, scope: media.scope, eventID: backupEvent)
+            }
         }
     }
 
@@ -771,8 +788,9 @@ final class AppSessionController {
         pathMonitor.start(queue: DispatchQueue(label: "Remmich.NetworkPath"))
     }
 
-    func handleNetworkPathChange(usesWiFi: Bool) async {
-        await handleNetworkPathChange(.test(usesWiFi: usesWiFi))
+    /// usesWiFi/isSatisfied只提供现有路径处理器的合成输入；默认保持原测试调用，生产始终由同一NWPathMonitor提供真实路径。
+    func handleNetworkPathChange(usesWiFi: Bool, isSatisfied: Bool = true) async {
+        await handleNetworkPathChange(.test(usesWiFi: usesWiFi, isSatisfied: isSatisfied))
     }
 
     private func handleNetworkPathChange(_ signature: NetworkPathSignature) async {
@@ -791,6 +809,13 @@ final class AppSessionController {
                 validatedNetworkPathSignature = signature
             }
             return
+        }
+        // 已连接/恢复期首次噪声已在上方过滤；其余路径变化或未解析路由唤醒沿原gate验证，不创建第二监视器。
+        backupNetworkPathEvent = UUID()
+        if case let .signedIn(session) = state {
+            backupNetworkPathEventScope = MediaAccountScope(session: session)
+        } else {
+            backupNetworkPathEventScope = nil
         }
         // An interface actually transitioning (Wi-Fi associating, a VPN/proxy tunnel
         // re-establishing, link-quality assessment) fires a burst of raw path callbacks, not
@@ -983,6 +1008,8 @@ final class AppSessionController {
         libraryIndex.start(session: session, endpoint: activeRoute?.endpoint ?? session.apiURL, automatic: true)
     }
 
+    /// id/kind为原调度器持有的系统租约；恢复认证路由后串行执行已同意备份及原索引，返回本轮合并结果。
+    /// 到期由调度器取消父Task并调用endBackgroundSync，备份等待实际Worker退役，不改变用户开关。
     func performBackgroundSync(id: UUID, kind: LibraryBackgroundSyncKind = .processing) async -> Bool {
         guard !Task.isCancelled, backgroundSyncID == nil else { return false }
         backgroundSyncID = id
@@ -994,8 +1021,60 @@ final class AppSessionController {
               case let .signedIn(session) = state else { return false }
         await reevaluateRoute(trigger: .background)
         guard backgroundSyncID == id, !Task.isCancelled, routeStatus == .connected else { return false }
+        // 同一processing租约先执行当前账号已同意的备份，再继续原索引；不伪装成前台或创建第二个系统owner。
+        let backupSucceeded = kind == .processing ? await performBackgroundPhotoBackup() : true
+        guard backgroundSyncID == id, !Task.isCancelled, routeStatus == .connected else { return false }
         startLibraryIndexing(session: session)
-        return await libraryIndex.finishBackgroundSync(kind: kind)
+        let indexed = await libraryIndex.finishBackgroundSync(kind: kind)
+        return indexed && backupSucceeded
+    }
+
+    /// 同一processing租约先等待原上传完全退役，再await独立已同意的相簿组织，不嵌套RunCoordinator。
+    /// 返回两者合并结果；无后台备份同意无需执行，不能由前台/相簿规则推断系统授权。
+    private func performBackgroundPhotoBackup() async -> Bool {
+        let backup = media.photoBackups
+        let manager = media.management
+        guard !Task.isCancelled, let leaseID = backgroundSyncID, backgroundSyncKind == .processing,
+              case let .signedIn(session) = state, routeStatus == .connected, let route = activeRoute,
+              validatedNetworkPathSignature == lastNetworkPathSignature else { return false }
+        let endpoint = route.endpoint, routeEpoch = routeGeneration, path = validatedNetworkPathSignature
+        // headless恢复刻意不创建Media pipeline；仅给原管理通道绑定刚验证的账号/路由，不能依赖前台configure曾运行。
+        manager.configure(session: session, endpoint: endpoint)
+        guard !backup.running, !manager.busy else { return !backup.backgroundAutomaticEnabled }
+        guard let scope = manager.backupScope else { return false }
+        let generation = manager.generation
+        // 闭包固定本次已验证路由及processing owner；同地址重验证、换号或新网络路径也不能沿用旧租约。
+        let validateContext: @MainActor () throws -> Void = {
+            try Task.checkCancellation()
+            guard self.backgroundSyncID == leaseID, self.backgroundSyncKind == .processing,
+                  manager.generation == generation, manager.backupScope == scope, manager.client?.apiURL == endpoint,
+                  self.routeStatus == .connected, self.activeRoute == route, self.routeGeneration == routeEpoch,
+                  self.validatedNetworkPathSignature == path, self.lastNetworkPathSignature == path,
+                  case let .signedIn(current) = self.state, current == session else { throw CancellationError() }
+        }
+        let validateLease: @MainActor () throws -> Void = {
+            try validateContext()
+            guard backup.backgroundAutomaticEnabled else { throw CancellationError() }
+        }
+        do {
+            try validateContext()
+            guard try await backup.refreshBackgroundConsent(using: manager) else { return true }
+            try validateLease()
+            await backup.load(using: manager)
+            try validateLease()
+            guard let operation = backup.runSystemBackground(using: manager) else { return false }
+            await withTaskCancellationHandler {
+                await operation.value
+            } onCancel: {
+                operation.cancel()
+            }
+            // operation.value已包含Worker/manager及唯一Coordinator退出；只有确认的上传周期才接组织。
+            try validateLease()
+            guard backup.backgroundLastResult == true, try await backup.refreshBackgroundConsent(using: manager) else { return false }
+            try validateLease()
+            return try await PhotoBackupAlbumAutomation.performBackground(backup: backup, using: manager, scope: scope,
+                                                                          validateLease: validateLease)
+        } catch { return false }
     }
 
     func performTransferReconciliation(id: UUID, delivery: LibraryTransferDelivery) async -> Bool {
@@ -1034,8 +1113,10 @@ final class AppSessionController {
         return await libraryIndex.finishTransferReconciliation(resumeIndex: delivery.hasIndexWork)
     }
 
+    /// id必须匹配当前系统owner；撤销后台备份执行与原索引资格，用户意愿和持久恢复资料保留。
     func endBackgroundSync(id: UUID) {
         guard backgroundSyncID == id else { return }
+        media.photoBackups.cancelSystemBackground()
         backgroundSyncID = nil
         backgroundSyncKind = nil
         if !isAppInForeground {
@@ -1235,9 +1316,10 @@ private nonisolated struct NetworkPathSignature: Equatable, Sendable {
         supportsIPv6 = path.supportsIPv6
     }
 
-    static func test(usesWiFi: Bool) -> NetworkPathSignature {
+    /// usesWiFi为合成接口，isSatisfied为连通性快照；只替代NWPath值，不替代服务端真实route验证。
+    static func test(usesWiFi: Bool, isSatisfied: Bool = true) -> NetworkPathSignature {
         NetworkPathSignature(
-            status: "satisfied",
+            status: isSatisfied ? "satisfied" : "unsatisfied",
             interfaces: [usesWiFi ? "wifi:test" : "cellular:test"],
             gateways: [],
             isExpensive: !usesWiFi,

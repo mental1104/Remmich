@@ -9,6 +9,10 @@ final class LibraryManagementController {
     private(set) var generation = UUID()
     private(set) var revision = 0
     private(set) var busy = false
+    /// 只有应用已接入接受索引的日期刷新链时启用；孤立管理宿主不能假称已通知时间线。
+    var metadataDateRefreshAvailable = false
+    private var metadataDateProjections: [String: AssetMetadataDateProjection] = [:]
+    private var partnerTimelineRefreshRequested = false
     private var account: AccountSession?
     private let configurationFactory: (() -> URLSessionConfiguration)?
 
@@ -30,6 +34,8 @@ final class LibraryManagementController {
         client?.cancel()
         account = session
         generation = UUID()
+        metadataDateProjections.removeAll()
+        partnerTimelineRefreshRequested = false
         busy = false
         client = if let session, let endpoint {
             if let configurationFactory {
@@ -67,5 +73,32 @@ final class LibraryManagementController {
         if owner == generation {
             revision += 1
         }
+    }
+
+    /// 伙伴时间线写入已确认或结果未知时仅请求重新读取；代际不符不把旧账号意图发给当前索引。
+    func publishPartnerTimelineChange(ifGeneration owner: UUID) {
+        guard owner == generation else { return }
+        partnerTimelineRefreshRequested = true; revision += 1
+    }
+
+    /// 原AppShell管理观察器消费一次调度意图；持久正确性由查询policy/accepted代际证书承担，不依赖此内存bool。
+    func takePartnerTimelineRefreshRequest() -> Bool {
+        let result = partnerTimelineRefreshRequested; partnerTimelineRefreshRequested = false; return result
+    }
+
+    /// projection为fresh详情已核对的当前日期投影；同账号保存需求后复用既有revision通知，不建立通用事件队列。
+    func requestMetadataDateRefresh(_ projection: AssetMetadataDateProjection) -> Bool {
+        guard metadataDateRefreshAvailable, projection.accountGeneration == generation,
+              projection.ownerID.lowercased() == client?.userID.lowercased() else { return false }
+        metadataDateProjections[projection.assetID.lowercased()] = projection
+        revision += 1
+        return true
+    }
+
+    /// 仅既有App索引桥接消费本账号已验证需求；索引控制器接管后仍须保留活跃同步中的后续刷新。
+    func takeMetadataDateProjections() -> [AssetMetadataDateProjection] {
+        let values = Array(metadataDateProjections.values)
+        metadataDateProjections.removeAll()
+        return values
     }
 }

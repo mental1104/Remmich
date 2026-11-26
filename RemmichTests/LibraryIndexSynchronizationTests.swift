@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Remmich
 
+/// 使用真实SQLite代际校验索引同步、账号退休和进度发布，合成源不访问生产图库。
 @Suite(.serialized)
 struct LibraryIndexSynchronizationTests {
     @Test @MainActor func invalidatedIndexRunCannotRestoreOldAccountThumbnailRegistrations() async throws {
@@ -558,6 +559,7 @@ struct LibraryIndexSynchronizationTests {
         #expect(snapshot.assets.first?.livePhotoVideoID == "live-photo-motion")
     }
 
+    /// 在实际全量校验中收集progress，核对Live主体和视频计数；回调显式标注，避免绑定到零参数验证器。
     @Test func fullReconciliationPublishesLivePhotoAndVideoCounts() async throws {
         let fixture = try IndexFixture()
         defer { fixture.cleanup() }
@@ -569,9 +571,9 @@ struct LibraryIndexSynchronizationTests {
         let recorder = IndexProgressRecorder()
         let synchronizer = LibraryIndexSynchronizer(source: source, store: store)
 
-        _ = try await synchronizer.fullSyncAndVerify(scope: Self.scope) { progress in
+        _ = try await synchronizer.fullSyncAndVerify(scope: Self.scope, progress: { progress in
             await recorder.append(progress)
-        }
+        })
 
         let progressValues = await recorder.values
         let finalProgress = try #require(progressValues.last)

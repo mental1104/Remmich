@@ -19,6 +19,8 @@ nonisolated struct LibraryIndexSyncResult: Sendable {
     var hasPendingBucketChanges = false
     var removedBucketKeys: [String] = []
     var removedBucketAssetCount = 0
+    /// 只有完整默认时间线accept成功且持久证书与此代际一致时返回；不代表SwiftUI已经完成绘制。
+    var appliedPartnerPolicy: PartnerTimelinePolicy?
 
     var isComplete: Bool {
         !hasMoreHistory && !hasPendingBucketChanges
@@ -43,9 +45,13 @@ actor LibraryIndexSynchronizer {
         self.batchSize = max(1, batchSize)
     }
 
+    /// scope为隔离账号；recentOnly保留原短同步范围，dateProjections额外强制已验证日期的旧/新月。
+    /// validateContext在异步边界拒绝退休上下文，nil保持原行为；progress报告已读取数量，返回原子接受结果。
     func synchronizeRecent(
         scope: MediaAccountScope,
         recentOnly: Bool = false,
+        dateProjections: [AssetMetadataDateProjection] = [],
+        validateContext: (@Sendable () async throws -> Void)? = nil,
         progress: (@Sendable (LibraryIndexProgress) async -> Void)? = nil
     ) async throws -> LibraryIndexSyncResult {
         let snapshot = try await store.snapshot(scope: scope)
@@ -54,6 +60,8 @@ actor LibraryIndexSynchronizer {
             mode: snapshot == nil ? .recent : .incremental,
             fullReconciliation: false,
             recentOnly: recentOnly,
+            dateProjections: dateProjections,
+            validateContext: validateContext,
             progress: progress
         )
     }
@@ -70,28 +78,40 @@ actor LibraryIndexSynchronizer {
         )
     }
 
+    /// scope指定账号；显式全量同步仍读所有桶，日期需求另须fresh完整性核对，context失效则拒绝接受。
+    /// progress为原进度回调，返回本次接受代际；空dateProjections与nil validator保持原有契约。
     func fullSyncAndVerify(
         scope: MediaAccountScope,
+        dateProjections: [AssetMetadataDateProjection] = [],
+        validateContext: (@Sendable () async throws -> Void)? = nil,
         progress: (@Sendable (LibraryIndexProgress) async -> Void)? = nil
     ) async throws -> LibraryIndexSyncResult {
         try await synchronize(
             scope: scope,
             mode: .fullReconciliation,
             fullReconciliation: true,
+            dateProjections: dateProjections,
+            validateContext: validateContext,
             progress: progress
         )
     }
 
+    /// 按mode/范围读取完整桶并复用原接受事务；可选日期投影及context只为日期pass增加写前一致性门禁。
+    /// scope隔离持久数据，fullReconciliation决定是否复制旧代际，recentOnly限制普通选择，progress报告读取进度。
     private func synchronize(
         scope: MediaAccountScope,
         mode: LibraryIndexSyncMode,
         fullReconciliation: Bool,
         recentOnly: Bool = false,
+        dateProjections: [AssetMetadataDateProjection] = [],
+        validateContext: (@Sendable () async throws -> Void)? = nil,
         progress: (@Sendable (LibraryIndexProgress) async -> Void)?
     ) async throws -> LibraryIndexSyncResult {
+        try await validateContext?()
         try await store.prepare(scope: scope)
         let previous = try await store.snapshot(scope: scope)
         guard previous?.syncState.isPaused != true else {
+            guard dateProjections.isEmpty else { throw AssetMetadataError.dateRefreshUnavailable }
             return .init(
                 mode: mode,
                 generation: previous?.generation ?? 0,
@@ -110,19 +130,62 @@ actor LibraryIndexSynchronizer {
         }
 
         do {
-            let summaries = try await source.bucketSummaries(query: .init())
+            // 日期和伙伴作用域变化使用原仓库代际绑定的前台读；原增量路径只有在持久scope证明匹配时复用GET。
+            try await validateContext?()
+            let policyReader = source as? any PartnerTimelinePolicyReading
+            let certificateStore = store as? any PartnerTimelineCertificateStoring
+            let partnerPolicy: PartnerTimelinePolicy?
+            var forceFreshAllMonths = false
+            var needsFreshPartnerRead = false
+            if let policyReader {
+                guard let certificateStore else { throw PartnerTimelinePolicyError.unavailableStore }
+                let current = try await policyReader.partnerTimelinePolicy(scope: scope)
+                try current.validate(scope: scope); try await validateContext?()
+                let certificate = try await certificateStore.loadPartnerTimelineCertificate(scope: scope)
+                try await validateContext?()
+                needsFreshPartnerRead = certificate?.matches(generation: previous?.generation, policy: current, scope: scope) != true
+                // 首次空索引可保留原开屏短批；任何已有目录却无同代际作用域证明必须完整重读，不能靠月计数猜一致。
+                forceFreshAllMonths = !current.isKnown || (previous != nil && needsFreshPartnerRead)
+                if needsFreshPartnerRead {
+                    // 证书准备前先清退旧作用域的元数据GET；否则accept后崩溃可让旧队列在下次普通增量中重播。
+                    try await policyReader.retirePartnerTimelineIndexReads(scope: scope)
+                    try await validateContext?()
+                }
+                partnerPolicy = current
+            } else {
+                partnerPolicy = nil
+            }
+            let reader: any TimelineReading
+            if dateProjections.isEmpty, !forceFreshAllMonths, !needsFreshPartnerRead {
+                reader = source
+            } else {
+                guard let provider = source as? any ManagementTimelineProviding else {
+                    throw AssetMetadataError.dateRefreshUnavailable
+                }
+                reader = try await provider.managementTimelineReader()
+            }
+            let summaries = try await reader.bucketSummaries(query: .init())
                 .sorted { $0.id.rawValue > $1.id.rawValue }
+            try await validateContext?()
             let expectedCount = summaries.reduce(0) { $0 + $1.assetCount }
             let serverBucketKeys = Set(summaries.map(\.id.rawValue))
             let removedBuckets = Set(previous?.assets.map(\.bucketKey) ?? []).subtracting(serverBucketKeys)
             let removedAssetCount = previous?.assets.count { removedBuckets.contains($0.bucketKey) } ?? 0
-            let selected = bucketsToFetch(
+            let ordinary = bucketsToFetch(
                 summaries: summaries,
                 previous: previous,
                 mode: mode,
                 fullReconciliation: fullReconciliation,
                 recentOnly: recentOnly
             )
+            // 旧桶只来自真正accepted记录，新桶只匹配fresh详情的服务器墙上年月。
+            let dateAssetIDs = Set(dateProjections.map { $0.assetID.lowercased() })
+            let oldDateBuckets = Set(previous?.assets.filter { dateAssetIDs.contains($0.id.lowercased()) }.map(\.bucketKey) ?? [])
+            let forced = summaries.filter { summary in
+                forceFreshAllMonths || oldDateBuckets.contains(summary.id.rawValue) || dateProjections.contains { $0.occupiesMonth(summary.id) }
+            }
+            let forcedKeys = Set(forced.map(\.id.rawValue))
+            let selected = Self.deduplicate(ordinary + forced)
             try Task.checkCancellation()
 
             // Refreshing a bucket does not remove its accepted local records.
@@ -134,9 +197,23 @@ actor LibraryIndexSynchronizer {
             // was removed. Empty replacements retire those copied local rows
             // only after every requested bucket has successfully loaded.
             var replacements = Dictionary(uniqueKeysWithValues: removedBuckets.map { ($0, [LibraryIndexAssetRecord]()) })
+            var dateMembers: [TimelineAssetSummary] = []
             for summary in selected {
                 try Task.checkCancellation()
-                let assets = try await source.assets(in: summary.id, query: .init())
+                let assets = try await reader.assets(in: summary.id, query: .init())
+                try await validateContext?()
+                if forcedKeys.contains(summary.id.rawValue) || partnerPolicy != nil {
+                    guard assets.count == summary.assetCount,
+                          Set(assets.map { $0.id.lowercased() }).count == assets.count,
+                          assets.allSatisfy({ Self.belongsToMonth($0.captureLocalDate, bucket: summary.id) })
+                    else {
+                        if partnerPolicy != nil {
+                            throw PartnerTimelinePolicyError.incompleteMonths
+                        }
+                        throw AssetMetadataError.dateProjectionChanged
+                    }
+                    dateMembers.append(contentsOf: assets)
+                }
                 let records = assets.map {
                     LibraryIndexAssetRecord(asset: $0, bucketID: summary.id)
                 }
@@ -145,9 +222,31 @@ actor LibraryIndexSynchronizer {
                 await progress?(progressCounts)
             }
 
+            // 同query缺少stack子项不允许手工插入；任何目标日期变化/半桶都保留原accepted代际。
+            for projection in dateProjections {
+                let matches = dateMembers.filter { $0.id.lowercased() == projection.assetID.lowercased() }
+                guard matches.count == 1 else { throw AssetMetadataError.dateAssetNotVisible }
+                guard projection.matches(matches[0]) else { throw AssetMetadataError.dateProjectionChanged }
+            }
+
+            // 串行完整月仍可能在并发迁移中重复非目标资产；先核全局唯一，避免SQLite覆盖行而groups重复计数。
+            let verifiedDateAssets = dateProjections.isEmpty && partnerPolicy == nil ? nil : mergedAssets(
+                previous: fullReconciliation ? nil : previous,
+                replacing: replacements
+            )
+            if let verifiedDateAssets {
+                guard Set(verifiedDateAssets.map { $0.id.lowercased() }).count == verifiedDateAssets.count else {
+                    if partnerPolicy != nil {
+                        throw PartnerTimelinePolicyError.incompleteMonths
+                    }
+                    throw AssetMetadataError.dateProjectionChanged
+                }
+            }
+
             // Durable transfers may be replayed after suspension. Do not copy an
             // accepted generation until every selected response is available.
             try Task.checkCancellation()
+            try await validateContext?()
             let generation = if fullReconciliation {
                 try await store.beginReconciliation(scope: scope)
             } else {
@@ -161,7 +260,7 @@ actor LibraryIndexSynchronizer {
             for records in replacements.values {
                 try await store.upsert(assets: records, generation: generation, scope: scope)
             }
-            let stagedAssets = mergedAssets(
+            let stagedAssets = verifiedDateAssets ?? mergedAssets(
                 previous: fullReconciliation ? nil : previous,
                 replacing: replacements
             )
@@ -177,6 +276,24 @@ actor LibraryIndexSynchronizer {
             let nextCursor = fullReconciliation ? nil : summaries
                 .first { !Set(stagedAssets.map(\.bucketKey)).contains($0.id.rawValue) }?
                 .id.rawValue
+            // 伙伴偏好在月读取期间改变时，暂存数据也不能accept；完全索引的证书先绑定新generation原子保存。
+            // 崩溃若发生在accept前，证书与旧accepted代际不符，冷启动必强制重读，而不是丢失内存dirty标记。
+            var appliedPartnerPolicy: PartnerTimelinePolicy?
+            if let partnerPolicy, let policyReader, let certificateStore {
+                let after = try await policyReader.partnerTimelinePolicy(scope: scope)
+                try after.validate(scope: scope); try await validateContext?()
+                guard after == partnerPolicy else { throw PartnerTimelinePolicyError.changedPolicy }
+                if nextCursor == nil, !hasPendingBucketChanges {
+                    guard stagedAssets.count == expectedCount,
+                          summaries.allSatisfy({ stagedCounts[$0.id.rawValue, default: 0] == $0.assetCount }) else { throw PartnerTimelinePolicyError.incompleteMonths }
+                    try await certificateStore.stagePartnerTimelineCertificate(.init(generation: generation, policy: partnerPolicy), scope: scope)
+                    if partnerPolicy.isKnown {
+                        appliedPartnerPolicy = partnerPolicy
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            try await validateContext?()
             try Task.checkCancellation()
             let cleanup = try await store.acceptGeneration(
                 generation,
@@ -197,7 +314,8 @@ actor LibraryIndexSynchronizer {
                 cleanup: cleanup,
                 hasPendingBucketChanges: hasPendingBucketChanges,
                 removedBucketKeys: removedBuckets.sorted(),
-                removedBucketAssetCount: removedAssetCount
+                removedBucketAssetCount: removedAssetCount,
+                appliedPartnerPolicy: appliedPartnerPolicy
             )
         } catch {
             if !(error is CancellationError) {
@@ -205,6 +323,14 @@ actor LibraryIndexSynchronizer {
             }
             throw error
         }
+    }
+
+    /// date是实际成员的墙上日期；只在现有桶的UTC年月内接受完整替换，不自造桶或改变过滤范围。
+    private static func belongsToMonth(_ date: Date, bucket: TimelineBucketID) -> Bool {
+        guard date.timeIntervalSinceReferenceDate.isFinite, let start = bucket.displayDate else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar.dateComponents([.year, .month], from: date) == calendar.dateComponents([.year, .month], from: start)
     }
 
     private func bucketsToFetch(

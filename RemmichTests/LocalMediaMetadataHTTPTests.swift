@@ -8,7 +8,7 @@ import Testing
 @MainActor struct LocalMediaMetadataHTTPTests {
     /// 官方JSONL envelope/ack形状保持完整opaque ID和重复候选；只读GET→POST，绝不reset/ACK/读取媒体。
     @Test func fullGoldenStreamUsesOnlyFixedReadSequence() async throws {
-        let fixture = MetadataHTTPFixture([
+        let fixture = LocalMetadataHTTPFixture([
             .ack(#"[{"type":"AssetV2","ack":"AssetV2|previous-checkpoint"}]"#),
             .stream(metadataHTTPGolden, mime: "Application/Jsonlines+Json; charset=UTF-8"),
         ])
@@ -28,7 +28,7 @@ import Testing
 
     /// 相同client每次重新读真实ack/stream，第二次空完整响应不能重放上一批候选或复用completed GET。
     @Test func repeatedReadsRemainFreshAndDoNotAcknowledge() async throws {
-        let fixture = MetadataHTTPFixture([.ack(), .stream(metadataHTTPGolden), .ack(), .stream(metadataHTTPComplete)])
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(metadataHTTPGolden), .ack(), .stream(metadataHTTPComplete)])
         defer { fixture.close() }
         let first = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
         let second = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
@@ -39,7 +39,7 @@ import Testing
     /// 空输入不做能力/ready探针，无效不透明标识在任何HTTP前失败。
     @Test(arguments: [false, true])
     func emptyOrInvalidInputDoesNotSendRequests(_ invalid: Bool) async throws {
-        let fixture = MetadataHTTPFixture([])
+        let fixture = LocalMetadataHTTPFixture([])
         defer { fixture.close() }
         if invalid {
             await #expect(throws: LocalMediaMetadataStreamError.invalidInput) { _ = try await fixture.client.localMediaMetadata(cloudIDs: [""]) }
@@ -52,7 +52,7 @@ import Testing
     /// 已有metadata检查点只会增量；真实GET后停止，不能追加stream/reset/delete-ack伪造全量成功。
     @Test(arguments: ["AssetMetadataV1", "AssetMetadataDeleteV1"])
     func metadataCheckpointStopsBeforeStream(_ type: String) async throws {
-        let fixture = MetadataHTTPFixture([.ack("[{\"type\":\"\(type)\",\"ack\":\"\(type)|previous\"}]")])
+        let fixture = LocalMetadataHTTPFixture([.ack("[{\"type\":\"\(type)\",\"ack\":\"\(type)|previous\"}]")])
         defer { fixture.close() }
         await #expect(throws: LocalMediaMetadataStreamError.metadataCheckpointExists) {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
@@ -63,7 +63,7 @@ import Testing
     /// ACK必须精确200；错误或其他2xx都不能开始流读取，保持服务器会话进度不变。
     @Test(arguments: [201, 204, 401, 403, 500])
     func ackStatusFailureCannotStartStream(_ status: Int) async throws {
-        let fixture = MetadataHTTPFixture([.init(status: status, chunks: [Data("[]".utf8)])])
+        let fixture = LocalMetadataHTTPFixture([.init(status: status, chunks: [Data("[]".utf8)])])
         defer { fixture.close() }
         do {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID]); Issue.record("ACK must require exactly HTTP200")
@@ -76,7 +76,7 @@ import Testing
     /// Stream同样要求200，不能把201/204或鉴权/服务器错误当作空匹配。
     @Test(arguments: [201, 204, 401, 403, 503])
     func streamStatusFailureCannotReturnCandidates(_ status: Int) async throws {
-        let fixture = MetadataHTTPFixture([.ack(), .init(status: status, mime: "application/jsonlines+json", chunks: [Data(metadataHTTPGolden.utf8)])])
+        let fixture = LocalMetadataHTTPFixture([.ack(), .init(status: status, mime: "application/jsonlines+json", chunks: [Data(metadataHTTPGolden.utf8)])])
         defer { fixture.close() }
         do {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID]); Issue.record("Stream must require exactly HTTP200")
@@ -88,7 +88,7 @@ import Testing
     /// 有效JSONL字节不能掩盖错误/缺失MIME，客户端必须在发布任何候选前拒绝。
     @Test(arguments: ["application/json", "text/plain", "missing"])
     func wrongStreamMimeCannotReturnCandidates(_ mime: String) async throws {
-        let fixture = MetadataHTTPFixture([.ack(), .stream(metadataHTTPGolden, mime: mime == "missing" ? nil : mime)])
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(metadataHTTPGolden, mime: mime == "missing" ? nil : mime)])
         defer { fixture.close() }
         await #expect(throws: LocalMediaMetadataStreamError.invalidResponse) {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
@@ -107,7 +107,7 @@ import Testing
         if mode == "disconnect" {
             exchange.error = .networkConnectionLost
         }
-        let fixture = MetadataHTTPFixture([.ack(), exchange])
+        let fixture = LocalMetadataHTTPFixture([.ack(), exchange])
         defer { fixture.close() }
         do {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID]); Issue.record("Truncated HTTP must not return a partial match")
@@ -119,7 +119,7 @@ import Testing
     /// SyncReset来自实际HTTP流，已有候选也不能返回，更不能追加reset或确认同步的写请求。
     @Test func resetRequiredRemainsFailureWithoutMutatingCheckpoints() async throws {
         let reset = #"{"type":"SyncResetV1","data":{},"ack":"SyncResetV1|reset"}"# + "\n"
-        let fixture = MetadataHTTPFixture([.ack(), .stream(metadataHTTPFirstRow + reset)])
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(metadataHTTPFirstRow + reset)])
         defer { fixture.close() }
         await #expect(throws: LocalMediaMetadataStreamError.resetRequired) {
             _ = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
@@ -129,7 +129,7 @@ import Testing
 
     /// 已取消Task在真实request构造前失败，不触发任何网络或会话进度操作。
     @Test func cancelledBeforeEntryCannotSendAck() async {
-        let fixture = MetadataHTTPFixture([])
+        let fixture = LocalMetadataHTTPFixture([])
         defer { fixture.close() }
         let client = fixture.client
         let pending = Task { try await client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID]) }
@@ -148,7 +148,7 @@ import Testing
         } else {
             stream.held = true
         }
-        let fixture = MetadataHTTPFixture([ack, stream])
+        let fixture = LocalMetadataHTTPFixture([ack, stream])
         defer { fixture.close() }
         let client = fixture.client; let script = fixture.script
         let pending = Task { try await client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID]) }
@@ -261,14 +261,14 @@ private nonisolated struct MetadataHTTPExchange: Sendable {
 }
 
 /// 每个测试仅在自己的随机.invalid host拦截真实URLSession；不创建全局URLProtocol或真实网络会话。
-@MainActor private struct MetadataHTTPFixture {
+@MainActor private struct LocalMetadataHTTPFixture {
     let endpoint: URL
     let client: LibraryMutationClient
-    let script: MetadataHTTPScript
+    let script: LocalMetadataHTTPScript
     /// exchanges是有限实际HTTP脚本，缺项会使URLSession失败而非重放旧响应。
     init(_ exchanges: [MetadataHTTPExchange]) {
         endpoint = URL(string: "https://local-metadata-\(UUID().uuidString.lowercased()).invalid/prefix/api")!
-        script = MetadataHTTPScript(exchanges)
+        script = LocalMetadataHTTPScript(exchanges)
         MetadataHTTPProtocol.install(script, host: endpoint.host!)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MetadataHTTPProtocol.self]
@@ -282,7 +282,7 @@ private nonisolated struct MetadataHTTPExchange: Sendable {
 }
 
 /// 记录不可变请求/有限响应及真实hold入口，不把状态或decoder结果预先注入到client。
-private actor MetadataHTTPScript {
+private actor LocalMetadataHTTPScript {
     private var exchanges: [MetadataHTTPExchange]
     private(set) var requests: [MetadataHTTPRequest] = []
     private var pending: CheckedContinuation<Void, Never>?
@@ -330,10 +330,10 @@ private actor MetadataHTTPScript {
 /// 只拦截本fixture会话；跨线程取消/发送状态用Mutex保护，弱self不延长已取消URLSession生命周期。
 private final nonisolated class MetadataHTTPProtocol: URLProtocol, @unchecked Sendable {
     private struct Loading: Sendable { var stopped = false; var task: Task<Void, Never>? }
-    private static let scripts = Mutex<[String: MetadataHTTPScript]>([:])
+    private static let scripts = Mutex<[String: LocalMetadataHTTPScript]>([:])
     private let loading = Mutex(Loading())
     /// host为唯一随机.invalid身份，不调用全局registerClass。
-    static func install(_ script: MetadataHTTPScript, host: String) {
+    static func install(_ script: LocalMetadataHTTPScript, host: String) {
         scripts.withLock { $0[host] = script }
     }
 

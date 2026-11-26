@@ -165,7 +165,7 @@ struct LibraryMemoriesCard: View {
             } else {
                 nil
             }
-            LibraryCollectionCard(title: "Memories", count: count,
+            LibraryCollectionCard(title: L10n.string("Memories"), count: count,
                                   symbol: "sparkles.rectangle.stack", appearance: covers.isEmpty ? .glass : .photographic)
             {
                 LibraryMemoryCoverRotation(catalog: catalog, source: source, media: media,

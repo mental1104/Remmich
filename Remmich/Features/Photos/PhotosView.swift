@@ -376,6 +376,7 @@ struct PhotosView: View {
     var tabSelectionState: NativeTabSelectionState?
     var tabDestination: NativeTabDestination = .photos
     var isCollectionPageActive = true
+    var assetSelectionActive = false
     var libraryTimelineClearance: EdgeInsets?
     var viewerPresentations: AssetViewerPresentationStore?
     var refreshSource: (() async -> Void)?
@@ -420,6 +421,8 @@ struct PhotosView: View {
     @State private var scopedAssetTransitions = ScopedAssetTransitionRuntime()
     @State private var semanticLatestRequest = 0
     @State private var semanticLatestTask: Task<Void, Never>?
+    @State private var scenes = PhotosSceneState()
+    @State private var sceneReloadRequest = 0
 
     init(
         store: PhotosTimelineStore,
@@ -444,6 +447,7 @@ struct PhotosView: View {
         tabSelectionState: NativeTabSelectionState? = nil,
         tabDestination: NativeTabDestination = .photos,
         isCollectionPageActive: Bool = true,
+        assetSelectionActive: Bool = false,
         libraryTimelineClearance: EdgeInsets? = nil,
         viewerPresentations: AssetViewerPresentationStore? = nil,
         refreshSource: (() async -> Void)? = nil,
@@ -483,8 +487,72 @@ struct PhotosView: View {
         self.tabSelectionState = tabSelectionState
         self.tabDestination = tabDestination
         self.isCollectionPageActive = isCollectionPageActive
+        self.assetSelectionActive = assetSelectionActive
         self.libraryTimelineClearance = libraryTimelineClearance
         self.showAccount = showAccount
+    }
+
+    /// 场景只接主Photos根页；相簿、Library、视频、回忆及范围页保持原始独立生命周期。
+    private var isSceneRoot: Bool {
+        tabDestination == .photos && collectionTitle == nil && libraryMemories == nil && store.sceneSource != nil
+    }
+
+    private var showsSceneControl: Bool {
+        isSceneRoot && navigationPath.isEmpty && libraryRange == .all && isTabContentActivated && viewerRoute == nil && !hasInteractivePreview
+    }
+
+    /// Viewer遮住主页面时仍预留同一高度，防止关闭后标题栏重新出现使照片跳位。
+    private var sceneHeaderClearance: CGFloat {
+        isSceneRoot && navigationPath.isEmpty && libraryRange == .all ? 52 : 0
+    }
+
+    private var isSceneActive: Bool {
+        showsSceneControl && scenePhase == .active && semanticScale.isAssets && !assetSelectionActive
+            && !store.isOpeningWindow && !semanticCatalogIsOpeningWindow
+    }
+
+    /// 原目录不一致/打开选择模式立即回退；不可用分组不触碰原catalog或Viewer范围。
+    private var renderedScenePlan: TimelineScenePlan? {
+        guard isSceneRoot, !assetSelectionActive, !store.isOpeningWindow, !semanticCatalogIsOpeningWindow,
+              semanticCatalogRevision == store.semanticContentRevision else { return nil }
+        return scenes.renderPlan(owner: media.management.generation, revision: store.semanticContentRevision)
+    }
+
+    /// 调度键不含逐帧可见ID或分组显示revision；每月合并请求，不因展开本地组重复查询。
+    private struct SceneContext: Equatable {
+        let owner: UUID
+        let metadata: UInt64
+        let management: Int
+        let active: Bool
+        let enabled: Bool
+        let reload: Int
+    }
+
+    private var sceneContext: SceneContext {
+        .init(owner: media.management.generation, metadata: store.semanticContentRevision,
+              management: media.management.revision, active: isSceneActive, enabled: scenes.enabled, reload: sceneReloadRequest)
+    }
+
+    /// 新场景生命周期单独成some View边界，避免把现有大范围View修饰链继续嵌套进类型推断。
+    private var sceneAwareTimeline: some View {
+        timelineWithNavigationBar
+            .task(id: sceneContext) { scheduleScenes() }
+            .onChange(of: media.management.generation) { _, _ in scenes.invalidate() }
+            .onChange(of: media.management.revision) { _, _ in scenes.reloadEvidence(); scheduleScenes() }
+            .onDisappear { scenes.pause() }
+    }
+
+    /// 只向原repo提交可见的完整月份；图库初始半桶、选图、Viewer或粗粒度浏览时不发scene查询。
+    private func scheduleScenes() {
+        guard isSceneActive, scenes.enabled, semanticCatalogRevision == store.semanticContentRevision,
+              let source = store.sceneSource else { scenes.pause(); return }
+        scenes.schedule(snapshots: store.sceneSnapshots(visibleAssetIDs: scenes.visibleAssetIDs), source: source,
+                        owner: media.management.generation, revision: store.semanticContentRevision)
+    }
+
+    /// 用户明确Reload只查证据；先撤销旧折叠以保持原片可见，不触发服务器扫描或写入。
+    private func reloadScenes() {
+        scenes.reloadEvidence(); sceneReloadRequest += 1
     }
 
     private var timelineContent: some View {
@@ -559,7 +627,7 @@ struct PhotosView: View {
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(memoryViewerErrorMessage ?? "The memory’s assets aren’t available.")
+            Text(L10n.string(memoryViewerErrorMessage ?? "The memory’s assets aren’t available."))
         }
         .overlay(alignment: .top) {
             if UIDevice.current.userInterfaceIdiom == .phone {
@@ -695,7 +763,7 @@ struct PhotosView: View {
     }
 
     var body: some View {
-        timelineWithNavigationBar
+        sceneAwareTimeline
             .onAppear {
                 viewportRuntime.isTimelineActive = isTimelineActive
                 rotationState?.setVisualHandoffEligible(
@@ -997,7 +1065,8 @@ struct PhotosView: View {
                 && navigationPath.isEmpty
                 && store.memoryLaneState == .loaded
                 && !store.memories.isEmpty
-            let albumHeaderClearance = collectionTitle != nil && navigationPath.isEmpty ? collectionHeaderHeight : 0
+            let albumHeaderClearance = (collectionTitle != nil && navigationPath.isEmpty ? collectionHeaderHeight : 0)
+                + sceneHeaderClearance
             let topClearance = topInset + albumHeaderClearance + (reservesMemoryLane ? TimelineMemoryLaneSafeArea.laneHeight : 0)
             let pinnedHeaderTopClearance = topInset + albumHeaderClearance + (memoryLaneVisible ? TimelineMemoryLaneSafeArea.laneHeight : 0)
             Group {
@@ -1015,6 +1084,9 @@ struct PhotosView: View {
                         tracksStartupPhotos: tabDestination == .photos,
                         openingStore: store,
                         openingTileDisplayed: waitsForOpeningTile ? { openingLoaderReleased = true } : nil,
+                        scenePlan: renderedScenePlan,
+                        assetSelectionActive: assetSelectionActive,
+                        toggleScene: scenes.toggle,
                         hiddenThumbnailID: hiddenReturningThumbnailAssetID ?? assetPreview?.hiddenSourceAssetID,
                         hiddenLivePhotoID: hiddenLivePhotoBadgeAssetID,
                         additionalHiddenThumbnailIDs: viewerPresentations?.hiddenSourceIDs(ownerID: viewerPresentationOwnerID) ?? [],
@@ -1041,6 +1113,10 @@ struct PhotosView: View {
                             }
                         },
                         visibleAssetsChanged: { assets, target, renderedScale in
+                            if isSceneActive {
+                                scenes.rememberVisible(Set(assets.map(\.id)))
+                                scheduleScenes()
+                            }
                             let plan = renderedScale.isAssets
                                 ? store.residencyPlan(visibleAssetIDs: Set(assets.map(\.id)))
                                 : TimelineSemanticResidencyPolicy.groupedPlan(visibleAssets: assets)
@@ -1084,7 +1160,13 @@ struct PhotosView: View {
                 }
             }
             .overlay(alignment: .top) {
-                semanticMemoryLane(topInset: topInset)
+                semanticMemoryLane(topInset: topInset + sceneHeaderClearance)
+            }
+            .overlay(alignment: .topLeading) {
+                if showsSceneControl {
+                    PhotosSceneControl(state: scenes, reload: reloadScenes)
+                        .disabled(assetSelectionActive).padding(.leading, 16).padding(.top, topInset + 8)
+                }
             }
             .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: compactChrome)
         }
@@ -1936,6 +2018,9 @@ struct PhotosView: View {
         route: AssetViewerRoute
     ) {
         guard case let .memory(context) = route.origin else {
+            if let assetID {
+                scenes.reveal(assetID)
+            }
             setReturningTimelineThumbnail(assetID)
             return
         }
@@ -2426,7 +2511,7 @@ private struct TimelineRefreshError: View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-            Text(message)
+            Text(L10n.string(message))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)

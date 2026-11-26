@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 import SQLite3
 
-actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
+actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, PartnerTimelineCertificateStoring {
     static let currentSchemaVersion = 2
     static let currentCacheSchemaVersion = 1
     private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "AccountStorage")
@@ -30,11 +30,64 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         _ = try preparedDatabase(scope: scope)
     }
 
+    /// 只读取原账号目录中的查询凭据；缺失/损坏/未知格式返回未确认，绝不据此接受旧计数复用。
+    func loadPartnerTimelineCertificate(scope: MediaAccountScope) throws -> PartnerTimelineCertificate? {
+        guard try canRead(scope) else { return nil }
+        let file = layout.directory(namespace: scope.cacheNamespace).appending(path: "partner-timeline-policy.json")
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        let data = try Data(contentsOf: file)
+        guard data.count <= 1_048_576, let value = try? JSONDecoder().decode(PartnerTimelineCertificate.self, from: data),
+              value.validates(scope: scope) else { return nil }
+        return value
+    }
+
+    /// certificate绑定即将accept的新代际；原子写失败就阻止accept，崩溃后与旧accepted代际不符则强制重读。
+    /// 不改SQL表/旧迁移；账号已移除时preparedDatabase拒绝，不复活其目录或任何备份回执。
+    func stagePartnerTimelineCertificate(_ certificate: PartnerTimelineCertificate, scope: MediaAccountScope) throws {
+        try Task.checkCancellation()
+        guard certificate.validates(scope: scope) else { throw PartnerTimelinePolicyError.invalidPolicy }
+        let database = try preparedDatabase(scope: scope)
+        try requireBuildingGeneration(certificate.generation, scope: scope, database: database)
+        let file = layout.directory(namespace: scope.cacheNamespace).appending(path: "partner-timeline-policy.json")
+        let data = try JSONEncoder().encode(certificate)
+        guard data.count <= 1_048_576 else { throw PartnerTimelinePolicyError.invalidPolicy }
+        try Task.checkCancellation()
+        try data.write(to: file, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #if os(iOS)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: file.path)
+        #endif
+    }
+
     func loadMediaExports(scope: MediaAccountScope) throws -> MediaExportJournal {
         guard try canRead(scope) else { return .init() }
         let db = try preparedDatabase(scope: scope)
         guard let json = try db.scalarText("SELECT payload FROM main.media_exports WHERE scope=?", [.text(scope.cacheNamespace)]) else { return .init() }
         return try JSONDecoder().decode(MediaExportJournal.self, from: Data(json.utf8))
+    }
+
+    /// history只能来自本账号显式导入；原子保存完整接续记录，不写源SQLite或已有备份回执，移除账号后拒绝重建。
+    func savePhotoBackupHistory(_ history: PhotoBackupHistory, scope: MediaAccountScope) throws {
+        try Task.checkCancellation(); try history.validate(scope: scope)
+        let data = try JSONEncoder().encode(history)
+        guard data.count <= 134_217_728, let json = String(data: data, encoding: .utf8) else { throw PhotoBackupContinuityError.invalidHistory }
+        let db = try preparedDatabase(scope: scope)
+        try db.execute("CREATE TABLE IF NOT EXISTS main.photo_backup_history(scope TEXT PRIMARY KEY REFERENCES scopes(scope) ON DELETE CASCADE,payload TEXT NOT NULL)")
+        try Task.checkCancellation()
+        try db.execute("INSERT INTO main.photo_backup_history(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload", [.text(scope.cacheNamespace), .text(json)])
+    }
+
+    /// scope固定为当前认证账号；旧库无记录返回nil，损坏/跨账号数据抛错，不能据此回退为全库新上传。
+    func loadPhotoBackupHistory(scope: MediaAccountScope) throws -> PhotoBackupHistory? {
+        try Task.checkCancellation()
+        guard try canRead(scope) else { return nil }
+        let db = try preparedDatabase(scope: scope)
+        guard try db.scalarInt64("SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name='photo_backup_history'") == 1,
+              let json = try db.scalarText("SELECT payload FROM main.photo_backup_history WHERE scope=?", [.text(scope.cacheNamespace)]) else { return nil }
+        guard json.utf8.count <= 134_217_728 else { throw PhotoBackupContinuityError.invalidHistory }
+        let history = try JSONDecoder().decode(PhotoBackupHistory.self, from: Data(json.utf8))
+        try history.validate(scope: scope); try Task.checkCancellation()
+        return history
     }
 
     /// scope来自当前认证账号；读取该账号原片备份日志，不存在时返回空日志，不重建已移除账号。
@@ -52,6 +105,14 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         return journal
     }
 
+    /// scope为当前认证账号；只读取已验证日志头的独立后台同意，不恢复/改写任务或读取任务数组。
+    /// 无日志/已删除账号返回false，坏版本或跨账号资料抛错，不以损坏状态猜测同意。
+    func photoBackupBackgroundEnabled(scope: MediaAccountScope) throws -> Bool {
+        guard try canRead(scope) else { return false }
+        let database = try photoBackupDatabase(scope: scope)
+        return try photoBackupHeader(scope: scope, database: database)?.backgroundAutomaticEnabled == true
+    }
+
     /// journal为冷快照/明确扫描结果，scope为同一账号；批量事务创建任务并保存扫描顺序，热转换使用savePhotoBackupJob。
     /// 已有未知版本或损坏旧日志不能覆盖；账号删除后不能重建其日志。
     func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {
@@ -60,6 +121,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             if let previous = try photoBackupHeader(scope: scope, database: db) {
+                // 双图恢复格式不能退回忽略JPEG的旧结构；拒绝覆盖而非把旧读取器的空快照当成用户删除。
+                guard previous.version < 3 || journal.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
                 // 整体替换仅用于扫描/冷快照；先验证已有恢复资料，不能用新空快照覆盖损坏任务行。
                 let saved = try db.query("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? ORDER BY position",
                                          [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupJob)
@@ -77,7 +140,8 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
         try job.validate()
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
-            guard try photoBackupHeader(scope: scope, database: db) != nil,
+            guard let header = try photoBackupHeader(scope: scope, database: db),
+                  job.source.kind != .rawJPEG || header.version == 3,
                   let saved = try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND job_id=?",
                                               [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
                   saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }
@@ -104,6 +168,131 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring {
     /// 冷启动仅将in-flight恢复为paused，不改queued或自动恢复上传；调用者明确继续后才开始新尝试。
     func recoverPhotoBackupWork(scope: MediaAccountScope) throws {
         try pausePhotoBackupRows(scope: scope, includesQueued: false)
+    }
+
+    /// 读取独立组织头与逐组行；缺账本为空，坏JSON/未来格式/跨账号明确报错，不改上传日志。
+    func loadPhotoBackupAlbumSync(scope: MediaAccountScope) throws -> PhotoBackupAlbumSyncState {
+        guard try canRead(scope) else { return .init(namespace: scope.cacheNamespace) }
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else {
+            guard try db.scalarInt64("SELECT COUNT(*) FROM photo_backup_album_sync_operations WHERE scope=?", [.text(scope.cacheNamespace)]) == 0 else { throw PhotoBackupStateError.invalidJournal }
+            return .init(namespace: scope.cacheNamespace)
+        }
+        let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
+        let operations = try db.query("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? ORDER BY position",
+                                      [.text(scope.cacheNamespace)], map: Self.decodePhotoBackupAlbumSyncOperation)
+        let state = PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: operations, version: header.version,
+                                              creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false)
+        guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
+        try state.validate(namespace: scope.cacheNamespace)
+        return state
+    }
+
+    /// 只在明确映射/计划事务保存冷快照；先验证旧恢复资料，不能用空值覆盖未来/损坏状态。
+    func savePhotoBackupAlbumSyncPlan(_ state: PhotoBackupAlbumSyncState, scope: MediaAccountScope) throws {
+        try Task.checkCancellation(); try state.validate(namespace: scope.cacheNamespace)
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        try db.transaction {
+            let previous = try loadPhotoBackupAlbumSync(scope: scope)
+            guard state.version >= previous.version else { throw PhotoBackupStateError.invalidJournal }
+            let intents = Dictionary(uniqueKeysWithValues: state.creations.map { ($0.id, $0) })
+            for old in previous.creations {
+                guard let current = intents[old.id] else { throw PhotoBackupStateError.invalidJournal }
+                try current.validate(replacing: old)
+            }
+            let byID = Dictionary(uniqueKeysWithValues: state.operations.map { ($0.id, $0) })
+            for old in previous.operations {
+                guard let current = byID[old.id], current.localAlbumID == old.localAlbumID, current.targetID == old.targetID,
+                      current.source == old.source, current.assets == old.assets else { throw PhotoBackupStateError.invalidJournal }
+            }
+            // 手动计划/创建回执不能覆盖另一任务刚保存的自动开关；只有窄setter能够改变此意愿。
+            var persisted = state
+            persisted.automaticEnabled = previous.automaticEnabled
+            try db.execute("INSERT INTO photo_backup_album_sync_headers(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
+                           [.text(scope.cacheNamespace), .text(String(decoding: JSONEncoder().encode(persisted.header), as: UTF8.self))])
+            try db.execute("DELETE FROM photo_backup_album_sync_operations WHERE scope=?", [.text(scope.cacheNamespace)])
+            for (position, operation) in state.operations.enumerated() {
+                try db.execute("INSERT INTO photo_backup_album_sync_operations(scope,operation_id,position,phase,payload) VALUES(?,?,?,?,?)",
+                               [.text(scope.cacheNamespace), .text(operation.id.uuidString), .int(position), .text(operation.phase.rawValue),
+                                .text(String(decoding: JSONEncoder().encode(operation), as: UTF8.self))])
+            }
+            try Task.checkCancellation()
+        }
+    }
+
+    /// 只改当前账号自动意愿；事务fresh读取保留创建/历史，单独写header，不获取上传Coordinator或重写operation行。
+    /// enabled来自明确设置，返回完整fresh状态；删除账号/未来格式/取消/持久化失败均抛错且不重建旧账号。
+    func setPhotoBackupAlbumSyncAutomaticEnabled(_ enabled: Bool, scope: MediaAccountScope) throws -> PhotoBackupAlbumSyncState {
+        try Task.checkCancellation()
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        var result: PhotoBackupAlbumSyncState? = nil
+        try db.transaction {
+            var current = try loadPhotoBackupAlbumSync(scope: scope)
+            current.version = PhotoBackupAlbumSyncState.currentVersion
+            current.automaticEnabled = enabled
+            try current.validate(namespace: scope.cacheNamespace)
+            try db.execute("INSERT INTO photo_backup_album_sync_headers(scope,payload) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
+                           [.text(scope.cacheNamespace), .text(String(decoding: JSONEncoder().encode(current.header), as: UTF8.self))])
+            try Task.checkCancellation()
+            result = current
+        }
+        guard let result else { throw PhotoBackupStateError.invalidJournal }
+        return result
+    }
+
+    /// 自动实际发送前只读取当前头，不扫描全部操作；仍验证版本/namespace/创建/意愿字段并遵守账号删除门禁。
+    /// scope是当前已认证账号；缺少头/已删除返回false，损坏/未来格式/取消抛错，true才允许继续自动写。
+    func photoBackupAlbumSyncAutomaticEnabled(scope: MediaAccountScope) throws -> Bool {
+        try Task.checkCancellation()
+        guard try canRead(scope) else { return false }
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { return false }
+        let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
+        guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
+        try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, version: header.version,
+                                      creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false).validate(namespace: scope.cacheNamespace)
+        try Task.checkCancellation()
+        return header.automaticEnabled ?? false
+    }
+
+    /// 热检查点只更新同身份行；requiresAutomaticConsent为自动路径事务内再核意愿，避免关闭恰在fresh读和落盘之间被越过。
+    /// operation/scope仍绑定原计划；默认false保留手动确认，true在已关闭时抛错且不修改行。
+    func savePhotoBackupAlbumSyncOperation(_ operation: PhotoBackupAlbumSyncOperation, scope: MediaAccountScope, requiresAutomaticConsent: Bool = false) throws {
+        try Task.checkCancellation(); try operation.validate()
+        let db = try photoBackupAlbumSyncDatabase(scope: scope)
+        try db.transaction {
+            guard let json = try db.scalarText("SELECT payload FROM photo_backup_album_sync_headers WHERE scope=?", [.text(scope.cacheNamespace)]) else { throw PhotoBackupStateError.invalidJournal }
+            let header = try JSONDecoder().decode(PhotoBackupAlbumSyncState.Header.self, from: Data(json.utf8))
+            guard !requiresAutomaticConsent || header.automaticEnabled == true else { throw PhotoBackupStateError.invalidTransition }
+            guard header.version < 2 || header.creations != nil, header.version < 3 || header.automaticEnabled != nil else { throw PhotoBackupStateError.invalidJournal }
+            try PhotoBackupAlbumSyncState(namespace: header.namespace, mappings: header.mappings, operations: [operation], version: header.version,
+                                          creations: header.creations ?? [], automaticEnabled: header.automaticEnabled ?? false).validate(namespace: scope.cacheNamespace)
+            guard let previous = try db.queryOne("SELECT operation_id,phase,payload FROM photo_backup_album_sync_operations WHERE scope=? AND operation_id=?",
+                                                 [.text(scope.cacheNamespace), .text(operation.id.uuidString)], map: Self.decodePhotoBackupAlbumSyncOperation),
+                previous.localAlbumID == operation.localAlbumID, previous.targetID == operation.targetID, previous.source == operation.source, previous.assets == operation.assets
+            else {
+                throw PhotoBackupStateError.invalidJournal
+            }
+            try db.execute("UPDATE photo_backup_album_sync_operations SET phase=?,payload=? WHERE scope=? AND operation_id=?",
+                           [.text(operation.phase.rawValue), .text(String(decoding: JSONEncoder().encode(operation), as: UTF8.self)), .text(scope.cacheNamespace), .text(operation.id.uuidString)])
+            try Task.checkCancellation()
+        }
+    }
+
+    /// 沿用账号存在/删除门禁；lazy辅助表不提高账号schema版本，也不改变任何上传表。
+    private func photoBackupAlbumSyncDatabase(scope: MediaAccountScope) throws -> SQLiteConnection {
+        let db = try photoBackupDatabase(scope: scope)
+        try db.execute("CREATE TABLE IF NOT EXISTS photo_backup_album_sync_headers(scope TEXT PRIMARY KEY NOT NULL,payload TEXT NOT NULL)")
+        try db.execute("CREATE TABLE IF NOT EXISTS photo_backup_album_sync_operations(scope TEXT NOT NULL,operation_id TEXT NOT NULL,position INTEGER NOT NULL,phase TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,operation_id))")
+        return db
+    }
+
+    /// 行索引与JSON必须一致；不跳过坏行而把部分计划误认为完整。
+    private static func decodePhotoBackupAlbumSyncOperation(_ row: SQLiteRow) throws -> PhotoBackupAlbumSyncOperation {
+        let operation = try JSONDecoder().decode(PhotoBackupAlbumSyncOperation.self, from: Data(row.text(2).utf8))
+        try operation.validate()
+        guard row.text(0) == operation.id.uuidString, row.text(1) == operation.phase.rawValue else { throw PhotoBackupStateError.invalidJournal }
+        return operation
     }
 
     /// scope必须已有账号文件；辅助表和旧格式转换不改变既有账号schema或重新创建已删除账号。

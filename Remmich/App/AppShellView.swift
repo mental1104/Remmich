@@ -48,8 +48,8 @@ struct AppShellView: View {
     @State private var albumsOverview = AlbumsOverviewState()
     @State private var savedPhotos = SavedPhotosLibrary()
     @State private var libraryOpening = LibraryOpeningState()
-    @State private var libraryDismissAccountRequest = 0
-    @State private var libraryAccountPresented = false
+    @State private var librarySection: NativeTabDestination = .albums
+    @State private var language = AppLanguageSettings.shared
     @State private var videoPresentation = PhotosPresentationState(
         store: UserDefaultsPresentationPreferencesStore(key: "video-presentation-preferences")
     )
@@ -66,7 +66,6 @@ struct AppShellView: View {
     @State private var libraryPushGeneration = 0
     @State private var libraryCardAfterPathRecovery: LibraryHubDestination?
     @State private var searchPath = NavigationPath()
-    @State private var showsAccount = false
     @State private var legacyViewerPresented = false
     @State private var viewerPresentations = AssetViewerPresentationStore()
     @State private var photosContentLoading = true
@@ -95,6 +94,13 @@ struct AppShellView: View {
             groupedScrollRequests: groupedScrollRequests,
             groupedMediaOwner: groupedMediaOwner,
             timelineRangeRequestGeneration: rangeRequestGeneration,
+            languageCode: language.selection.resolvedCode(),
+            librarySection: librarySection,
+            libraryAtRoot: librarySection == .albums ? albumsPath.isEmpty : libraryPath.isEmpty,
+            selectLibrarySection: { section in
+                librarySection = section
+                tabSelectionState.selection = section
+            },
             libraryContentRevision: .init(
                 profile: profile,
                 activeRoute: activeRoute,
@@ -113,6 +119,12 @@ struct AppShellView: View {
             groupedTabRetapped: { destination in
                 groupedScrollRequests[destination, default: 0] &+= 1
             },
+            account: AnyView(
+                NavigationStack {
+                    MyView(session: session, profile: profile, activeRoute: activeRoute, routeStatus: routeStatus,
+                           libraryIndex: libraryIndex, saveProfile: saveProfile, signOut: signOut, sessionController: sessionController)
+                }
+            ),
             photos: AnyView(
                 NativeTabContentGate(
                     destination: .photos,
@@ -198,7 +210,7 @@ struct AppShellView: View {
                     title: "Albums",
                     activationState: tabContentActivationState
                 ) {
-                    if let store = overviewState.store, let windowTopInset = overviewState.windowTopInset {
+                    if let store = overviewState.store, overviewState.windowTopInset != nil {
                         NavigationStack(path: $albumsPath) {
                             AlbumsView(store: store, source: albumSource, media: media, assetDetails: assetDetails,
                                        activeEndpoint: activeRoute?.endpoint,
@@ -207,7 +219,7 @@ struct AppShellView: View {
                                        viewerPresentations: viewerPresentations,
                                        tabSelectionState: tabSelectionState, tabBarTop: $tabBarTop,
                                        navigationPath: $albumsPath,
-                                       windowTopInset: windowTopInset,
+                                       windowTopInset: 0,
                                        showsLoadingOverlay: primaryContentLoadingChanged == nil,
                                        openingLayoutMeasured: { overviewState.hasMeasuredOpeningLayout = true },
                                        openAlbum: openAlbum,
@@ -231,14 +243,7 @@ struct AppShellView: View {
                             collectionSource: sessionController?.timeline,
                             assetDetails: assetDetails,
                             session: session,
-                            profile: profile,
-                            activeRoute: activeRoute,
-                            routeStatus: routeStatus,
                             libraryIndex: libraryIndex,
-                            saveProfile: saveProfile,
-                            signOut: signOut,
-                            dismissAccountRequest: $libraryDismissAccountRequest,
-                            accountPresentationChanged: { libraryAccountPresented = $0 },
                             navigationPath: $libraryPath,
                             navigationRoot: libraryNavigationRoot,
                             openLibraryCard: openLibraryCard,
@@ -352,11 +357,35 @@ struct AppShellView: View {
             }
         }
         .environment(\.accountAvatarMedia, media)
-        .onChange(of: media.management.revision) { _, _ in sessionController?.libraryIndex.syncNow() }
+        // 同一管理观察器交付日期/伙伴索引核对，并通知原备份Controller；两条消费路径共用原账号上下文。
+        .onChange(of: media.management.revision) { _, _ in
+            sessionController?.libraryIndex.syncNow(metadataDates: media.management.takeMetadataDateProjections(),
+                                                    partnerTimelineRefresh: media.management.takePartnerTimelineRefreshRequest(), manager: media.management)
+            media.photoBackups.automaticLibraryChanged()
+            media.photoBackupAlbumAutomation.managementChanged(media.management.revision)
+        }
+        .onChange(of: media.photoBackups.running) {
+            _, running in if !running {
+                media.photoBackupAlbumAutomation.contentsChanged()
+            }
+        }
+        .onChange(of: media.localMediaMatches.revision) { _, _ in media.photoBackupAlbumAutomation.contentsChanged() }
+        .onChange(of: media.localMediaMatches.running) {
+            _, running in if !running {
+                media.photoBackupAlbumAutomation.contentsChanged()
+            }
+        }
+        .onChange(of: media.photoBackupAlbumSync.state.mappings) { _, _ in media.photoBackupAlbumAutomation.contentsChanged() }
         .onAppear { media.logShellPresented() }
+        .onChange(of: media.photoBackups.backgroundAutomaticEnabled) { _, _ in
+            // 冷恢复或明确修改同意后更新原系统请求；不会移动已排请求的最早日期。
+            LibraryBackgroundSyncCoordinator.shared.scheduleNextSync()
+        }
         .onChange(of: media.scope, initial: true) { _, _ in media.exports.detailReader = assetDetails }
         .onChange(of: exportScenePhase, initial: true) { _, phase in
             media.exports.sceneActivityChanged(active: phase == .active)
+            media.photoBackups.automaticConditionsChanged(using: media.management, scope: media.scope, active: phase == .active)
+            media.photoBackupAlbumAutomation.conditionsChanged(using: media.management, scope: media.scope, active: phase == .active)
             if phase == .active {
                 // 恢复当前账号本机关联；只检查已有权限，重复前台事件复用当前扫描，不主动弹授权框。
                 media.localMediaMatches.restoreAndRefresh(using: media.management, scope: media.scope)
@@ -377,38 +406,6 @@ struct AppShellView: View {
                 }
             #endif
         }
-        .overlay {
-            if showsAccount {
-                GeometryReader { geometry in
-                    ZStack {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { showsAccount = false }
-                        AccountSettingsView(
-                            session: session,
-                            profile: profile,
-                            activeRoute: activeRoute,
-                            routeStatus: routeStatus,
-                            libraryIndex: libraryIndex,
-                            saveProfile: saveProfile,
-                            signOut: signOut,
-                            sessionController: sessionController,
-                            close: { showsAccount = false }
-                        )
-                        .nativeEdgeBackAction(active: true, priority: 200) { showsAccount = false }
-                        .frame(
-                            width: min(geometry.size.width - 32, 620),
-                            height: UIDevice.current.userInterfaceIdiom == .pad
-                                ? min(geometry.size.height - 40, 680)
-                                : min(geometry.size.height * 0.8, 620)
-                        )
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .transition(reduceMotion ? .opacity : .move(edge: .bottom))
-            }
-        }
-        .animation(.smooth(duration: 0.35), value: showsAccount)
         .accessibilityHidden(viewerPresentations.activeID != nil)
         .overlay { AssetViewerPresentationOverlay(presentations: viewerPresentations) }
         .onChange(of: viewerPresented || !viewerPresentations.entries.isEmpty) { _, presented in
@@ -526,6 +523,9 @@ struct AppShellView: View {
             pushLibraryCard(card)
         }
         .onChange(of: tabSelectionState.selection) { previous, current in
+            if current == .albums || current == .library {
+                librarySection = current
+            }
             if previous == .albums, current != .albums {
                 albumAfterPathRecovery = nil
                 media.cancelPrefetching()
@@ -564,9 +564,7 @@ struct AppShellView: View {
 
     private func retapLibrary() {
         libraryCardAfterPathRecovery = nil
-        if libraryPath.isEmpty {
-            libraryDismissAccountRequest &+= 1
-        } else if !libraryOpening.places.dismissSelectedPlace() {
+        if !libraryPath.isEmpty, !libraryOpening.places.dismissSelectedPlace() {
             withAnimation { libraryPath.removeLast() }
         }
     }
@@ -743,7 +741,7 @@ struct AppShellView: View {
     }
 
     private func showAccount() {
-        showsAccount = true
+        tabSelectionState.selection = .account
     }
 
     private func setViewerPresented(_ presented: Bool) {
@@ -815,18 +813,19 @@ struct AppShellView: View {
         case .albums: !albumsPath.isEmpty
         case .library: !libraryPath.isEmpty
         case .search: !searchPath.isEmpty
+        case .account: true
         case .weeks, .months, .years: false
         }
         return RootPageSwipePolicy.allowsPaging(
             viewerPresented: viewerPresented,
             hasNavigationDestination: hasNavigationDestination,
             librarySelected: tabSelectionState.selection == .library,
-            libraryAccountPresented: libraryAccountPresented
+            libraryAccountPresented: false
         )
     }
 
     private var isPrimaryContentLoading: Bool {
-        guard !viewerPresented, !showsAccount else { return false }
+        guard !viewerPresented else { return false }
         switch tabSelectionState.selection {
         case .photos: return photosPath.isEmpty && photosContentLoading
         case .videos: return videosPath.isEmpty && videosContentLoading

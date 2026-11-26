@@ -2,7 +2,9 @@ import Foundation
 import Testing
 @testable import Remmich
 
+/// 验证真实SQLite索引刷新期间的进度快照，不提前把已接受桶的计数清零。
 struct LibraryIndexRefreshProgressTests {
+    /// mode选择不变/增删/全量刷新；显式progress标签保证观察回调不被绑定成取消验证器，临时数据库在结束后清理。
     @Test(arguments: ["unchanged", "addition", "removal", "rebuild"])
     func refreshRetainsAcceptedBucketCountsUntilReplacement(mode: String) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
@@ -22,9 +24,9 @@ struct LibraryIndexRefreshProgressTests {
         await source.replace(buckets)
         let recorder = IndexRefreshProgressRecorder()
         let result = if mode == "rebuild" {
-            try await sync.fullSyncAndVerify(scope: scope) { await recorder.append($0.indexedAssetCount) }
+            try await sync.fullSyncAndVerify(scope: scope, progress: { await recorder.append($0.indexedAssetCount) })
         } else {
-            try await sync.synchronizeRecent(scope: scope) { await recorder.append($0.indexedAssetCount) }
+            try await sync.synchronizeRecent(scope: scope, progress: { await recorder.append($0.indexedAssetCount) })
         }
         let expected = mode == "addition" ? 4 : mode == "removal" ? 2 : 3
         let values = await recorder.values

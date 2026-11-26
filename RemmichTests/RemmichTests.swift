@@ -72,6 +72,42 @@ struct RemmichTests {
         #expect(controller.media.pipeline != nil)
     }
 
+    /// processing冷恢复只绑定已验证管理账号/路由；无需前台Media pipeline，也不因无后台同意访问照片。
+    @Test(.timeLimit(.minutes(1))) @MainActor
+    func headlessProcessingBindsManagementWithoutStartingForegroundMedia() async throws {
+        let endpoint = try #require(URL(string: "https://headless-backup-\(UUID().uuidString.lowercased()).invalid/api"))
+        let session = AccountSession(apiURL: endpoint, accessToken: "synthetic-headless", userID: UUID().uuidString,
+                                     userEmail: "synthetic@example.invalid", name: "Synthetic", isAdmin: false,
+                                     serverVersion: AccountSession.fixture.serverVersion)
+        let scope = MediaAccountScope(session: session)
+        let root = FileManager.default.temporaryDirectory.appending(path: "HeadlessBackup-\(UUID())", directoryHint: .isDirectory)
+        let suite = "HeadlessBackup-\(UUID())"
+        let preferences = try #require(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        let index = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        // 限定所有索引GET为合成空列表；不允许此冷会话回归访问真实服务。
+        let source = ImmichTimelineRepository(readLoader: { request, _ in
+            let url = try #require(request.url)
+            return try (Data("[]".utf8), #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                                                  headerFields: ["Content-Type": "application/json"])))
+        })
+        let controller = AppSessionController(transfers: nil, service: RouteRestoreService(reachableEndpoints: [endpoint]),
+                                              sessionStore: MemorySessionStore(session: session), profileStore: ConnectionProfileStore(suiteName: suite),
+                                              libraryIndexStore: index, libraryIndexPreferences: preferences, networkMonitoringEnabled: false, timeline: source)
+        #expect(controller.media.scope == nil && controller.media.pipeline == nil && controller.media.management.client == nil)
+        controller.handleBackgroundTransition()
+        let id = UUID()
+        _ = await controller.performBackgroundSync(id: id, kind: .processing)
+        controller.endBackgroundSync(id: id)
+        #expect(controller.media.management.backupScope == scope)
+        #expect(controller.media.management.client?.apiURL == endpoint && controller.activeRoute?.endpoint == endpoint)
+        #expect(controller.media.scope == nil && controller.media.pipeline == nil && !controller.foregroundResourcesReady)
+        #expect(!controller.media.photoBackups.backgroundAutomaticEnabled && !controller.media.photoBackups.running)
+        await controller.signOut(deleteLocalData: true)
+        // 后台同意头由原备份store读取；只清除此唯一合成namespace的空恢复目录。
+        try await SQLiteLibraryIndexStore().removeAccount(namespace: scope.cacheNamespace)
+    }
+
     @Test(arguments: LibraryBackgroundSyncKind.allCases) @MainActor
     func backgroundExpirationPreventsLateSessionRestorationFromStartingSync(kind: LibraryBackgroundSyncKind) async throws {
         let sessions = SuspendedBackgroundSessionStore()
@@ -299,6 +335,60 @@ struct RemmichTests {
         ))
         #expect(controller.routeStatus == .connected)
         #expect(await service.activatedEndpoints.isEmpty)
+    }
+
+    /// 原路径/路由链实际通知备份：首次快照、验证失败和后台均不交付；同endpoint恢复及前台重新验证交付新token。
+    @Test(.timeLimit(.minutes(1))) @MainActor func verifiedNetworkPathsReachBackupOnlyInTheCurrentForegroundContext() async throws {
+        let endpoint = try #require(URL(string: "https://backup-route-\(UUID().uuidString.lowercased()).invalid/api"))
+        let session = checksumLookupSession(endpoint: endpoint, user: UUID().uuidString, token: "route-fixture")
+        let scope = MediaAccountScope(session: session)
+        let root = FileManager.default.temporaryDirectory.appending(path: "BackupRoute-\(UUID())", directoryHint: .isDirectory)
+        let suite = "BackupRoute-\(UUID())"
+        let preferences = try #require(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        let source = ImmichTimelineRepository(readLoader: { request, _ in
+            let url = try #require(request.url)
+            let response = try #require(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+            return (Data("[]".utf8), response)
+        })
+        let service = RouteRestoreService(reachableEndpoints: [endpoint])
+        let controller = AppSessionController(transfers: nil, service: service, sessionStore: MemorySessionStore(session: session),
+                                              profileStore: ConnectionProfileStore(suiteName: suite),
+                                              libraryIndexStore: .init(databaseURL: root.appending(path: "index.sqlite")), libraryIndexPreferences: preferences,
+                                              networkMonitoringEnabled: false, pathChangeDebounce: .zero, timeline: source)
+        do {
+            await controller.start()
+            let backup = controller.media.photoBackups
+            await backup.automaticConditionsChanged(using: controller.media.management, scope: controller.media.scope, active: true)?.value
+            await controller.handleNetworkPathChange(usesWiFi: true)
+            #expect(backup.lastValidatedNetworkRecoveryEvent == nil)
+            await service.setReachableEndpoints([])
+            await controller.handleNetworkPathChange(usesWiFi: false, isSatisfied: false)
+            #expect(controller.routeStatus == .unavailable && backup.lastValidatedNetworkRecoveryEvent == nil)
+            await service.setReachableEndpoints([endpoint])
+            await controller.handleNetworkPathChange(usesWiFi: true)
+            let first = try #require(backup.lastValidatedNetworkRecoveryEvent)
+            #expect(controller.routeStatus == .connected && controller.activeRoute?.endpoint == endpoint)
+            let validations = await service.validatedEndpoints.count
+            await controller.handleNetworkPathChange(usesWiFi: true)
+            #expect(backup.lastValidatedNetworkRecoveryEvent == first)
+            #expect(await service.validatedEndpoints.count == validations)
+            controller.handleBackgroundTransition()
+            await controller.handleNetworkPathChange(usesWiFi: false)
+            #expect(backup.lastValidatedNetworkRecoveryEvent == first)
+            await controller.handleForegroundTransition()
+            await backup.automaticConditionsChanged(using: controller.media.management, scope: controller.media.scope, active: true)?.value
+            #expect(backup.lastValidatedNetworkRecoveryEvent != nil && backup.lastValidatedNetworkRecoveryEvent != first)
+            #expect(!backup.foregroundAutomaticEnabled && !backup.running)
+        } catch {
+            await controller.signOut(deleteLocalData: true)
+            await controller.media.photoBackups.automaticConditionsChanged(using: controller.media.management, scope: nil, active: false)?.value
+            try? await SQLiteLibraryIndexStore().removeAccount(namespace: scope.cacheNamespace)
+            throw error
+        }
+        await controller.signOut(deleteLocalData: true)
+        await controller.media.photoBackups.automaticConditionsChanged(using: controller.media.management, scope: nil, active: false)?.value
+        try await SQLiteLibraryIndexStore().removeAccount(namespace: scope.cacheNamespace)
     }
 
     @Test @MainActor func rapidPathChangeBurstDebouncesToOneEvaluation() async {

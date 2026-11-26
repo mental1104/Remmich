@@ -82,7 +82,7 @@ struct RemmichLoadingView: View {
             .frame(width: DesignMetrics.brandLogoCanvasSize, height: DesignMetrics.brandLogoCanvasSize)
             .frame(width: DesignMetrics.brandLogoSlotSize, height: DesignMetrics.brandLogoSlotSize)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(label)
+            .accessibilityLabel(L10n.string(label))
             .accessibilityAddTraits(.updatesFrequently)
     }
 }

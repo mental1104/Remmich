@@ -380,6 +380,13 @@ public struct ImmichManagementPeoplePage: Sendable {
     public let hasNextPage: Bool
 }
 
+/// 官方原生堆叠读取，保留真实可见成员供原生缩略图/管理；不把scene groups转换为此模型。
+public struct ImmichNativeStack: Sendable {
+    public let id: String
+    public let primaryAssetID: String
+    public let assets: [ImmichTimelineAsset]
+}
+
 public struct ImmichPartner: Identifiable, Sendable {
     public let id: String
     public let name: String

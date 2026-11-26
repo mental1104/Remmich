@@ -25,7 +25,7 @@ struct BatchAssetManagementView: View {
                     .disabled(store.isWorking)
                     readControls
                     if let error = store.error {
-                        Text(error).foregroundStyle(.secondary)
+                        Text(L10n.string(error)).foregroundStyle(.secondary)
                     }
                     if store.isWorking {
                         ProgressView(store.isStopping ? "Stopping" : "Applying selection")
@@ -201,7 +201,7 @@ struct BatchAssetManagementView: View {
     @ViewBuilder private var resultSummary: some View {
         if !store.results.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                Text(store.operationTitle ?? "Last operation").font(.headline)
+                Text(L10n.string(store.operationTitle ?? "Last operation")).font(.headline)
                 Text("\(store.results.filter { $0.state == .succeeded }.count) confirmed / \(store.results.count) selected")
                     .font(.subheadline)
                 ForEach(Array(store.results.enumerated()), id: \.element.id) { index, result in
@@ -210,7 +210,7 @@ struct BatchAssetManagementView: View {
                             .frame(width: 48, height: 48).clipped()
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Selected item \(index + 1)").font(.caption)
-                            Text(result.state.message).font(.caption).foregroundStyle(.secondary)
+                            Text(L10n.string(result.state.message)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
