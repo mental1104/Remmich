@@ -15,7 +15,7 @@ nonisolated enum LocalMediaMetadataError: Error, Equatable, Sendable {
 }
 
 /// 官方mobile-app五元组，wire字段名为iCloudId；值来源是元数据，不是原片SHA1。
-nonisolated struct LocalMediaMobileMetadata: Decodable, Equatable, Sendable {
+nonisolated struct LocalMediaMobileMetadata: Codable, Hashable, Sendable {
     let cloudId: String
     let createdAt: Date?
     let adjustmentTime: Date?
@@ -45,6 +45,16 @@ nonisolated struct LocalMediaMobileMetadata: Decodable, Equatable, Sendable {
         try self.init(cloudId: container.decode(String.self, forKey: .iCloudId),
                       createdAt: Self.date(container, key: .createdAt), adjustmentTime: Self.date(container, key: .adjustmentTime),
                       latitude: Self.coordinate(container, key: .latitude), longitude: Self.coordinate(container, key: .longitude))
+    }
+
+    /// encoder保持官方字符串时间/坐标与省略nil字段的格式；不把本机ID或私有路径写入服务端。
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(cloudId, forKey: .iCloudId)
+        try container.encodeIfPresent(createdAt?.ISO8601Format(), forKey: .createdAt)
+        try container.encodeIfPresent(adjustmentTime?.ISO8601Format(), forKey: .adjustmentTime)
+        try container.encodeIfPresent(latitude.map { String($0) }, forKey: .latitude)
+        try container.encodeIfPresent(longitude.map { String($0) }, forKey: .longitude)
     }
 
     /// value来自完整PhotoKit映射；拒绝空白及官方已知的不完整尾冒号，不解析标识内部的HASH片段或规范化大小写。

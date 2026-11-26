@@ -77,7 +77,7 @@ struct PhotoBackupView: View {
                         }
                     }
                 } footer: {
-                    Text("Matched items skip original downloads and uploads. Unconfirmed items stay skipped for review.")
+                    Text("Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup.")
                 }
                 if !backup.running, !backup.jobs.isEmpty {
                     Section {
@@ -221,7 +221,7 @@ struct PhotoBackupView: View {
                 } header: {
                     Text(verbatim: "iCloud")
                 } footer: {
-                    Text("Matched items skip original downloads and uploads. Unconfirmed items stay skipped for review.")
+                    Text("Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup.")
                 }
                 Section {
                     DisclosureGroup("Automatic Backup") {

@@ -416,8 +416,9 @@ import Photos
                     let cloud = journal.allowCloud
                     // management占用整个执行周期，防止多个窗口同时通过同一写通道执行队列。
                     return try await manager.perform(publishChange: false) { [journal] _ in
-                        let verificationIDs: Set<UUID> = if case let .verification(id?) = mode {
-                            [id]
+                        let verificationIDs: Set<UUID> = if case let .verification(id) = mode {
+                            // 明确“匹配并备份”包含选中的整批恢复；仍逐项重新导出/查重，不自动重放未知上传。
+                            id.map { Set([$0]) } ?? Set(journal.jobs.filter { $0.stage == .queued }.map(\.id))
                         } else {
                             []
                         }

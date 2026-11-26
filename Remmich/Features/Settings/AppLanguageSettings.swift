@@ -9,9 +9,19 @@ import SwiftUI
         didSet { defaults.set(selection.rawValue, forKey: L10n.preferenceKey) }
     }
 
-    /// defaults默认为应用偏好，测试可传独立suite；初始化不修改已有值。
+    /// defaults默认为应用偏好，测试可传独立suite；只有明确DEBUG验收参数可在首次构造时写入指定初始语言。
     init(defaults: UserDefaults = L10n.preferenceDefaults) {
         self.defaults = defaults
+        #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-ui-testing-profile"),
+               let raw = ProcessInfo.processInfo.environment["REMMICH_UI_TEST_LANGUAGE"], let initial = AppLanguage(rawValue: raw)
+            {
+                // 在根页面出现前只设置初始偏好；避免界面locale更新后.task重挂载又把用户的新选择改回去。
+                selection = initial
+                defaults.set(initial.rawValue, forKey: L10n.preferenceKey)
+                return
+            }
+        #endif
         selection = AppLanguage(rawValue: defaults.string(forKey: L10n.preferenceKey) ?? "") ?? .system
     }
 

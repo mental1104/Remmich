@@ -63,8 +63,8 @@ struct PhotoBackupContinuityTests {
         #expect(resolved == 88186)
     }
 
-    /// 无SQLite仍可核查服务器；未知项没有上传许可，不把服务器图库视作空库重新上传。
-    @Test @MainActor func missingImportLeavesUnmatchedHistoryForReview() async throws {
+    /// 无SQLite且Photos对象也不可读取时仍须待核查，不能对缺失源发放字节上传许可。
+    @Test @MainActor func missingPhotosSourceStillRequiresReview() async throws {
         let root = continuityRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
@@ -230,17 +230,188 @@ struct PhotoBackupContinuityTests {
     }
 }
 
-/// 无导入场景以独立Photos/网络端口观察真实Checker与Worker；远端匹配只给已有标记，不发放原片许可。
+/// 无导入场景以独立Photos/网络端口观察真实Checker与Worker；交集零导出，新源进入字节查重通道。
 @Suite("Server iCloud backup matching without imports")
 struct PhotoBackupServerMatchingTests {
-    /// 原片无任何本地字节入口：服务端命中直接记existing，未命中仍待核查，真实Worker零导出。
+    /// 无导入新照片可按原片查重；没有云ID也可备份，只有可解析的公开元组会附加来源上报。
+    @Test(arguments: [LocalPhotoCloudIdentity.resolved("cloud-fresh"), .unavailable, .incomplete, .failed])
+    @MainActor func admitsUnmatchedSourcesForOriginalChecksum(_ cloud: LocalPhotoCloudIdentity) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        photos.values["fresh"] = continuitySnapshot("fresh", created: 200, cloud: true).withCloudIdentity(cloud)
+        let source = continuitySource("fresh", modified: 200)
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos).plan(
+            jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.allowed == [source] && plan.existing.isEmpty && plan.review.isEmpty && photos.reads == 2)
+        #expect(client.savedMatches.isEmpty)
+        if case .resolved = cloud {
+            #expect(plan.uploadMetadata[source]?.cloudId == "cloud-fresh")
+        } else {
+            #expect(plan.uploadMetadata.isEmpty)
+        }
+    }
+
+    /// 已尝试任务默认不自动重新上传；用户明确恢复该项后仍通过同一原片查重通道。
+    @Test @MainActor func attemptedSourceNeedsExplicitVerification() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        photos.values["fresh"] = continuitySnapshot("fresh", created: 200, cloud: true)
+        var job = PhotoBackupJob(source: continuitySource("fresh", modified: 200))
+        try job.begin(); job.fail(.network); job.queueForVerification()
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos)
+        let automatic = try await checker.plan(jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        let explicit = try await checker.plan(jobs: [job], scope: continuityScope(), client: client, verificationIDs: [job.id], progress: { _, _ in }, validateContext: {})
+        #expect(automatic.allowed.isEmpty && automatic.review == [job.source])
+        #expect(explicit.allowed == [job.source] && explicit.review.isEmpty)
+    }
+
+    /// 真实Checker→磁盘原片→实际客户端HTTP→SQLite；未命中上传，字节重复零POST，来源失败/摘要不符保留未确认。
+    @Test(arguments: ["created", "duplicate", "metadata-failure", "wrong-digest"], [PhotoBackupSource.Kind.photo, .video])
+    @MainActor func backsUpWithoutImportAndReportsTheActualCloudOrigin(_ mode: String, _ kind: PhotoBackupSource.Kind) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let digest = "qZk+NkcGgWq6PiVxeFDCbJzQ2J0="
+        var exchanges = continuityEmptyStream()
+        exchanges.append(continuityOriginalCheck(id: id, duplicate: mode == "duplicate"))
+        if mode != "duplicate" {
+            exchanges.append(.init(method: "POST", path: "assets", status: 201, json: "{\"id\":\"\(id)\",\"status\":\"created\"}",
+                                   requestContentTypePrefix: "multipart/form-data; boundary="))
+        }
+        let serverDigest = mode == "wrong-digest" ? continuityChecksum : digest
+        exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: serverDigest, kind: kind)))
+        if mode != "wrong-digest" {
+            exchanges.append(continuityOriginWrite(fails: mode == "metadata-failure"))
+        }
+        let firstRequestCount = exchanges.count
+        if mode == "metadata-failure" {
+            exchanges += continuityEmptyStream()
+            exchanges.append(continuityOriginalCheck(id: id, duplicate: true))
+            exchanges.append(.init(method: "GET", path: "assets/" + id, status: 200, json: continuityUploadedAsset(id: id, checksum: digest, kind: kind)))
+            exchanges.append(continuityOriginWrite())
+        }
+        let http = ChecksumLookupHTTPFixture(exchanges: exchanges)
+        defer { http.close() }
+        let client = try #require(http.manager.client)
+        let scope = MediaAccountScope(session: checksumLookupSession(endpoint: http.endpoint))
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos()
+        photos.values["fresh"] = continuitySnapshot("fresh", created: 200, cloud: true, mediaKind: kind == .video ? .video : .image)
+        let source = PhotoBackupSource(localID: "fresh", modifiedAt: Date(timeIntervalSince1970: 200), kind: kind)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue([source]); try await store.savePhotoBackups(journal, scope: scope)
+        let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+            jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.allowed == [source] && plan.uploadMetadata[source]?.cloudId == "cloud-fresh")
+        let exporter = ContinuityOriginalExporter(directory: root.appending(path: "original"))
+        let result = try await PhotoBackupWorker(store: store, exporter: exporter).run(
+            scope: scope, userID: scope.userID, allowCloud: false, client: client, preflight: plan, validateContext: {}, progress: { _, _ in }
+        )
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        let requests = await http.script.requests()
+        let succeeds = mode == "created" || mode == "duplicate"
+        #expect(result.completed == (succeeds ? 1 : 0) && result.failed == (succeeds ? 0 : 1))
+        #expect(result.duplicates == (mode == "duplicate" ? 1 : 0))
+        #expect(cold.jobs.first?.stage == (succeeds ? .completed : .failed))
+        #expect(cold.jobs.first?.primaryChecksum == digest && cold.jobs.first?.primaryAssetID?.uuidString.lowercased() == id)
+        #expect(exporter.calls == 1 && exporter.cloudFlags == [false] && !FileManager.default.fileExists(atPath: exporter.directory.path))
+        #expect(requests.filter { $0.method == "POST" && $0.url.path.hasSuffix("/assets") }.count == (mode == "duplicate" ? 0 : 1))
+        let check = try #require(requests.first { $0.url.path.hasSuffix("/bulk-upload-check") })
+        let checkBody = try #require(check.body)
+        let json = try #require(try JSONSerialization.jsonObject(with: checkBody) as? [String: Any])
+        let checked = try #require(json["assets"] as? [[String: String]])
+        #expect(checked.first?["checksum"] == "a9993e364706816aba3e25717850c26c9cd0d89d")
+        if mode != "wrong-digest" {
+            let request = try #require(requests.last)
+            let requestBody = try #require(request.body)
+            let body = try #require(try JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+            let items = try #require(body["items"] as? [[String: Any]])
+            let item = try #require(items.first)
+            let originValue = try #require(item["value"])
+            let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: JSONSerialization.data(withJSONObject: originValue))
+            #expect(item["key"] as? String == PhotoBackupOrigin.metadataKey(for: "cloud-fresh"))
+            #expect(origin.metadata.cloudId == "cloud-fresh" && origin.checksum == digest && origin.byteVerified && origin.method == "sha1")
+            if mode == "created" {
+                try await verifyOtherDeviceMatchesReportedOrigin(origin, assetID: id, kind: kind, root: root)
+            }
+        }
+        #expect(requests.count == firstRequestCount)
+        if mode == "metadata-failure" {
+            // 媒体已成功但来源PUT失败：明确恢复后必须先查重，不能再次POST同一原片。
+            var retry = try await store.loadPhotoBackups(scope: scope)
+            let jobID = try #require(retry.jobs.first?.id)
+            try retry.resumeForVerification(only: jobID); try await store.savePhotoBackups(retry, scope: scope)
+            let retryPlan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+                jobs: retry.jobs, scope: scope, client: client, verificationIDs: [jobID], progress: { _, _ in }, validateContext: {}
+            )
+            let recovered = try await PhotoBackupWorker(store: store, exporter: exporter).run(
+                scope: scope, userID: scope.userID, allowCloud: false, client: client, preflight: retryPlan, validateContext: {}, progress: { _, _ in }
+            )
+            let persisted = try await store.loadPhotoBackups(scope: scope)
+            let allRequests = await http.script.requests()
+            #expect(recovered.completed == 1 && recovered.duplicates == 1 && recovered.failed == 0)
+            #expect(persisted.jobs.first?.stage == .completed && persisted.jobs.first?.attempts == 2)
+            #expect(allRequests.count == exchanges.count)
+            #expect(allRequests.filter { $0.method == "POST" && $0.url.path.hasSuffix("/assets") }.count == 1)
+        }
+    }
+
+    /// origin为第一台设备实际上传后捕获的请求，assetID为同一远端主体；另一台本机ID不同且原片不可导出。
+    /// kind与第一台设备的媒体类型一致，root为独立测试目录；验证HTTP来源、fresh资产和仅ID标记，Worker零导出。
+    @MainActor private func verifyOtherDeviceMatchesReportedOrigin(_ origin: PhotoBackupOrigin, assetID: String, kind: PhotoBackupSource.Kind, root: URL) async throws {
+        let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(origin))
+        let event: [String: Any] = ["type": "AssetMetadataV1", "ack": "AssetMetadataV1|22222222-2222-4222-8222-222222222222",
+                                    "data": ["assetId": assetID, "key": PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId), "value": value]]
+        let line = try String(decoding: JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n"
+        let empty = continuityEmptyStream()
+        let http = ChecksumLookupHTTPFixture(exchanges: [empty[0],
+                                                         .init(method: "POST", path: "sync/stream", status: 200, json: line + empty[1].json, contentType: "application/jsonlines+json"),
+                                                         .init(method: "GET", path: "assets/" + assetID, status: 200, json: continuityUploadedAsset(id: assetID, checksum: origin.checksum, kind: kind)),
+                                                         continuityOriginWrite()])
+        defer { http.close() }
+        let client = try #require(http.manager.client)
+        let scope = MediaAccountScope(session: checksumLookupSession(endpoint: http.endpoint))
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "other-device.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos()
+        photos.values["ipad-local-id"] = continuitySnapshot("ipad-local-id", created: 200, cloud: true, cloudID: origin.metadata.cloudId, mediaKind: kind == .video ? .video : .image)
+        let source = PhotoBackupSource(localID: "ipad-local-id", modifiedAt: Date(timeIntervalSince1970: 200), kind: kind)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue([source]); try await store.savePhotoBackups(journal, scope: scope)
+        let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+            jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.existing == [source] && plan.allowed.isEmpty && plan.review.isEmpty)
+        let exporter = ContinuityNoExport()
+        let result = try await PhotoBackupWorker(store: store, exporter: exporter).run(
+            scope: scope, userID: scope.userID, allowCloud: false, client: ContinuityNoUpload(), preflight: plan, validateContext: {}, progress: { _, _ in }
+        )
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        let requests = await http.script.requests()
+        #expect(result.skipped == 1 && result.completed == 0 && exporter.calls == 0)
+        #expect(cold.jobs.first?.stage == .existing && cold.jobs.first?.attempts == 0 && cold.jobs.first?.primaryAssetID == nil)
+        #expect(requests.count == 4 && !requests.contains { $0.url.path.hasSuffix("/bulk-upload-check") || $0.url.path.hasSuffix("/assets") })
+        let request = try #require(requests.last)
+        let body = try #require(request.body)
+        let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let items = try #require(object["items"] as? [[String: Any]])
+        let marker = try #require(items.first?["value"] as? [String: Any])
+        #expect(items.first?["key"] as? String == "remmich-icloud-match" && marker["byteVerified"] as? Bool == false)
+    }
+
+    /// 云端原片命中直接记existing，另一个不可读取的Photos对象仍待核查；两者真实Worker均零导出。
     @Test @MainActor func matchesCloudOnlyWithoutImportOrOriginals() async throws {
         let root = continuityRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
         let photos = ContinuityPhotos(), client = ContinuityQueries()
         let id = addServerContinuityCandidate("known", photos: photos, client: client)
-        photos.values["unknown"] = continuitySnapshot("unknown", created: 200, cloud: true)
+        // unknown没有可读取的Photos快照；它与可读取但未匹配的新照片是两个不同状态。
         let sources = [continuitySource("known", modified: 200), continuitySource("unknown", modified: 200)]
         // 真实Controller已先建立认证账号目录；只准备同样的账号，不导入或保存任何备份历史。
         try await store.prepare(scope: scope)
@@ -369,6 +540,63 @@ struct PhotoBackupServerMatchingTests {
     }
 }
 
+/// 合成完整空元数据快照；真实客户端必须先读取ack再消费终止行，不能把失败/半条流当作未命中。
+private nonisolated func continuityEmptyStream() -> [ChecksumLookupExchange] {
+    [.init(method: "GET", path: "sync/ack", status: 200, json: "[]"),
+     .init(method: "POST", path: "sync/stream", status: 200,
+           json: "{\"type\":\"SyncCompleteV1\",\"data\":{},\"ack\":\"SyncCompleteV1|11111111-1111-4111-8111-111111111111\"}\n", contentType: "application/jsonlines+json")]
+}
+
+/// id为合成服务端主体，duplicate选择字节重复或真正未命中；nonce必须读取实际请求，不能预先猜测。
+private nonisolated func continuityOriginalCheck(id: String, duplicate: Bool) -> ChecksumLookupExchange {
+    .init(method: "POST", path: "assets/bulk-upload-check", status: 200, json: "", responseJSON: { request in
+        guard let body = request.body, let json = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let assets = json["assets"] as? [[String: String]], assets.count == 1, let nonce = assets.first?["id"]
+        else {
+            throw LibraryWriteError.malformedResponse
+        }
+        return "{\"results\":[{\"id\":\"\(nonce)\",\"action\":\"\(duplicate ? "reject" : "accept")\",\"assetId\":\"\(id)\",\"isTrashed\":false}]}"
+    })
+}
+
+/// id/checksum为独立HTTP金值，必须与真实文件abc对应；缺失或错误摘要不能产生来源写入。
+private nonisolated func continuityUploadedAsset(id: String, checksum: String, kind: PhotoBackupSource.Kind = .photo) -> String {
+    "{\"id\":\"\(id)\",\"ownerId\":\"99999999-9999-4999-8999-999999999999\",\"isFavorite\":false,\"visibility\":\"timeline\",\"isTrashed\":false,\"type\":\"\(kind == .video ? "VIDEO" : "IMAGE")\",\"originalFileName\":\"fresh.jpg\",\"checksum\":\"\(checksum)\",\"isOffline\":false,\"isEdited\":false,\"updatedAt\":\"1970-01-01T00:05:00Z\"}"
+}
+
+/// fails模拟媒体已提交但来源上报失败；成功仅回传实际items，业务断言独立检查请求中的身份与证据。
+private nonisolated func continuityOriginWrite(fails: Bool = false) -> ChecksumLookupExchange {
+    .init(method: "PUT", path: "assets/metadata", status: fails ? 503 : 200, json: "", responseJSON: { request in
+        guard let body = request.body, let json = try JSONSerialization.jsonObject(with: body) as? [String: Any], let items = json["items"] else {
+            throw LibraryWriteError.malformedResponse
+        }
+        return try String(decoding: JSONSerialization.data(withJSONObject: items), as: UTF8.self)
+    })
+}
+
+/// 仅替换系统原片读取；真实Worker仍运行SQLite检查点、客户端SHA1/HTTP、回读和来源写入。
+@MainActor private final class ContinuityOriginalExporter: PhotoBackupResourceExporting {
+    let directory: URL
+    var calls = 0
+    var cloudFlags: [Bool] = []
+
+    /// directory为本例独占私有临时目录，不读取任何用户照片。
+    init(directory: URL) {
+        self.directory = directory
+    }
+
+    /// source限定合成照片；allowCloud逐项记录，返回已知SHA1的abc磁盘文件，供真实上传客户端独立计算。
+    func export(_ source: PhotoBackupSource, allowCloud: Bool) async throws -> PhotoBackupResources {
+        calls += 1; cloudFlags.append(allowCloud)
+        guard source.kind == .photo || source.kind == .video else { throw PhotoBackupExportError(reason: .unsupportedResources) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appending(path: "fresh.jpg")
+        try Data("abc".utf8).write(to: file)
+        return .init(directory: directory, primary: .init(file: file, name: "fresh.jpg"), motion: nil,
+                     created: Date(timeIntervalSince1970: 200), modified: Date(timeIntervalSince1970: 200), favorite: false)
+    }
+}
+
 /// name绑定合成云标识、完整官方元组和独立fresh资产；返回真实候选UUID，不创建Photos资源或原片文件。
 @MainActor private func addServerContinuityCandidate(_ name: String, photos: ContinuityPhotos, client: ContinuityQueries) -> UUID {
     let id = UUID()
@@ -405,11 +633,13 @@ private nonisolated func continuitySource(_ id: String, modified: TimeInterval =
     .init(localID: id, modifiedAt: Date(timeIntervalSince1970: modified), kind: .photo)
 }
 
-/// 构造完整公开元数据观察；cloud=false模拟系统无法解析云标识，不能猜测成新项目。
-private nonisolated func continuitySnapshot(_ id: String, created: TimeInterval, cloud: Bool) -> LocalPhotoSnapshot {
-    .init(identity: .init(localIdentifier: id, modificationDate: Date(timeIntervalSince1970: 200), mediaKind: .image),
+/// 构造公开元数据观察；cloud=false模拟无法解析云标识，cloudID可复用另一设备的标识，mediaKind确定图片/视频。
+private nonisolated func continuitySnapshot(_ id: String, created: TimeInterval, cloud: Bool, cloudID: String? = nil,
+                                            mediaKind: LocalPhotoIdentity.MediaKind = .image) -> LocalPhotoSnapshot
+{
+    .init(identity: .init(localIdentifier: id, modificationDate: Date(timeIntervalSince1970: 200), mediaKind: mediaKind),
           creationDate: Date(timeIntervalSince1970: created), adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil,
-          pixelWidth: 10, pixelHeight: 10, duration: 0, mediaSubtypes: 0, resources: [], cloudIdentity: cloud ? .resolved("cloud-" + id) : .unavailable)
+          pixelWidth: 10, pixelHeight: 10, duration: 0, mediaSubtypes: 0, resources: [], cloudIdentity: cloud ? .resolved(cloudID ?? "cloud-" + id) : .unavailable)
 }
 
 /// store为测试专用真实SQLite；sources创建匹配的官方旧版本记录，导入时刻固定为100秒。

@@ -15,6 +15,8 @@ nonisolated struct ChecksumLookupExchange: Sendable {
     var contentType = "application/json"
     /// 明确查询参数与路径分开核对；默认空数组保留所有既有无query场景。
     var query: [URLQueryItem] = []
+    /// 仅磁盘multipart上传场景设置前缀；nil保持既有GET/JSON精确检查，不放宽其他用例。
+    var requestContentTypePrefix: String?
 }
 
 /// 有限JSON请求快照；不把Foundation输入流跨actor共享。
@@ -88,9 +90,14 @@ actor ChecksumLookupHTTPScript {
             expected?.queryItems = exchange.query
             expectedURL = expected?.url
         }
+        let contentTypeMatches = if let prefix = exchange.requestContentTypePrefix {
+            request.contentType?.hasPrefix(prefix) == true
+        } else {
+            request.contentType == (request.body == nil ? nil : "application/json")
+        }
         guard request.method == exchange.method, request.url == expectedURL,
               request.authorization == exchange.authorization, request.cookie == nil,
-              request.contentType == (request.body == nil ? nil : "application/json") else { throw URLError(.badServerResponse) }
+              contentTypeMatches else { throw URLError(.badServerResponse) }
         if exchange.held {
             heldRequestID = request.id
             await withCheckedContinuation { continuation in

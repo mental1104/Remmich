@@ -1195,3 +1195,12 @@
 - Tags is reachable from real asset management, with keep/set/clear colors under the selected-tag form. Both document conflict sides are retained; per-method/source audit preserves all previous client methods, existing management paths and newer metadata Swift6 assertion repair alongside shared HTTP retirement handshakes.
 - Actual NAS full workflow formatting lint0/426,1 existing skip, bash/diff and independent exact-source/history/entry audit pass. No swiftc on NAS: compilation,47+41 scenarios, HTTP/UI/device acceptance remain UNVERIFIED for final acceptance. No new CI/push/dev/parent pin/production change. See docs/asset-tag-integration.md for source identities and rollback.
 
+## 2026-11-26: Complete no-import backup and publish iCloud origins
+
+- NAS全范围SwiftFormat0/473（1个既有排除）、diff及1610对中英文键/占位符检查通过；没有Swift/Xcode，新增编译和执行尚待本提交CI。
+- 按用户明确口径修正无SQLite路径：新照片未匹配时进入原有Exporter→SHA1→bulk-upload-check→必要时磁盘上传→fresh确认，不再全部标为待核查。不可读取/变化/冲突源仍待核查，历史尝试仅明确恢复或已验证恢复令牌可重进；整批手动恢复也传入实际排队ID。
+- 实际原片摘要与fresh资产checksum/online一致后，以每云ID独立remmich-backup-icloud-<SHA256>元数据保存version=1/method=sha1/byteVerified=true/checksum/公开Photos元组；多来源不互相覆盖，也不改官方mobile-app。仅ID匹配继续独立保存false标记。来源写入失败保留未确认和已上传回执，明确恢复先查重。
+- 同步流读取上述自有来源，与官方相同资产/元组只合并跨来源重复，官方重复歧义仍保留。新源批量核查每64项交还UI，未匹配大图库不会形成同步热循环。
+- 新增照片/视频真实Checker/磁盘/客户端HTTP/SQLite链：新上传、重复零媒体POST、来源失败恢复无重传、fresh摘要不符拒绝，第一设备上报→不同本机ID第二设备匹配零原片导出；另验证别名并存、跨来源合并、坏证据/错误PUT回执。NAS仅格式/静态检查；当前新增实现和测试尚待GitHub CI，不能沿用6db5892通过结果。
+- 6db5892实际已通过编译、API98/24、资源/偏好/导航及15个备份/匹配套件；App仍有裁剪/批量/Steam失败。手机图库导航通过，但语言切换后UITabBarItem标题未即时更新；补同步实际标签项及刷新，保留宿主导航，等待复测。没有生产写入、签名安装、父gitlink或服务部署。
+

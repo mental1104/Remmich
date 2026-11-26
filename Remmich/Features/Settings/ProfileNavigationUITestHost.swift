@@ -33,12 +33,6 @@
                 years: AnyView(EmptyView()), months: AnyView(EmptyView()), weeks: AnyView(EmptyView()), search: AnyView(Text("Search"))
             )
             .ignoresSafeArea()
-            .task {
-                // 只在明确测试宿主中设置应用偏好；不读取生产账户或重写设备语言。
-                if let code = ProcessInfo.processInfo.environment["REMMICH_UI_TEST_LANGUAGE"], let selected = AppLanguage(rawValue: code) {
-                    language.selection = selected
-                }
-            }
         }
     }
 #endif

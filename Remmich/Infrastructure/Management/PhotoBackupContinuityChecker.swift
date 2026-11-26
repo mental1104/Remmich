@@ -1,6 +1,6 @@
 import Foundation
 
-/// 导出前整批核查；无SQLite时按服务端iCloud元数据确认交集，仅写匹配依据，不读取原片补证明。
+/// 导出前整批核查；iCloud元数据交集直接跳过，未匹配新源交给既有Worker按原片摘要查重后备份。
 @MainActor struct PhotoBackupContinuityChecker: PhotoBackupPreflighting {
     private let store: SQLiteLibraryIndexStore
     private let metadata: any LocalPhotoMetadataReading
@@ -20,7 +20,8 @@ import Foundation
     {
         try check(validateContext)
         guard let history = try await store.loadPhotoBackupHistory(scope: scope) else {
-            return try await planFromServer(jobs: jobs, scope: scope, client: client, progress: progress, validateContext: validateContext)
+            return try await planFromServer(jobs: jobs, scope: scope, client: client, verificationIDs: verificationIDs,
+                                            progress: progress, validateContext: validateContext)
         }
         try check(validateContext)
         let index = try await Self.makeIndex(history)
@@ -28,6 +29,7 @@ import Foundation
         var existing: Set<PhotoBackupSource> = []
         var review: Set<PhotoBackupSource> = []
         var newCandidates: [String: PhotoBackupSource] = [:]
+        var uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:]
         var done = 0
         progress(0, jobs.count)
         for offset in stride(from: 0, to: jobs.count, by: 64) {
@@ -62,6 +64,7 @@ import Foundation
                     if let previous = newCandidates.updateValue(source, forKey: cloud) {
                         review.insert(previous); review.insert(source)
                     }
+                    uploadMetadata[source] = try snapshot.mobileMetadata()
                 } else {
                     review.insert(source)
                 }
@@ -98,16 +101,19 @@ import Foundation
                 allowed.insert(source)
             }
         }
-        let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review)
+        let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review,
+                                            uploadMetadata: uploadMetadata.filter { allowed.contains($0.key) })
         try plan.validate(sources: Set(jobs.map(\.source)))
         try check(validateContext)
         return plan
     }
 
-    /// jobs为当前排队源；读取Photos结构与完整远端关联后核当前资源，返回交集/待核查分区。
-    /// 无导入历史的未命中项保持review，不因缺少本机原片而下载，也不把未知当成新上传。
+    /// jobs为当前排队源；读取Photos结构与完整远端关联后返回交集/原片查重许可/待核查分区。
+    /// 未匹配且未经尝试的新源允许进入Worker，实际下载仍受allowCloud约束，上传仍先做完整字节查重。
+    /// verificationIDs只授权调用方明确核查的既有任务；未知部分上传不会因缺少导入历史而自动重试。
     /// client只在完整分区确认后写独立匹配标记；progress/context沿用原Coordinator的进度、取消和账号门禁。
     private func planFromServer(jobs: [PhotoBackupJob], scope: MediaAccountScope, client: any PhotoBackupContinuityQuerying,
+                                verificationIDs: Set<UUID>,
                                 progress: @MainActor (Int, Int) -> Void,
                                 validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {
@@ -135,17 +141,42 @@ import Foundation
         try check(validateContext)
         let candidates = try await Self.makeServerCandidates(records, clouds: clouds)
         try check(validateContext)
-        var existing: Set<PhotoBackupSource> = [], review: Set<PhotoBackupSource> = []
+        var existing: Set<PhotoBackupSource> = [], allowed: Set<PhotoBackupSource> = [], review: Set<PhotoBackupSource> = []
         var matches: [UUID: String] = [:]
         for (index, job) in jobs.enumerated() {
             try check(validateContext)
-            defer { progress(index + 1, jobs.count) }
+            // 未匹配新源可能整批走continue；每64项主动交还UI并发布一次进度，避免大图库形成同步热循环。
+            if index.isMultiple(of: 64) {
+                await Task.yield(); try check(validateContext)
+            }
+            defer {
+                if (index + 1).isMultiple(of: 64) || index + 1 == jobs.count {
+                    progress(index + 1, jobs.count)
+                }
+            }
             let source = job.source
             guard let snapshot = snapshots[source.localID], snapshot.identity.modificationDate == source.modifiedAt,
                   ((source.kind == .photo || source.kind == .rawJPEG) && snapshot.identity.mediaKind == .image)
                   || (source.kind == .video && snapshot.identity.mediaKind == .video)
-                  || (source.kind == .livePhoto && snapshot.identity.mediaKind == .livePhoto),
-                  case let .resolved(cloud) = snapshot.cloudIdentity, let values = candidates[cloud], values.count == 1,
+                  || (source.kind == .livePhoto && snapshot.identity.mediaKind == .livePhoto)
+            else { review.insert(source); continue }
+            // 完整远端流没有该云关联，或本机尚无云ID时，字节查重仍能识别已有资源；不要求先导入旧数据库。
+            let cloud: String? = if case let .resolved(value) = snapshot.cloudIdentity {
+                value
+            } else {
+                nil
+            }
+            if cloud.flatMap({ candidates[$0] }) == nil {
+                let untouched = job.attempts == 0 && job.failure == nil && job.primaryAssetID == nil && job.motionAssetID == nil
+                    && job.rawReceipt == nil && job.jpegReceipt == nil
+                if untouched || verificationIDs.contains(job.id) {
+                    allowed.insert(source)
+                } else {
+                    review.insert(source)
+                }
+                continue
+            }
+            guard let cloud, let values = candidates[cloud], values.count == 1,
                   case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: values)
             else { review.insert(source); continue }
             let remote: LocalMediaRemoteAsset
@@ -160,9 +191,14 @@ import Foundation
             existing.insert(source); matches[candidate.assetID] = cloud
             await Task.yield()
         }
-        let plan = PhotoBackupPreflightPlan(allowed: [], existing: existing, review: review)
+        var uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:]
+        for source in allowed {
+            uploadMetadata[source] = try snapshots[source.localID]?.mobileMetadata()
+        }
+        let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review, uploadMetadata: uploadMetadata)
         try plan.validate(sources: Set(jobs.map(\.source)))
-        let confirmed = Array(existing)
+        // 许可新源与跳过交集都重读元数据，避免整批核查期间变化的源获得旧许可。
+        let confirmed = Array(existing.union(allowed))
         for offset in stride(from: 0, to: confirmed.count, by: 64) {
             let ids = confirmed[offset ..< min(offset + 64, confirmed.count)].map(\.localID)
             let current = try await metadata.snapshots(for: ids, validateContext: validateContext)

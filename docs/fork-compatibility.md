@@ -1,5 +1,13 @@
 # Client and server maintenance
 
+## No-import uploads and durable iCloud origins, 2026-11-26
+
+User-confirmed behavior supersedes the earlier review-only no-import policy below: readable unmatched new sources now enter the existing original-export/SHA1/bulk-upload-check/upload/fresh-receipt pipeline. ID matches still skip originals entirely. Missing/changed/conflicting sources stay under review; previously attempted work requires explicit verification or the existing verified recovery token. Whole-batch manual verification passes its actual queued IDs. Cloud downloads retain the saved user consent.
+
+After fresh asset ownership/type/state and original checksum confirmation, the client saves version1/method=sha1/byteVerified=true/checksum plus the observed public Photos tuple under a separate remmich-backup-icloud-<SHA256(cloudID)> key. Same-byte aliases have separate keys, official mobile-app and identity-only false markers remain intact. Metadata failure preserves receipts and prevents completed publication; explicit retry starts with checksum precheck. This uses the existing official metadata endpoint; no API/SDK/server deployment changes.
+
+The complete metadata stream recognizes these origins, coalescing only identical official/self-owned facts while preserving duplicate official ambiguity. New actual Checker/file/HTTP/SQLite tests cover photo/video uploads, duplicate zero-POST, failed-origin recovery without retransmitting media, bad fresh checksum, and a second device with a different local ID matching without exporting originals. Alias/malformed-proof/response tests are also added. These new Swift paths remain UNVERIFIED until this head's CI. The previous6db5892 compilation/API98/24/resource/navigation/15 backup suites pass does not approve this change; its full App crop/batch/Steam and phone language-title failures are retained. Actual UIKit tab items now refresh with language, pending the same validation run. No signing, real-device or production acceptance is claimed.
+
 ## Unified Me tab and application language, 2026-11-26
 
 Album group filters localize only the empty-name placeholder. User group names stay verbatim even when their content matches an application resource key.
@@ -22,7 +30,7 @@ New tests cover the bundled resources, placeholder contracts, language preferenc
 
 Run45762664081 on7f2c0f0 passes compilation, formatting/contracts, API98 and the original13 backup suites plus marker HTTP. The no-import end-to-end fixture omitted authenticated account preparation and correctly hit the store's missing-account cancellation guard; it now prepares the account, explicitly asserts no imported history, and retains all export/marker/cold-state checks. This fixture correction and matched-state wording await the new head's CI; production storage guards remain unchanged.
 
-Without an import, backup preflight now matches complete server mobile-app metadata to fresh Photos identity/version observations, validates current server ownership/state and rechecks Photos before recording identity-only provenance. Existing PUT /assets/metadata stores a dedicated remmich-icloud-match key with method=icloud-id and byteVerified=false; official metadata and upload receipts remain intact. The client displays and retains matched-existing states, including cloud-only originals, without exporting or hashing them. Unknown sources remain review-only. SQLite remains an optional cache path; no-import unmatched new sources are not granted upload permission. New HTTP/Checker/Worker/SQLite tests await this revision's CI. No server deployment, real media or production marker write was performed. Previous 0a025ee backup/API passes do not validate this new code; its global App and both search UI stages failed.
+The earlier ID-matching slice reads complete server metadata against fresh Photos observations and records remmich-icloud-match with method=icloud-id/byteVerified=false. Matched-existing states, including cloud-only originals, do not export/hash/upload. Its original review-only unmatched policy has been superseded by the no-import upload behavior above; optional imported-history behavior remains conservative. No production marker write or deployment was performed. Previous0a025ee results remain historical evidence only.
 
 ## Backup continuity and responsiveness, 2026-11-26
 

@@ -20,9 +20,18 @@ nonisolated protocol PhotoBackupUploading: Sendable {
                 hidden: Bool, livePhotoVideoID: String?) async throws -> LibraryMutationClient.UploadResult
     /// id为已确认主体；回读必须核对身份、拥有者、回收站及必要Live Photo配对。
     func asset(_ id: String) async throws -> ManagedAsset
+    /// 主体已按原片摘要fresh确认后，持久保存该iCloud来源；失败不能发布完整成功。
+    func recordBackupOrigin(assetID: UUID, origin: PhotoBackupOrigin) async throws
 }
 
 extension LibraryMutationClient: PhotoBackupUploading {}
+
+extension PhotoBackupUploading {
+    /// 旧合成上传端口未实现来源写入时明确失败；没有云身份的任务不调用，不能把未保存伪称为成功。
+    func recordBackupOrigin(assetID _: UUID, origin _: PhotoBackupOrigin) async throws {
+        throw LibraryWriteError.malformedResponse
+    }
+}
 
 /// 单次前台执行结果只含计数；未知结果和已发送但未确认的资源不会算作成功。
 nonisolated struct PhotoBackupRunResult: Sendable {
@@ -88,7 +97,8 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                     try job.exported()
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
                     if job.source.kind == .rawJPEG {
-                        try await uploadImages(&job, resources: resources, scope: scope, userID: userID, client: client, validateContext: validateContext)
+                        try await uploadImages(&job, resources: resources, scope: scope, userID: userID, client: client,
+                                               metadata: preflight?.uploadMetadata[job.source], validateContext: validateContext)
                     } else {
                         if let motion = resources.motion {
                             let receipt = try await client.upload(file: motion.file, filename: motion.name, created: resources.created,
@@ -133,6 +143,14 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                             }
                             // 既有动态视频可能归档，不强制hidden；两次读取之间仍没有服务端CAS/原子快照。
                         }
+                        if let metadata = preflight?.uploadMetadata[job.source] {
+                            // 保存来源前必须确认这份实际摘要仍属于当前资产；只有ID回执不能生成byteVerified=true。
+                            guard let checksum = primary.checksum, confirmed.checksum == checksum, confirmed.isOffline == false else {
+                                throw LibraryWriteError.malformedResponse
+                            }
+                            try await client.recordBackupOrigin(assetID: primaryID, origin: PhotoBackupOrigin(metadata: metadata, checksum: checksum))
+                            try checkContext(validateContext)
+                        }
                         try job.confirmVerifiedReceipt()
                     }
                     try await checkpoint(job, scope: scope, validateContext: validateContext)
@@ -172,9 +190,10 @@ nonisolated struct PhotoBackupRunResult: Sendable {
     }
 
     /// RAW/JPEG每份都经完整字节摘要、现有upload内查重及独立fresh确认后落盘；旧UUID绝不跳过当前尝试。
-    /// resources来自完整导出，scope/userID/context固定；第二份失败保留第一份回执，不删除远端或自动重发。
+    /// resources来自完整导出，scope/userID/context固定，metadata为已观察的可选云身份；第二份失败保留第一份回执。
     private func uploadImages(_ job: inout PhotoBackupJob, resources: PhotoBackupResources, scope: MediaAccountScope,
-                              userID: String, client: any PhotoBackupUploading, validateContext: @MainActor () throws -> Void) async throws
+                              userID: String, client: any PhotoBackupUploading, metadata: LocalMediaMobileMetadata?,
+                              validateContext: @MainActor () throws -> Void) async throws
     {
         guard let pair = job.source.rawJPEG, let jpeg = resources.jpeg, resources.motion == nil,
               resources.primary.name == pair.raw.originalFilename, jpeg.name == pair.jpeg.originalFilename
@@ -206,6 +225,10 @@ nonisolated struct PhotoBackupRunResult: Sendable {
             let asset = try await client.asset(receipt.assetID.uuidString)
             try checkContext(validateContext)
             try Self.verifyImage(asset, receipt: receipt, userID: userID)
+        }
+        if let metadata {
+            try await client.recordBackupOrigin(assetID: raw.assetID, origin: PhotoBackupOrigin(metadata: metadata, checksum: raw.checksum))
+            try checkContext(validateContext)
         }
         try job.confirmVerifiedImages()
     }

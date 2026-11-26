@@ -536,6 +536,16 @@ struct NativeAppTabShell: UIViewControllerRepresentable {
                 for (tab, title) in [(photosTab, "Photos"), (videosTab, "Videos"), (libraryTab, "Library"), (searchTab, "Search"), (accountTab, "Me"), (yearsTab, "Years"), (monthsTab, "Months"), (weeksTab, "Weeks")] {
                     tab.title = L10n.string(title, language: AppLanguage(rawValue: next.languageCode))
                 }
+                if let controller {
+                    // UITab的模型标题改变后，iPhone仍可能保留已创建的UITabBarItem文案；同步实际项目而不重建导航宿主。
+                    if let items = controller.tabBar.items, items.count == controller.tabs.count {
+                        for (item, tab) in zip(items, controller.tabs) {
+                            item.title = tab.title
+                        }
+                    }
+                    controller.setTabs(controller.tabs, animated: false)
+                    controller.tabBar.setNeedsLayout()
+                }
             }
             guard let controller else { return }
             if tabBarInteractionBlockedByViewer != next.isViewerPresented {

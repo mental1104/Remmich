@@ -37,11 +37,20 @@ nonisolated struct PhotoBackupPreflightPlan: Sendable {
     let allowed: Set<PhotoBackupSource>
     let existing: Set<PhotoBackupSource>
     let review: Set<PhotoBackupSource>
+    let uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata]
+
+    /// 三个集合完整分区；uploadMetadata仅附加已许可源的公开云身份，缺省空兼容无云ID与既有测试端口。
+    init(allowed: Set<PhotoBackupSource>, existing: Set<PhotoBackupSource>, review: Set<PhotoBackupSource>,
+         uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:])
+    {
+        self.allowed = allowed; self.existing = existing; self.review = review; self.uploadMetadata = uploadMetadata
+    }
 
     /// sources是本轮实际queued源；必须一一覆盖且互斥，部分响应不能留下默认允许的尾队列。
     func validate(sources: Set<PhotoBackupSource>) throws {
         guard allowed.isDisjoint(with: existing), allowed.isDisjoint(with: review), existing.isDisjoint(with: review),
-              allowed.union(existing).union(review) == sources else { throw PhotoBackupContinuityError.incompleteResponse }
+              allowed.union(existing).union(review) == sources,
+              Set(uploadMetadata.keys).isSubset(of: allowed) else { throw PhotoBackupContinuityError.incompleteResponse }
     }
 }
 

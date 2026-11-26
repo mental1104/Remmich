@@ -314,7 +314,24 @@ final nonisolated class LibraryMutationClient: Sendable {
         try Task.checkCancellation()
     }
 
-    /// cloudIDs为本机已读到的完整Photos标识；只读取官方同步元数据，不请求任何媒体、不reset也不提交ack。
+    /// assetID为本轮fresh确认的主体，origin绑定本机云身份与实际原片摘要；保存到每云ID独立key并核对完整响应。
+    @concurrent func recordBackupOrigin(assetID: UUID, origin: PhotoBackupOrigin) async throws {
+        try origin.validate()
+        _ = try validID(assetID.uuidString)
+        // 一次只写一个经过原片验证的来源，多个云ID对同一资产使用不同key，不覆盖官方或其他来源。
+        struct Item: Codable { let assetId: UUID; let key: String; let value: PhotoBackupOrigin }
+        // 复用官方批量元数据接口的信封，不改资产内容、同步ACK或服务端协议。
+        struct Body: Encodable { let items: [Item] }
+        let item = Item(assetId: assetID, key: PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId), value: origin)
+        let data = try await send("PUT", ["assets", "metadata"], body: JSONEncoder().encode(Body(items: [item])), expectedStatus: 200)
+        guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
+        let returned = try JSONDecoder().decode([Item].self, from: data)
+        guard returned.count == 1, let actual = returned.first,
+              actual.assetId == assetID, actual.key == item.key, actual.value == origin else { throw LibraryWriteError.malformedResponse }
+        try Task.checkCancellation()
+    }
+
+    /// cloudIDs为本机已读到的完整Photos标识；读取官方及本客户端来源元数据，不请求媒体、不reset也不提交ack。
     /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
     @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
         guard !cloudIDs.isEmpty else { return [] }
