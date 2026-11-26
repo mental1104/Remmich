@@ -1,6 +1,6 @@
 import Foundation
 
-/// 导出前整批只读核查；历史未命中保持待核查，只有导入后新拍摄/新修改且远端元数据无关联的源可读原片。
+/// 导出前整批核查；无SQLite时按服务端iCloud元数据确认交集，仅写匹配依据，不读取原片补证明。
 @MainActor struct PhotoBackupContinuityChecker: PhotoBackupPreflighting {
     private let store: SQLiteLibraryIndexStore
     private let metadata: any LocalPhotoMetadataReading
@@ -19,7 +19,9 @@ import Foundation
               validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {
         try check(validateContext)
-        guard let history = try await store.loadPhotoBackupHistory(scope: scope) else { throw PhotoBackupContinuityError.importRequired }
+        guard let history = try await store.loadPhotoBackupHistory(scope: scope) else {
+            return try await planFromServer(jobs: jobs, scope: scope, client: client, progress: progress, validateContext: validateContext)
+        }
         try check(validateContext)
         let index = try await Self.makeIndex(history)
         try check(validateContext)
@@ -100,6 +102,96 @@ import Foundation
         try plan.validate(sources: Set(jobs.map(\.source)))
         try check(validateContext)
         return plan
+    }
+
+    /// jobs为当前排队源；读取Photos结构与完整远端关联后核当前资源，返回交集/待核查分区。
+    /// 无导入历史的未命中项保持review，不因缺少本机原片而下载，也不把未知当成新上传。
+    /// client只在完整分区确认后写独立匹配标记；progress/context沿用原Coordinator的进度、取消和账号门禁。
+    private func planFromServer(jobs: [PhotoBackupJob], scope: MediaAccountScope, client: any PhotoBackupContinuityQuerying,
+                                progress: @MainActor (Int, Int) -> Void,
+                                validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
+    {
+        try check(validateContext)
+        var snapshots: [String: LocalPhotoSnapshot] = [:]
+        progress(0, jobs.count)
+        for offset in stride(from: 0, to: jobs.count, by: 64) {
+            let ids = jobs[offset ..< min(offset + 64, jobs.count)].map(\.source.localID)
+            let values = try await metadata.snapshots(for: ids, validateContext: validateContext)
+            try check(validateContext)
+            guard Set(values.map(\.identity.localIdentifier)).count == values.count,
+                  values.allSatisfy({ ids.contains($0.identity.localIdentifier) }) else { throw PhotoBackupContinuityError.incompleteResponse }
+            for value in values {
+                snapshots[value.identity.localIdentifier] = value
+            }
+            await Task.yield()
+        }
+        let clouds = Set(snapshots.values.compactMap { snapshot -> String? in
+            if case let .resolved(value) = snapshot.cloudIdentity {
+                return value
+            }
+            return nil
+        })
+        let records = try await client.localMediaMetadata(cloudIDs: clouds)
+        try check(validateContext)
+        let candidates = try await Self.makeServerCandidates(records, clouds: clouds)
+        try check(validateContext)
+        var existing: Set<PhotoBackupSource> = [], review: Set<PhotoBackupSource> = []
+        var matches: [UUID: String] = [:]
+        for (index, job) in jobs.enumerated() {
+            try check(validateContext)
+            defer { progress(index + 1, jobs.count) }
+            let source = job.source
+            guard let snapshot = snapshots[source.localID], snapshot.identity.modificationDate == source.modifiedAt,
+                  ((source.kind == .photo || source.kind == .rawJPEG) && snapshot.identity.mediaKind == .image)
+                  || (source.kind == .video && snapshot.identity.mediaKind == .video)
+                  || (source.kind == .livePhoto && snapshot.identity.mediaKind == .livePhoto),
+                  case let .resolved(cloud) = snapshot.cloudIdentity, let values = candidates[cloud], values.count == 1,
+                  case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: values)
+            else { review.insert(source); continue }
+            let remote: LocalMediaRemoteAsset
+            do { remote = try await client.localMediaAsset(candidate.assetID.uuidString) }
+            catch LocalMediaCandidateError.inaccessible { try check(validateContext); review.insert(source); continue }
+            try check(validateContext)
+            guard LocalMediaAssociation.verified(remote: remote, requestedID: candidate.assetID, ownerID: scope.userID,
+                                                 local: snapshot.identity, source: .mobileMetadata) != nil
+            else {
+                review.insert(source); continue
+            }
+            existing.insert(source); matches[candidate.assetID] = cloud
+            await Task.yield()
+        }
+        let plan = PhotoBackupPreflightPlan(allowed: [], existing: existing, review: review)
+        try plan.validate(sources: Set(jobs.map(\.source)))
+        let confirmed = Array(existing)
+        for offset in stride(from: 0, to: confirmed.count, by: 64) {
+            let ids = confirmed[offset ..< min(offset + 64, confirmed.count)].map(\.localID)
+            let current = try await metadata.snapshots(for: ids, validateContext: validateContext)
+            try check(validateContext)
+            guard current.count == ids.count, Set(current.map(\.identity.localIdentifier)) == Set(ids),
+                  current.allSatisfy({ snapshots[$0.identity.localIdentifier] == $0 }) else { throw LocalMediaMetadataError.sourceChanged }
+        }
+        // 已完成整批分类才保存ID匹配依据；字节校验始终为false，部分写入失败不发放任何上传许可。
+        let ids = Array(matches.keys)
+        for offset in stride(from: 0, to: ids.count, by: 64) {
+            try check(validateContext)
+            let batch = ids[offset ..< min(offset + 64, ids.count)]
+            try await client.recordICloudMatches(Dictionary(uniqueKeysWithValues: batch.compactMap { id in matches[id].map { (id, $0) } }))
+            try check(validateContext)
+        }
+        return plan
+    }
+
+    /// records来自完整流，clouds限定本轮本机云标识；后台一次建立索引，坏值/范围外响应或取消均拒绝整批。
+    @concurrent private static func makeServerCandidates(_ records: [LocalMediaRemoteMetadataRecord], clouds: Set<String>) async throws -> [String: [LocalMediaRemoteCandidate]] {
+        var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
+        let decoder = JSONDecoder()
+        for record in records {
+            try Task.checkCancellation()
+            let value = try decoder.decode(LocalMediaMobileMetadata.self, from: record.value)
+            guard clouds.contains(value.cloudId) else { throw PhotoBackupContinuityError.incompleteResponse }
+            candidates[value.cloudId, default: []].append(.init(assetID: record.assetID, metadata: value))
+        }
+        return candidates
     }
 
     /// history最多20万项，索引构建移出UI线程；取消时不发布半份索引。

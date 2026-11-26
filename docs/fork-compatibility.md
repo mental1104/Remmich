@@ -1,5 +1,9 @@
 # Client and server maintenance
 
+## Server iCloud matching without SQLite, 2026-11-26
+
+Without an import, backup preflight now matches complete server mobile-app metadata to fresh Photos identity/version observations, validates current server ownership/state and rechecks Photos before recording identity-only provenance. Existing PUT /assets/metadata stores a dedicated remmich-icloud-match key with method=icloud-id and byteVerified=false; official metadata and upload receipts remain intact. The client displays and retains matched-existing states, including cloud-only originals, without exporting or hashing them. Unknown sources remain review-only. SQLite remains an optional cache path; no-import unmatched new sources are not granted upload permission. New HTTP/Checker/Worker/SQLite tests await this revision's CI. No server deployment, real media or production marker write was performed. Previous 0a025ee backup/API passes do not validate this new code; its global App and both search UI stages failed.
+
 ## Backup continuity and responsiveness, 2026-11-26
 
 On 9cd18d9, run45750821522 passes compilation, offline contracts, formatting, API98/24 suites and the new continuity suite (large index2.368s, historical zero-export0.362s, scan cancellation0.002s). Full app execution fails in existing backup fixtures and in editing/batch/Steam tests. Backup fixtures now specify capture order and reset the real-request observation gate; their original expectations remain. A green full-app/CI or real-device claim is still unavailable.

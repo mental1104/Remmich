@@ -60,9 +60,9 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                 guard var job = try await store.nextQueuedPhotoBackup(scope: scope) else { break }
                 try checkContext(validateContext)
                 if let preflight, !preflight.allowed.contains(job.source) {
-                    // 已有主体仅暂停，不伪造完整上传回执；未知历史单独失败，任何一种都不能进入Exporter。
+                    // 服务器已有项持久保存为已匹配；不伪造上传回执，未知历史仍待核查，均不进入Exporter。
                     if preflight.existing.contains(job.source) {
-                        job.pause()
+                        try job.confirmExistingMatch()
                     } else {
                         job.fail(.historyNeedsReview)
                     }

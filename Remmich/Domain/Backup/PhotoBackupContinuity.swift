@@ -45,10 +45,14 @@ nonisolated struct PhotoBackupPreflightPlan: Sendable {
     }
 }
 
-/// 只读网络核查端口；复用官方checksum查询和完整同步元数据，不上传媒体或改变官方同步检查点。
+/// 核查及匹配依据持久化端口；只写独立匹配元数据，不上传媒体或改变官方同步检查点。
 nonisolated protocol PhotoBackupContinuityQuerying: Sendable {
     func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup]
     func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord]
+    /// id为元数据候选的服务端UUID；读取当前拥有者、版本和资源状态，不读取原片。
+    func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset
+    /// matches的键是已核验的服务端UUID，值是完整iCloud ID；原子批次仅记录ID匹配且未校验字节的事实。
+    func recordICloudMatches(_ matches: [UUID: String]) async throws
 }
 
 extension LibraryMutationClient: PhotoBackupContinuityQuerying {}

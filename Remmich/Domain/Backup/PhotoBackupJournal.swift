@@ -48,7 +48,7 @@ nonisolated enum PhotoBackupStateError: Error, Equatable, Sendable {
 nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
     enum Stage: String, Codable, Sendable {
         case queued, exporting, uploadingMotion, uploadingPrimary, verifying, paused, failed, cancelled, completed
-        /// Mac候选的只读接续状态；不等于完整上传回执，恢复时保留，重新扫描后仍须完整核查。
+        /// 服务端已有的匹配状态；不等于原片字节或完整上传回执，重新扫描后仍须核查。
         case existing
 
         /// 进程退出后这些状态都不是成功；冷恢复必须暂停，等待重新验证。
@@ -140,6 +140,12 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         failure = nil
     }
 
+    /// 当前queued源已在服务器确认存在；只保留匹配状态，不增加上传次数、不伪造主体/动态/RAW回执。
+    mutating func confirmExistingMatch() throws {
+        guard stage == .queued else { throw PhotoBackupStateError.invalidTransition }
+        stage = .existing; failure = nil
+    }
+
     /// receipt已由本轮完整文件与fresh远端信息核对；逐份落盘，重试仍须重导出和查重，旧回执不是跳过依据。
     mutating func recordImage(_ receipt: PhotoBackupImageReceipt, role: PhotoBackupImageRole) throws {
         guard source.kind == .rawJPEG, stage == .uploadingPrimary else { throw PhotoBackupStateError.invalidTransition }
@@ -183,9 +189,9 @@ nonisolated struct PhotoBackupJob: Codable, Identifiable, Sendable {
         failure = reason
     }
 
-    /// 取消只停止本地任务；未确认的远端写入可能已发生，之后显式重试仍需查重。
+    /// 取消只停止未确认本地任务；已上传/已匹配事实保留，未知远端写入以后仍需查重。
     mutating func cancel() {
-        guard stage != .completed else { return }
+        guard stage != .completed, stage != .existing else { return }
         failure = stage.isInFlight ? .interrupted : nil
         stage = .cancelled
     }
@@ -218,7 +224,7 @@ nonisolated struct PhotoBackupUnattemptedSummary: Sendable {
     /// jobs来自当前账号完整冷快照；取消/失败和任何未完成尝试/回执都阻断同localID的新任务自动或批量重放。
     init(jobs: [PhotoBackupJob]) {
         let blocked = Set(jobs.filter {
-            $0.stage == .cancelled || $0.stage == .failed || ($0.stage != .completed
+            $0.stage == .cancelled || $0.stage == .failed || (![.completed, .existing].contains($0.stage)
                 && ($0.attempts > 0 || $0.failure != nil || $0.motionAssetID != nil || $0.primaryAssetID != nil || $0.rawReceipt != nil || $0.jpegReceipt != nil))
         }.map(\.source.localID))
         blockedLocalIDs = blocked
@@ -228,7 +234,7 @@ nonisolated struct PhotoBackupUnattemptedSummary: Sendable {
         }.map(\.id))
         failed = jobs.count { $0.stage == .failed }
         cancelled = jobs.count { $0.stage == .cancelled }
-        completed = jobs.count { $0.stage == .completed }
+        completed = jobs.count { $0.stage == .completed || $0.stage == .existing }
         attemptedOrUnconfirmed = jobs.count - eligibleJobIDs.count - failed - cancelled - completed
     }
 }

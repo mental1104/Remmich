@@ -63,17 +63,17 @@ struct PhotoBackupContinuityTests {
         #expect(resolved == 88186)
     }
 
-    /// 无导入记录必须在Photos/HTTP及Exporter之前失败，不能把既有服务器图库视作空库重新上传。
-    @Test @MainActor func requiresImportBeforeAnyReadOrExport() async throws {
+    /// 无SQLite仍可核查服务器；未知项没有上传许可，不把服务器图库视作空库重新上传。
+    @Test @MainActor func missingImportLeavesUnmatchedHistoryForReview() async throws {
         let root = continuityRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
         let photos = ContinuityPhotos(), client = ContinuityQueries()
         let checker = PhotoBackupContinuityChecker(store: store, metadata: photos)
-        await #expect(throws: PhotoBackupContinuityError.importRequired) {
-            try await checker.plan(jobs: [.init(source: continuitySource("old"))], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
-        }
-        #expect(photos.reads == 0 && client.batches.isEmpty)
+        let source = continuitySource("old")
+        let plan = try await checker.plan(jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.allowed.isEmpty && plan.existing.isEmpty && plan.review == [source])
+        #expect(photos.reads == 1 && client.batches.isEmpty && client.savedMatches.isEmpty)
     }
 
     /// 超过两个批次的缓存摘要全部在导出前查询；真实Worker对已有主体只暂停，缺失历史单独待核查，Exporter零调用。
@@ -101,7 +101,7 @@ struct PhotoBackupContinuityTests {
         )
         let cold = try await SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")).loadPhotoBackups(scope: scope)
         #expect(exporter.calls == 0 && result.completed == 0 && result.skipped == 65 && result.review == 65)
-        #expect(cold.jobs.count { $0.stage == .paused } == 65 && cold.jobs.count { $0.failure == .historyNeedsReview } == 65)
+        #expect(cold.jobs.count { $0.stage == .existing } == 65 && cold.jobs.count { $0.failure == .historyNeedsReview } == 65)
         #expect(cold.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
         do {
             let persistedSnapshot = try await store.loadPhotoBackupHistory(scope: continuityScope(other: true))
@@ -230,6 +230,151 @@ struct PhotoBackupContinuityTests {
     }
 }
 
+/// 无导入场景以独立Photos/网络端口观察真实Checker与Worker；远端匹配只给已有标记，不发放原片许可。
+@Suite("Server iCloud backup matching without imports")
+struct PhotoBackupServerMatchingTests {
+    /// 原片无任何本地字节入口：服务端命中直接记existing，未命中仍待核查，真实Worker零导出。
+    @Test @MainActor func matchesCloudOnlyWithoutImportOrOriginals() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let id = addServerContinuityCandidate("known", photos: photos, client: client)
+        photos.values["unknown"] = continuitySnapshot("unknown", created: 200, cloud: true)
+        let sources = [continuitySource("known", modified: 200), continuitySource("unknown", modified: 200)]
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue(sources); try await store.savePhotoBackups(journal, scope: scope)
+        let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+            jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.existing == [sources[0]] && plan.review == [sources[1]] && plan.allowed.isEmpty)
+        #expect(client.savedMatches == [id: "cloud-known"] && client.batches.isEmpty)
+        let exporter = ContinuityNoExport()
+        let result = try await PhotoBackupWorker(store: store, exporter: exporter).run(
+            scope: scope, userID: scope.userID, allowCloud: true, client: ContinuityNoUpload(), preflight: plan, validateContext: {}, progress: { _, _ in }
+        )
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        #expect(exporter.calls == 0 && result.completed == 0 && result.skipped == 1 && result.review == 1)
+        #expect(cold.jobs.map(\.stage) == [.existing, .failed] && cold.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
+        let summary = PhotoBackupUnattemptedSummary(jobs: cold.jobs)
+        #expect(summary.completed == 1 && summary.eligibleJobIDs.isEmpty)
+    }
+
+    /// kind覆盖视频/Live/双原图的逻辑身份；仅保存元数据匹配事实，不生成任何成员字节或上传完成证明。
+    @Test(arguments: [PhotoBackupSource.Kind.video, .livePhoto, .rawJPEG])
+    @MainActor func matchesCompoundIdentityWithoutClaimingOriginalBytes(_ kind: PhotoBackupSource.Kind) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let id = addServerContinuityCandidate("known", photos: photos, client: client)
+        let mediaKind: LocalPhotoIdentity.MediaKind = kind == .video ? .video : kind == .livePhoto ? .livePhoto : .image
+        let original = try #require(photos.values["known"])
+        photos.values["known"] = .init(identity: .init(localIdentifier: "known", modificationDate: original.identity.modificationDate, mediaKind: mediaKind),
+                                       creationDate: original.creationDate, adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil,
+                                       pixelWidth: 10, pixelHeight: 10, duration: 0, mediaSubtypes: 0, resources: [], cloudIdentity: original.cloudIdentity)
+        client.assets[id.uuidString] = try .init(id: id, ownerId: #require(UUID(uuidString: continuityScope().userID)), type: kind == .video ? "VIDEO" : "IMAGE", isTrashed: false,
+                                                 isOffline: false, isEdited: false, checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
+        let pair: PhotoBackupRawJPEGSource? = if kind == .rawJPEG {
+            try PhotoBackupRawJPEGSource(originals: [
+                .init(kind: .alternatePhoto, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 10, pixelHeight: 10),
+                .init(kind: .photo, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 10, pixelHeight: 10),
+            ], hasAdjustments: false, adjustmentTime: nil)
+        } else {
+            nil
+        }
+        let source = PhotoBackupSource(localID: "known", modifiedAt: original.identity.modificationDate, kind: kind, rawJPEG: pair)
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos).plan(
+            jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.existing == [source] && plan.allowed.isEmpty && client.savedMatches == [id: "cloud-known"])
+    }
+
+    /// kind选择缺失/歧义/版本/权限状态反例；只有ID相同不能绕过当前源和远端拥有者校验。
+    @Test(arguments: ["ambiguous", "version", "missing-metadata", "owner", "trashed", "offline", "edited", "inaccessible"])
+    @MainActor func rejectsIncompleteOrStaleServerEvidence(_ kind: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let id = addServerContinuityCandidate("known", photos: photos, client: client)
+        if kind == "ambiguous" {
+            client.records.append(client.records[0])
+        }
+        if kind == "version" {
+            photos.values["known"] = continuitySnapshot("known", created: 201, cloud: true)
+        }
+        if kind == "missing-metadata" {
+            client.records = [.init(assetID: id, value: Data(#"{"iCloudId":"cloud-known"}"#.utf8))]
+        }
+        if ["owner", "trashed", "offline", "edited"].contains(kind) {
+            client.assets[id.uuidString] = .init(id: id, ownerId: kind == "owner" ? UUID() : UUID(uuidString: continuityScope().userID)!, type: "IMAGE",
+                                                 isTrashed: kind == "trashed", isOffline: kind == "offline", isEdited: kind == "edited",
+                                                 checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
+        }
+        if kind == "inaccessible" {
+            client.assets = [:]
+        }
+        let source = continuitySource("known", modified: 200)
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos).plan(
+            jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.existing.isEmpty && plan.allowed.isEmpty && plan.review == [source] && client.savedMatches.isEmpty)
+    }
+
+    /// mode模拟元数据保存失败、账号退役或本机修改；实际等待后的变化不能发布已匹配或授权上传。
+    @Test(arguments: ["write", "account", "source"])
+    @MainActor func refusesUnconfirmedWritesAndLateContext(_ mode: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        _ = addServerContinuityCandidate("known", photos: photos, client: client)
+        client.rejectWrites = mode == "write"
+        var current = true
+        client.onAsset = {
+            if mode == "account" {
+                current = false
+            }
+            if mode == "source" {
+                photos.values["known"] = continuitySnapshot("known", created: 201, cloud: true)
+            }
+        }
+        await #expect(throws: (any Error).self) {
+            try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos).plan(
+                jobs: [.init(source: continuitySource("known", modified: 200))], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {
+                    guard current else { throw LibraryWriteError.changedAccount }
+                }
+            )
+        }
+        #expect(client.savedMatches.isEmpty)
+    }
+
+    /// 超过两批的本机元数据/远端标记保持64项边界，无SHA1或原片读入口；同源匹配状态不重排为自动尾队列。
+    @Test(.timeLimit(.minutes(1))) @MainActor func savesOnlyCompleteBoundedMatchBatches() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let jobs = (0 ..< 130).map { index -> PhotoBackupJob in
+            let name = "server-\(index)"
+            _ = addServerContinuityCandidate(name, photos: photos, client: client)
+            return .init(source: continuitySource(name, modified: 200))
+        }
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos).plan(
+            jobs: jobs, scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.existing.count == 130 && plan.allowed.isEmpty && client.matchBatchSizes == [64, 64, 2])
+        #expect(client.savedMatches.count == 130 && client.batches.isEmpty)
+    }
+}
+
+/// name绑定合成云标识、完整官方元组和独立fresh资产；返回真实候选UUID，不创建Photos资源或原片文件。
+@MainActor private func addServerContinuityCandidate(_ name: String, photos: ContinuityPhotos, client: ContinuityQueries) -> UUID {
+    let id = UUID()
+    photos.values[name] = continuitySnapshot(name, created: 200, cloud: true)
+    client.records.append(.init(assetID: id, value: Data(#"{"iCloudId":"cloud-\#(name)","createdAt":"1970-01-01T00:03:20Z"}"#.utf8)))
+    client.assets[id.uuidString] = .init(id: id, ownerId: UUID(uuidString: continuityScope().userID)!, type: "IMAGE", isTrashed: false,
+                                         isOffline: false, isEdited: false, checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
+    return id
+}
+
 /// 创建独占临时根目录URL；每例在实际异步任务退役后删除，不读取用户应用目录。
 private nonisolated func continuityRoot() -> URL {
     FileManager.default.temporaryDirectory.appending(path: "Continuity-\(UUID())")
@@ -308,6 +453,12 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
     var incomplete = false
     var associatedCloud: String?
     var onQuery: (@MainActor () -> Void)?
+    var records: [LocalMediaRemoteMetadataRecord] = []
+    var assets: [String: LocalMediaRemoteAsset] = [:]
+    var savedMatches: [UUID: String] = [:]
+    var rejectWrites = false
+    var matchBatchSizes: [Int] = []
+    var onAsset: (@MainActor () -> Void)?
     /// queries逐批记录；可模拟完整未命中、协议缺项或网络失败，不返回任何上传许可。
     @MainActor func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
         if queries.isEmpty {
@@ -328,8 +479,27 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
 
     /// cloudIDs是本轮真正新源；返回mobile-app已有关系，或完整空结果，不访问任何媒体。
     @MainActor func localMediaMetadata(cloudIDs _: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
+        if !records.isEmpty {
+            return records
+        }
         guard let associatedCloud else { return [] }
         return [.init(assetID: UUID(), value: Data("{\"iCloudId\":\"\(associatedCloud)\"}".utf8))]
+    }
+
+    /// id必须属于合成候选；返回独立详情或明确不可读，不提供媒体。
+    @MainActor func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
+        onAsset?()
+        guard let value = assets[id] else { throw LocalMediaCandidateError.inaccessible }
+        return value
+    }
+
+    /// matches记录待写的真实候选身份；可模拟服务拒绝，以检查未确认写入不会发布已匹配状态。
+    @MainActor func recordICloudMatches(_ matches: [UUID: String]) async throws {
+        if rejectWrites {
+            throw URLError(.cannotConnectToHost)
+        }
+        matchBatchSizes.append(matches.count)
+        savedMatches.merge(matches) { _, new in new }
     }
 }
 

@@ -63,7 +63,7 @@ import Photos
     private(set) var configuringAutomatic = false
     /// 当前列表可恢复上限与跳过原因；实际继续前仍重新读取SQLite和完整保存相簿规则。
     private(set) var unattemptedSummary = PhotoBackupUnattemptedSummary(jobs: [])
-    private(set) var continuityStatus = "先导入官方 Immich 备份记录，再核查已有项目。"
+    private(set) var continuityStatus = "先核对 Immich 已有项目；旧备份记录可选导入，无需下载原片来匹配。"
 
     /// 只暴露当前已加载、无草稿且没有备份/配置写入的门禁，不向组织页面传递账号凭据或私有存储。
     func hasCurrentSavedSelection(using manager: LibraryManagementController) -> Bool {
@@ -553,7 +553,7 @@ import Photos
         })
         try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
         try plan.validate(sources: Set(queued.map(\.source)))
-        continuityStatus = "服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，待核查 \(plan.review.count) 项。"
+        continuityStatus = "已匹配服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，备份未确认 \(plan.review.count) 项。"
         return plan
     }
 

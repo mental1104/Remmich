@@ -41,7 +41,7 @@ struct PhotoBackupView: View {
                             Task { await backup.stopManually(using: controller) }
                         }
                     } else {
-                        Button("导入 Immich 备份记录") { importsHistory = true }
+                        Button("导入旧备份记录（可选）") { importsHistory = true }
                             .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil)
                         Button("重新读取备份队列") {
                             guard queueReadTask == nil else { return }
@@ -123,7 +123,7 @@ struct PhotoBackupView: View {
                     Section("当前账户队列（\(backup.jobs.count) 项）") {
                         ForEach(Array(backup.jobs.prefix(visibleJobs).enumerated()), id: \.element.id) { index, job in
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("第 \(index + 1) 项 · \(job.source.kind.rawValue) · \(job.stage.rawValue)")
+                                Text("第 \(index + 1) 项 · \(job.source.kind.rawValue) · \(stateTitle(for: job))")
                                 if let reason = job.failure {
                                     Text(reason.message).font(.footnote).foregroundStyle(.secondary)
                                 }
@@ -195,6 +195,17 @@ struct PhotoBackupView: View {
             }
         }
         .interactiveDismissDisabled(backup.running && !backup.automaticRunning)
+    }
+
+    /// job为当前账号持久任务；仅转换本轮匹配/未确认状态，避免把匹配依据展示为一次上传成功。
+    private func stateTitle(for job: PhotoBackupJob) -> String {
+        if job.stage == .existing {
+            return "已匹配（服务器已有）"
+        }
+        if job.failure == .historyNeedsReview || job.failure == .historyUnconfirmed {
+            return "已跳过（备份未确认）"
+        }
+        return job.stage.rawValue
     }
 
     /// 首次打开和明确重读共用现有load；同页只允许一次读取，不与扫描/上传或管理写入重叠。

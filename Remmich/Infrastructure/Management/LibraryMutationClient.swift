@@ -286,6 +286,34 @@ final nonisolated class LibraryMutationClient: Sendable {
         }
     }
 
+    /// matches按服务端UUID关联完整iCloud ID，最多64项；仅写本客户端独立匹配依据，不覆盖mobile-app或上传回执。
+    /// 返回前验证数据库返回的每项身份和值；失败或取消不得当作本机已保存匹配，重复调用使用相同语义值。
+    @concurrent func recordICloudMatches(_ matches: [UUID: String]) async throws {
+        guard matches.count <= 64, matches.keys.allSatisfy({ $0.uuid.6 >> 4 == 4 && $0.uuid.8 & 0xC0 == 0x80 }),
+              matches.values.allSatisfy({ LocalMediaMobileMetadata.isUsableCloudID($0) && $0.utf8.count <= 4096 }) else { throw LocalPhotoChecksumError.invalidInput }
+        guard !matches.isEmpty else { return }
+        // 独立key允许未来字节证明并存；false明确本次只有ID/元数据证据，不能被当作哈希验证。
+        // 固定版本/方法和完整标识；byteVerified始终false，不接收调用方声称的字节证明。
+        struct Value: Codable, Equatable { let version: Int; let method: String; let iCloudId: String; let byteVerified: Bool }
+        // 单个已核验服务端身份及独立元数据key，不写资产内容或官方mobile-app字段。
+        struct Item: Codable { let assetId: UUID; let key: String; let value: Value }
+        // 官方批量元数据接口的完整请求信封。
+        struct Body: Encodable { let items: [Item] }
+        let key = "remmich-icloud-match"
+        let items = matches.sorted { $0.key.uuidString < $1.key.uuidString }.map {
+            Item(assetId: $0.key, key: key, value: .init(version: 1, method: "icloud-id", iCloudId: $0.value, byteVerified: false))
+        }
+        let data = try await send("PUT", ["assets", "metadata"], body: JSONEncoder().encode(Body(items: items)), expectedStatus: 200)
+        guard data.count <= 262_144 else { throw LibraryWriteError.malformedResponse }
+        let returned = try JSONDecoder().decode([Item].self, from: data)
+        guard returned.count == items.count, Set(returned.map(\.assetId)) == Set(matches.keys) else { throw LibraryWriteError.malformedResponse }
+        for item in returned {
+            guard item.key == key, let cloud = matches[item.assetId],
+                  item.value == Value(version: 1, method: "icloud-id", iCloudId: cloud, byteVerified: false) else { throw LibraryWriteError.malformedResponse }
+        }
+        try Task.checkCancellation()
+    }
+
     /// cloudIDs为本机已读到的完整Photos标识；只读取官方同步元数据，不请求任何媒体、不reset也不提交ack。
     /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
     @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
