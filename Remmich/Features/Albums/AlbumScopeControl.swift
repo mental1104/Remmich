@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// 保留原生分段控件及其选择身份，按SwiftUI当前缩放字号更新文字，不使用全局UIKit appearance。
+/// 保留原生分段控件及其选择身份，按当前语言和缩放字号更新文字，不使用全局UIKit appearance。
 struct AlbumScopeControl: UIViewRepresentable {
     @Binding var selection: AlbumScope
     let fontSize: CGFloat
@@ -9,22 +9,31 @@ struct AlbumScopeControl: UIViewRepresentable {
     /// fontSize为当前窗口缩放后的点数；返回等宽segment所需宽度，预留每段两侧16点避免压缩标题。
     static func requiredWidth(fontSize: CGFloat) -> CGFloat {
         let font = UIFont.systemFont(ofSize: fontSize, weight: .medium)
-        let titleWidth = AlbumScope.allCases.map { ($0.rawValue as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        let titleWidth = AlbumScope.allCases.map { (L10n.string($0.rawValue) as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         return ceil((titleWidth + 32) * CGFloat(AlbumScope.allCases.count))
     }
 
     /// context绑定协调器；创建一次原生控件，后续尺寸/字号变化只更新属性，不替换选择或导航状态。
     func makeUIView(context: Context) -> UISegmentedControl {
-        let control = UISegmentedControl(items: AlbumScope.allCases.map(\.rawValue))
+        let control = UISegmentedControl(items: AlbumScope.allCases.map { L10n.string($0.rawValue) })
         control.accessibilityIdentifier = "albums-scope"
-        control.accessibilityLabel = "Album Scope"
+        control.accessibilityLabel = L10n.string("Album Scope")
         control.addTarget(context.coordinator, action: #selector(Coordinator.selectionChanged(_:)), for: .valueChanged)
         return control
     }
 
-    /// control为当前实例，context提供最新binding与启用状态；只按当前字体/selection刷新，不读写服务器。
+    /// control为当前实例，context提供语言/binding/启用状态；按本地化标题和字体刷新，不读写服务器。
     func updateUIView(_ control: UISegmentedControl, context: Context) {
+        _ = context.environment.locale.identifier
         context.coordinator.selection = $selection
+        control.accessibilityLabel = L10n.string("Album Scope")
+        for (index, scope) in AlbumScope.allCases.enumerated() {
+            let title = L10n.string(scope.rawValue)
+            if control.titleForSegment(at: index) != title {
+                control.setTitle(title, forSegmentAt: index)
+                control.invalidateIntrinsicContentSize()
+            }
+        }
         control.selectedSegmentIndex = AlbumScope.allCases.firstIndex(of: selection) ?? 0
         control.isEnabled = context.environment.isEnabled
         if (control.titleTextAttributes(for: .normal)?[.font] as? UIFont)?.pointSize != fontSize {

@@ -34,7 +34,10 @@ final class SearchAcceptanceUITests: XCTestCase {
         element("my-language", in: app).tap()
         XCTAssertTrue(element("app-language-picker", in: app).waitForExistence(timeout: 5))
         capture("profile-language-chinese", app: app)
-        app.staticTexts["English"].tap()
+        // inline Picker把选项公开为可选按钮，而非独立StaticText；通过可交互选项执行真实切换。
+        let english = app.buttons["English"]
+        XCTAssertTrue(english.waitForExistence(timeout: 5))
+        english.tap()
         XCTAssertTrue(tabs.buttons["Me"].waitForExistence(timeout: 5))
         XCTAssertTrue(tabs.buttons["Me"].isSelected)
         XCTAssertTrue(element("app-language-settings", in: app).exists)

@@ -2,6 +2,8 @@
 
 ## Unified Me tab and application language, 2026-11-26
 
+Run45778668246 on e69d234 compiles and passes API98/24, resource/preference/navigation tests and all15 backup/matching suites. The iPhone profile/library navigation case passes. The Chinese language-switch case reaches the language page but targets a StaticText instead of the inline Picker option's Button; the locator is corrected without bypassing the real selection. A legacy Live-state assertion now accepts the selected language while retaining behavior checks. Full App still reports crop/batch/Steam failures plus an invalidated test-session exception; final two-device results and the follow-up head remain unverified. String presentation now observes the shared language preference, and UIKit album-scope titles refresh in place without changing selection.
+
 First UI run45777358192 on1ace237 passes formatting/contracts but stops at app compilation: the backup settings used a title-string Section with a footer, which has no matching SwiftUI overload. Both sections now use explicit header/footer views. No tests executed in that run; the correction and conditional-label follow-up await the new head's full CI.
 
 The primary tab order is Photos, Videos, Library, Search, Me. Me remains rightmost, including timeline-range layouts. Albums and Collections share the Library tab but keep distinct navigation stacks and active-page identities. Account, backup, matching, connection, index/cache, and language settings move to Me; Library no longer hosts an expanding account overlay. Backup configuration and recovery details are separated from the current progress and primary actions. No permission, cancellation, upload admission, persistent receipt, or API contract is relaxed.

@@ -4,7 +4,7 @@ import Testing
 
 /// 使用真实Bundle文案与独立偏好，核查语言回退、插值和持久化，不改进程的全局语言。
 @Suite("App language and resources")
-struct AppLocalizationTests {
+@MainActor struct AppLocalizationTests {
     /// 系统首选列表只采用支持的语言；繁体系统也能使用现有简体资源，未知语言回退英文。
     @Test func resolvesSupportedLanguages() {
         #expect(AppLanguage.system.resolvedCode(preferredLanguages: ["zh-CN", "en-US"]) == "zh-Hans")

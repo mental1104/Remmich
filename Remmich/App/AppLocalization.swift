@@ -23,12 +23,12 @@ nonisolated enum AppLanguage: String, CaseIterable, Sendable {
     }
 }
 
-/// SwiftUI以外的文本边界；使用同一语言偏好和标准lproj资源，不翻译协议、用户标题或诊断日志。
-nonisolated enum L10n {
-    static let preferenceKey = "remmich-app-language"
+/// 界面文本边界；读取可观察语言状态，让String文案与SwiftUI字面量同步刷新，不翻译协议或用户内容。
+@MainActor enum L10n {
+    nonisolated static let preferenceKey = "remmich-app-language"
 
     /// 正式应用使用标准偏好；仅显式DEBUG验收宿主采用既有隔离suite，避免中英文用例污染其他测试。
-    static var preferenceDefaults: UserDefaults {
+    nonisolated static var preferenceDefaults: UserDefaults {
         #if DEBUG
             let process = ProcessInfo.processInfo
             if process.arguments.contains("-ui-testing-profile") || process.arguments.contains("-ui-testing-search") || process.arguments.contains("-ui-testing-search-presets"),
@@ -40,9 +40,9 @@ nonisolated enum L10n {
         return .standard
     }
 
-    /// 返回当前持久偏好；缺失或未知值按跟随系统处理。
+    /// 返回可观察的应用偏好；视图求值时跟踪selection，切换语言不依赖重建根页面。
     static var language: AppLanguage {
-        AppLanguage(rawValue: preferenceDefaults.string(forKey: preferenceKey) ?? "") ?? .system
+        AppLanguageSettings.shared.selection
     }
 
     /// 返回供独立UIHostingController与SwiftUI共同使用的语言区域。
