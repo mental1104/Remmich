@@ -1,3 +1,9 @@
+## 2026-11-28: Keep loaded day covers while incoming candidates are unavailable
+
+- 验收聚焦用户实际使用的2025年按日封面；稳定客户端快照该年31,398项服务器资产中只有54条浏览关联，未补齐项目不能把原有备份完成数冒充PhotoKit映射。未宣称全部日封面离线可用。
+- 分组封面从组内前64项及原有有界候选中优先选择已有已验证本机关联者，不扫描整库；保持原组导航及资产身份。轮播记录真正didLoad的缩略图版本，未就绪下一张跳过，保留当前图片，不再按固定时间淡出到空占位。
+- 单路Debug增量编译与签名验证通过；覆盖安装后由用户在2025日封面实际验收。未运行自动测试，完整原生Photos体验和全库关联覆盖未验收。
+
 ## 2026-11-28: Reuse validated thumbnail memory and size-bucket disk caches
 
 - 实测已有持久缓存，但本机优先请求显式disableMemoryCacheReads，且磁盘键采用每次精确像素尺寸，反复进入或尺寸轻微变化仍会重复解码/读取。现在构造thumbnail请求时先核对当前Photos权限/本机源版本，将观察绑定请求身份，仅核对成功才允许内存读取；非thumbnail、未验证源继续禁用内存读取。

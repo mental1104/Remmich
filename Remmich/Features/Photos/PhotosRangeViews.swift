@@ -1858,6 +1858,7 @@ struct PhotosRangeCard: View {
     @State private var coverScales: [String: Double] = [:]
     @State private var coverOpacities: [String: Double] = [:]
     @State private var loadedRevision: UInt64?
+    @State private var readyCoverRevisions: [String: Date] = [:]
     @State private var slideshowLifetime = PhotosRangeCardSlideshowLifetime()
 
     private var currentAsset: TimelineAssetSummary? {
@@ -1902,6 +1903,7 @@ struct PhotosRangeCard: View {
                                         descriptor: descriptor,
                                         cacheType: $0.cacheType
                                     )
+                                    readyCoverRevisions[asset.id] = asset.thumbnailRevision
                                     imageLoaded(asset.id, $0.image)
                                 }
                             )
@@ -1989,6 +1991,7 @@ struct PhotosRangeCard: View {
             bucketIndex = 0
             currentIndex = 0
             loadedRevision = revision
+            readyCoverRevisions = [:]
         }
         if coverAssets.isEmpty {
             let batch = await loadBatch(bucketIndex)
@@ -2012,6 +2015,9 @@ struct PhotosRangeCard: View {
         let durationScale = max(0.1, motion.durationScale)
         var timeBeforeFadeOut = TimelineCoverAnimation.initialHold * durationScale
         var shouldStartCurrentZoom = true
+        var candidateIndex = currentIndex
+        var candidateBucket = bucketIndex
+        var candidateBatch = coverAssets
         while !Task.isCancelled {
             withTransaction(transaction) {
                 incomingAsset = nil
@@ -2020,19 +2026,20 @@ struct PhotosRangeCard: View {
             }
             guard !reduceMotion, motion.rotates else { return }
 
-            var nextBatch = coverAssets
-            var nextBucket = bucketIndex
-            var nextIndex = currentIndex + 1
-            if nextIndex >= coverAssets.count {
+            var nextBatch = candidateBatch
+            var nextBucket = candidateBucket
+            var nextIndex = candidateIndex + 1
+            if nextIndex >= candidateBatch.count {
                 nextIndex = 0
                 if bucketIDs.count > 1 {
-                    nextBucket = (bucketIndex + 1) % bucketIDs.count
+                    nextBucket = (candidateBucket + 1) % bucketIDs.count
                     nextBatch = await loadBatch(nextBucket)
                     guard !Task.isCancelled else { return }
                 }
             }
             guard nextBatch.indices.contains(nextIndex) else { return }
             let next = nextBatch[nextIndex]
+            candidateIndex = nextIndex; candidateBucket = nextBucket; candidateBatch = nextBatch
             guard next.id != currentAsset?.id else { return }
             withTransaction(transaction) {
                 incomingAsset = next
@@ -2050,6 +2057,12 @@ struct PhotosRangeCard: View {
             do {
                 try await Task.sleep(for: .seconds(timeBeforeFadeOut))
             } catch { return }
+            // 轮播不能把已显示图片淡出到未加载的占位图；短暂等候后跳过未就绪候选。
+            for _ in 0 ..< 10 where readyCoverRevisions[next.id] != next.thumbnailRevision {
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            guard readyCoverRevisions[next.id] == next.thumbnailRevision else { continue }
             if let currentAsset {
                 withAnimation(.linear(duration: TimelineCoverAnimation.fadeDuration * durationScale)) {
                     coverOpacities[currentAsset.id] = 0
