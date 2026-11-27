@@ -182,7 +182,8 @@ nonisolated struct TimelineSemanticProjection: Sendable {
     }
 
     func window(catalog: TimelineSemanticCatalog, focusAssetIndex: Int, size: CGSize,
-                isPhone: Bool, requestedRange: Range<Int>? = nil, scenes: ResolvedTimelineScenes? = nil) -> Self
+                isPhone: Bool, requestedRange: Range<Int>? = nil, scenes: ResolvedTimelineScenes? = nil,
+                selectItems: ((Range<Int>) -> [Item])? = nil) -> Self
     {
         let count = catalog.count(at: scale)
         guard count > 0, !items.isEmpty else { return self }
@@ -213,7 +214,7 @@ nonisolated struct TimelineSemanticProjection: Sendable {
                 range = first.range.lowerBound ..< last.range.upperBound
             }
         }
-        return Self(scale: scale, nodeRange: range, items: items.filter {
+        return Self(scale: scale, nodeRange: range, items: selectItems?(range) ?? items.filter {
             $0.isHeader ? $0.assetRange.overlaps(range) : range.contains($0.nodeIndex)
         }, height: height)
     }

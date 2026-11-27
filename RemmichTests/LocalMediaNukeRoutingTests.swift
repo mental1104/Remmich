@@ -9,6 +9,25 @@ import UIKit
 /// 真实恢复/匹配Controller→MediaLibraryController→Nuke链；仅替换Photos/远端metadata/字节来源，不复制路由算法。
 @Suite("Local media Nuke routing", .serialized)
 @MainActor struct LocalMediaNukeRoutingTests {
+    /// 详情专用原图入口优先Photos/iCloud，miss才交给现有鉴权远端管线。
+    @Test(arguments: [true, false])
+    func viewerOriginalPrefersPhotosThenFallsBack(_ localOriginal: Bool) async throws {
+        let fixture = try await routingFixture()
+        defer { fixture.close() }
+        fixture.reader.returnsOriginal = localOriginal
+        let asset = TimelineAssetSummary(id: fixture.assetID, ownerID: "synthetic-owner", capturedAt: routingRevision,
+                                         uploadedAt: routingRevision, localOffsetHours: 0, mediaKind: .image,
+                                         durationMilliseconds: nil, aspectRatio: 1.5, isFavorite: false, visibility: .timeline,
+                                         livePhotoVideoID: nil, stack: nil, projectionType: nil, thumbhash: nil,
+                                         thumbnailRevision: routingRevision)
+        let request = try #require(fixture.media.viewerOriginalRequest(for: asset))
+        let pipeline = try #require(fixture.media.pipeline)
+        let result = try await pipeline.imageTask(with: request).response
+        #expect(result.image.size == (localOriginal ? CGSize(width: 3, height: 2) : CGSize(width: 11, height: 7)))
+        #expect(fixture.reader.originalReads == 1 && fixture.reader.imageReads == 0)
+        #expect(fixture.loader.requests.count == (localOriginal ? 0 : 1))
+    }
+
     /// 丢弃内存后仍从展示磁盘缓存读；Photos源版本变化后必须重新读取。
     @Test func localThumbnailSurvivesMemoryEvictionAndInvalidatesWithSource() async throws {
         let fixture = try await routingFixture()
@@ -395,10 +414,18 @@ private actor RoutingRemote: LocalMediaMatchingReading {
     let gate = RoutingGate()
     var holdImage = false
     var thumbnailVersion: String?
+    var returnsOriginal = false
+    private(set) var originalReads = 0
     var holdVideo = false
     private(set) var imageReads = 0
     private(set) var videoReads = 0
     private(set) var lastPixels: MediaPixelSize?
+    func original(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage? {
+        try Task.checkCancellation(); try validateContext()
+        originalReads += 1
+        return returnsOriginal ? local : nil
+    }
+
     func thumbnailSourceVersion(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
         try Task.checkCancellation(); try validateContext()
         return thumbnailVersion

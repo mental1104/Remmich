@@ -6,6 +6,38 @@ import Testing
 /// 真实LibraryMutationClient/URLSession字节边界；只替换HTTP协议来源，不复制decoder或绕过鉴权/请求构造。
 @Suite("Local media metadata HTTP sequence")
 @MainActor struct LocalMediaMetadataHTTPTests {
+    /// 批量浏览恢复必须走有鉴权的标准身份OR过滤；额外ID、重复项和截断分页均不能保存为关联证据。
+    @Test(arguments: ["ok", "foreign", "duplicate", "cursor"])
+    func batchAssetEvidenceRejectsUnboundedOrForeignResponses(_ mode: String) async throws {
+        let id = try #require(UUID(uuidString: metadataHTTPAssetA))
+        let item: [String: Any] = ["id": mode == "foreign" ? metadataHTTPAssetB : metadataHTTPAssetA,
+                                   "ownerId": metadataHTTPAssetA, "type": "IMAGE", "isTrashed": false, "isOffline": false,
+                                   "isEdited": false, "checksum": Data(repeating: 1, count: 20).base64EncodedString(),
+                                   "updatedAt": "2026-11-27T00:00:00Z"]
+        var page: [String: Any] = ["items": mode == "duplicate" ? [item, item] : [item]]
+        if mode == "cursor" {
+            page["nextCursor"] = "unexpected-more"
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["assets": page])
+        let fixture = LocalMetadataHTTPFixture([.init(chunks: [data])])
+        defer { fixture.close() }
+        if mode == "ok" {
+            let result = try await fixture.client.localMediaAssets([id])
+            #expect(result.map(\.id) == [id])
+        } else {
+            await #expect(throws: LibraryWriteError.malformedResponse) { _ = try await fixture.client.localMediaAssets([id]) }
+        }
+        let requests = await fixture.script.requests
+        let request = try #require(requests.first)
+        #expect(requests.count == 1 && request.method == "POST" && request.url.path == "/prefix/api/search/metadata")
+        #expect(request.authorization == "Bearer synthetic-local-read")
+        let body = try #require(JSONSerialization.jsonObject(with: #require(request.body)) as? [String: Any])
+        let filter = try #require(body["filter"] as? [String: Any])
+        let branches = try #require(filter["or"] as? [[String: [String: String]]])
+        #expect(branches == [["id": ["eq": id.uuidString]]])
+        #expect(body["size"] as? Int == 2 && body["withExif"] as? Bool == false)
+    }
+
     /// 官方JSONL envelope/ack形状保持完整opaque ID和重复候选；只读GET→POST，绝不reset/ACK/读取媒体。
     @Test(arguments: [false, true]) func fullGoldenStreamUsesOnlyFixedReadSequence(_ fullIndex: Bool) async throws {
         let fixture = LocalMetadataHTTPFixture([

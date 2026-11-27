@@ -1628,3 +1628,11 @@
 "照片同步的已验证匹配同时用于本机浏览，无需单独扫描；未匹配的新照片继续查重后备份。" = "Verified sync matches also enable local browsing, without a separate scan. New unmatched photos are checked for duplicates before backup.";
 "使用照片同步的匹配结果，无需单独扫描。" = "Using verified photo sync matches. No separate scan is needed.";
 "本机浏览设置暂未保存；照片同步队列保留。" = "Local browsing settings could not be saved. The photo sync queue is kept.";
+
+/* Offline browsing restoration */
+"正在补齐已完成项目的离线浏览关联；不会重新备份或下载原片。" = "Restoring offline browsing links for completed items. No originals will be downloaded or backed up again.";
+"离线浏览关联已保存 %lld 项，已检查 %lld / %lld；备份完成记录保持不变。" = "Saved %lld offline browsing links; checked %lld / %lld. Completed backup records are unchanged.";
+"本轮关联检查完成，已保存 %lld 项可离线浏览映射；未确认项目仍保留服务器显示，备份记录不变。" = "Link checks finished. Saved %lld offline browsing links; unconfirmed items keep server display. Backup records are unchanged.";
+"离线浏览关联补齐已暂停；已保存部分可离线使用，备份完成记录保持不变。" = "Offline link restoration paused. Saved links work offline; completed backup records are unchanged.";
+"离线浏览关联补齐已暂停；回到前台后从已保存进度继续。" = "Offline link restoration paused. Return to the app to continue from saved progress.";
+"已保留离线浏览映射；每张照片由PhotoKit核对当前权限和版本，不依赖服务器重新匹配。" = "Offline links are preserved. PhotoKit checks each photo’s current permission and version without matching against the server again.";

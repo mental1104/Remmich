@@ -612,6 +612,16 @@ import Photos
         try await store.loadPhotoSyncAssociations(scope: scope)
     }
 
+    /// 只读历史完成记录用于补齐浏览映射；不recover、requeue或改写任何任务回执。
+    func completedDisplayJobs(scope: MediaAccountScope) async throws -> [PhotoBackupJob] {
+        let journal = try await store.loadPhotoBackups(scope: scope)
+        return await Self.completedDisplayJobs(journal.jobs)
+    }
+
+    @concurrent private static func completedDisplayJobs(_ jobs: [PhotoBackupJob]) async -> [PhotoBackupJob] {
+        jobs.filter { $0.stage == .existing || $0.stage == .completed }
+    }
+
     func cacheMatchingAssociations(_ values: [LocalMediaAssociation], scope: MediaAccountScope) async throws {
         try await store.cachePhotoSyncAssociations(values, scope: scope)
     }

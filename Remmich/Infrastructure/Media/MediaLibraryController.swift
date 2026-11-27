@@ -150,6 +150,9 @@ final class MediaLibraryController {
             guard let backups else { throw CancellationError() }
             try await backups.cacheMatchingAssociations(values, scope: scope)
         }
+        localMediaMatches.completedBackupLoader = { [weak backups = photoBackups] scope in
+            try await backups?.completedDisplayJobs(scope: scope) ?? []
+        }
         let startedAt = Date()
         let nextScope = MediaAccountScope(session: session)
         if scope != nextScope {
@@ -405,9 +408,9 @@ final class MediaLibraryController {
 
     /// descriptor限定展示版本/规格；只为已确认关联创建本机优先请求，original及视频文件下载仍走原通道。
     private func localPhotoImageRequest(for descriptor: MediaRequestDescriptor, priority: ImageRequest.Priority,
-                                        useSavedPhotos: Bool) -> ImageRequest?
+                                        useSavedPhotos: Bool, viewerOriginal: Bool = false) -> ImageRequest?
     {
-        guard [.thumbnail, .preview, .fullSize].contains(descriptor.derivative), let scope, let pipeline,
+        guard [.thumbnail, .preview, .fullSize].contains(descriptor.derivative) || (viewerOriginal && descriptor.derivative == .original), let scope, let pipeline,
               localMediaMatches.enabled else { return nil }
         let association = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt)
         guard association != nil || (priority != .low && management.client != nil) else { return nil }
@@ -501,7 +504,9 @@ final class MediaLibraryController {
                     return cached
                 }
             }
-            let image: UIImage? = if descriptor.derivative == .thumbnail {
+            let image: UIImage? = if descriptor.derivative == .original {
+                try await localPhotoReader.original(for: association.localIdentity, validateContext: validate)
+            } else if descriptor.derivative == .thumbnail {
                 try await localPhotoReader.thumbnail(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
             } else {
                 try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
@@ -809,6 +814,13 @@ final class MediaLibraryController {
             derivative: .original,
             targetPixels: nil
         )
+    }
+
+    /// 仅当前详情图允许Photos/iCloud原图读取；网格、通用导出和备份不经过这个入口。
+    func viewerOriginalRequest(for asset: TimelineAssetSummary) -> ImageRequest? {
+        let descriptor = Self.viewerOriginalDescriptor(for: asset)
+        return localPhotoImageRequest(for: descriptor, priority: .high, useSavedPhotos: true, viewerOriginal: true)
+            ?? imageRequest(for: descriptor, priority: .high)
     }
 
     func beginViewerSession(id: UUID) {
@@ -1347,6 +1359,7 @@ final class MediaLibraryController {
     }
 
     func handleBackgroundTransition() {
+        localMediaMatches.pauseCompletedAssociationRecovery()
         photoBackups.automaticConditionsChanged(using: management, scope: scope, active: false)
         photoBackupAlbumAutomation.conditionsChanged(using: management, scope: scope, active: false)
         Self.logger.info("App backgrounded; cancelling preload and releasing timeline pins")
@@ -1358,6 +1371,8 @@ final class MediaLibraryController {
     }
 
     func handleForegroundTransition() {
+        localMediaMatches.resumeCompletedAssociationRecovery()
+        localMediaMatches.restoreAndRefresh(using: management, scope: scope)
         guard let targetPixels = lastTimelineTargetPixels else { return }
         Self.logger.info("App foregrounded; rebuilding timeline residency")
         updateTimelineResidency(lastTimelinePlan, targetPixels: targetPixels)

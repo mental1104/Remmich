@@ -84,11 +84,14 @@ nonisolated enum TimelineSceneGeometry {
         }
         var days: [Day] = []
         var byIndex: [Int: TimelineSemanticProjection.Item] = [:]
+        byIndex.reserveCapacity(scenes.coverByMember.count)
         for item in original.items {
             if item.isHeader {
                 days.append(.init(header: item, cells: []))
             } else {
-                byIndex[item.nodeIndex] = item
+                if scenes.coverByMember[item.nodeIndex] != nil {
+                    byIndex[item.nodeIndex] = item
+                }
                 if !days.isEmpty {
                     days[days.count - 1].cells.append(item)
                 }
@@ -102,8 +105,11 @@ nonisolated enum TimelineSceneGeometry {
         let side = TimelineGridMetrics.itemWidth(rowWidth: size.width, columns: columns, spacing: spacing, horizontalInset: inset)
         var y = TimelineSemanticProjection.topPadding
         var output: [TimelineSemanticProjection.Item] = []
+        // 折叠/展开只重排已有成员；按完整上限预留，避免逐日拼接反复扩容拷贝整库。
+        output.reserveCapacity(original.items.count)
         for day in days {
             var cells: [TimelineSemanticProjection.Item] = []
+            cells.reserveCapacity(day.cells.count)
             var affected = false
             for item in day.cells {
                 if let cover = scenes.coverByMember[item.nodeIndex] {
@@ -123,7 +129,9 @@ nonisolated enum TimelineSceneGeometry {
             if !affected {
                 // 未受场景影响的日期保留原生未填满首行的槽位，只平移前面日期高度变化。
                 let delta = y - day.header.frame.maxY
-                output += cells.map { moving($0, to: $0.frame.offsetBy(dx: 0, dy: delta)) }
+                for cell in cells {
+                    output.append(moving(cell, to: cell.frame.offsetBy(dx: 0, dy: delta)))
+                }
                 y = (output.last?.frame.maxY ?? y) + spacing
                 continue
             }

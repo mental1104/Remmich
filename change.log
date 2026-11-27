@@ -1,3 +1,20 @@
+## 2026-11-27: Persist completed photo links for offline PhotoKit browsing
+
+- 用户指出八万多条备份匹配仍不能离线浏览。设备最近快照里 88,525 existing + 8 completed，而共享浏览关联仅4项：旧完成阶段没有完整保留 remote UUID → Photos localIdentifier / 源版本映射，不能把完成数当成本机关联数。
+- 前台在线时只读已完成任务，过滤已保存映射后，读取一次完整 metadata 流，每批最多64项 PhotoKit 元数据与标准 POST /search/metadata 身份OR过滤，fresh检查owner/类型/trash/offline/edited/版本/SHA1。完成上传且有原始checksum回执的项可复用其远端UUID证明。每批只保存独立浏览映射，不requeue、不改变完成回执、不下载原片、不上传、不写服务器。未确认项目明确保留服务器显示。
+- 元数据JSON解析移到并发执行器；批次间让出CPU，统一同步页显示补齐进度。离开前台暂停，返回前台从已保存映射继续；不宣称 iOS 会在后台一直跑完全库。映射已保存后离线读取不需服务器，直接由PhotoKit核对授权及当前源版本。
+- 共享模式的照片库通知不再清空所有浏览映射或把空关联写回配置；撤销旧在途写许可，按需从共享存储离线恢复，每张图仍由reader实际核权/核源。独立旧扫描模式的保守失效策略保留。
+- 同步页按管理通道代际重读，等待被取消的旧读取退役后再发布当前账号记录，避免离线→在线时累计数停在0。
+- 两份既有13:12/13:23日志都是watchdog（0x8BADF00D），堆栈位于SceneGeometry/完整投影；补充输出数组容量预留、仅索引分组成员、逐项追加，以及后台外观变化延迟到前台重建。只确认这两份日志的原因，不推断其他退出。
+- 最终真机arm64 Debug增量编译通过（Xcode27.2、Remmich、-jobs1，依赖/缓存/签名复用），双语strings语法与diff检查通过。最新离线修复尚未安装；按用户晚间再体验的安排保存签名安装包。自动测试按用户要求未运行，旧记录全量补齐、离线PhotoKit、真实iCloud原图和滚动对比验收仍未完成，不声明完整CI全绿。
+
+## 2026-11-27: Scroll profiling and automatic iCloud-first original viewing
+
+- 用户报告上下滚动卡顿；在 iPhone 15 Pro 实机 Time Profiler 采集 30 秒，4,699 个采样中主线程 3,570，makeProjection 680、completeProjection 643、推测性层级预热 495 个包含采样，另有明显 Core Animation 提交/绘制开销。采样只能定位热点，不等于 FPS 或完整 CPU 时间。
+- 完整投影新增按 nodeIndex 的有序索引，窗口物化二分定位并保留原 item 顺序；滚动扩窗不再扫描八万条全部 item。空闲切换预热延迟到 350ms，且只复用已有层级布局，不为推测性预热创建整库层级。实际切换仍可按需构建。
+- 选中静态图片、开场动画结束并停留 150ms 后自动请求原图；不为邻图预取原片。详情专用原图入口先核对当前账号与Photos关联，再读取Photos original（允许 iCloud、20 秒截止），miss/失败/超时后回退既有Immich原图管线。取消/账号变化不回源，网格与备份匹配仍禁止 iCloud 原片下载。
+- 单路真机 Debug 增量编译、本地签名验证、覆盖安装和启动均成功；新增详情原图优先/回退测试源，按用户要求不执行自动测试。设备窗口拖动没有传到真机，首段after采样不能作为滚动比较；已请求用户实际滑动并重新采集。真实 iCloud 原图与回退验收仍待完成，不宣称已达到原生照片体验。
+
 ## 2026-11-27: Smart search, cold progress restore and persistent display thumbnails
 
 - 普通文字搜索默认智能搜索，与当前服务端 Web 同走 POST /search/smart，保留 query/queryAssetId、language、完整 filter、withExif 和服务端分页；显式文件名/OCR 模式保留原行为。没有修改或部署服务端。

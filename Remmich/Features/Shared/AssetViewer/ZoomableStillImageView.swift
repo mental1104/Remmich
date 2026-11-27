@@ -144,7 +144,7 @@ struct ZoomableStillImageView: View {
             }
             return
         }
-        if fullResolutionRequestID != nil {
+        if fullResolutionRequestID != nil, isSelected {
             await loadFullResolutionIfRequested(with: pipeline)
             return
         }
@@ -301,12 +301,10 @@ struct ZoomableStillImageView: View {
     }
 
     private func loadFullResolutionIfRequested(with pipeline: ImagePipeline) async {
-        guard fullResolutionRequestID != nil,
+        guard fullResolutionRequestID != nil, isSelected,
               renderedSource != .original
         else { return }
-        guard let request = media.imageRequest(
-            for: MediaLibraryController.viewerOriginalDescriptor(for: asset)
-        ) else {
+        guard let request = media.viewerOriginalRequest(for: asset) else {
             fullResolutionLoadFailed("Unable to load original.")
             return
         }

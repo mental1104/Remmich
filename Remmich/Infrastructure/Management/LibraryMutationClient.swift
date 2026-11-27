@@ -222,6 +222,25 @@ final nonisolated class LibraryMutationClient: Sendable {
         return asset
     }
 
+    /// 标准metadata搜索的OR身份过滤；每批最多64项，返回完整fresh状态供离线关联恢复，不读取媒体。
+    @concurrent func localMediaAssets(_ ids: [UUID]) async throws -> [LocalMediaRemoteAsset] {
+        guard !ids.isEmpty, ids.count <= 64, Set(ids).count == ids.count else { throw LocalMediaMetadataError.invalidBatch }
+        let body: [String: Any] = ["filter": ["or": ids.map { ["id": ["eq": $0.uuidString]] }],
+                                   "size": ids.count + 1, "withExif": false, "withStacked": true]
+        struct Page: Decodable {
+            let items: [LocalMediaRemoteAsset]
+            let nextCursor: String?
+            let nextPage: String?
+        }
+        struct Result: Decodable { let assets: Page }
+        let bytes = try await send("POST", ["search", "metadata"], body: JSONSerialization.data(withJSONObject: body), expectedStatus: 200)
+        guard bytes.count <= 8_388_608 else { throw LibraryWriteError.malformedResponse }
+        let page = try JSONDecoder().decode(Result.self, from: bytes).assets
+        guard page.nextCursor == nil, page.nextPage == nil, Set(page.items.map(\.id)).count == page.items.count,
+              Set(page.items.map(\.id)).isSubset(of: Set(ids)) else { throw LibraryWriteError.malformedResponse }
+        return page.items
+    }
+
     /// 旧版仅保存备份匹配时，按当前可见资产只读补回浏览证据；不遍历整库、不更改备份任务。
     @concurrent func localPhotoDisplayEvidence(_ id: UUID) async throws -> (LocalMediaRemoteAsset, [LocalMediaRemoteCandidate]) {
         let canonical = try validID(id.uuidString)

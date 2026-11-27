@@ -53,6 +53,10 @@ struct PhotoBackupView: View {
                         LabeledContent("Uploaded or Matched") { Text(backup.unattemptedSummary.completed, format: .number) }
                         LabeledContent("Needs Review") { Text(backup.unattemptedSummary.failed + backup.unattemptedSummary.attemptedOrUnconfirmed, format: .number) }
                     }
+                    if let localMatches, localMatches.recoveringCompletedAssociations {
+                        ProgressView(value: Double(localMatches.scanned), total: Double(max(1, localMatches.total)))
+                        Text(localMatches.status).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 Section {
                     if backup.running {
@@ -153,7 +157,16 @@ struct PhotoBackupView: View {
                     Text("使用最近扫描保存的相簿排除和 iCloud 选项；更改后需重新扫描。成功回执仍会重新查重和核对配对；不自动重试未知结果。")
                 }
             }
-            .task { await reloadBackupQueue() }
+            .task(id: controller.generation) {
+                // 离线恢复过程中切换到在线通道会撤销旧读；等旧读退役后读取新代际，不能把累计进度留在0。
+                do {
+                    while loadingQueue {
+                        try await Task.sleep(for: .milliseconds(25))
+                    }
+                    try Task.checkCancellation()
+                    await reloadBackupQueue()
+                } catch { /* 新代际或页面退役会取消等待，不重排队列。 */ }
+            }
             .onChange(of: controller.generation) { _, _ in
                 queueReadTask?.cancel(); backup.cancelPageWork()
                 // Media负责自动实例的账号退役；旧页面迟到的dismiss不能取消已接管新账号的自动任务。

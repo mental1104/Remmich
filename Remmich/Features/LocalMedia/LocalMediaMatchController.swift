@@ -27,6 +27,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     private(set) var followsBackup = false
     @ObservationIgnored var backupAssociationLoader: (@MainActor (MediaAccountScope) async throws -> [LocalMediaAssociation])?
     @ObservationIgnored var backupAssociationSaver: (@MainActor ([LocalMediaAssociation], MediaAccountScope) async throws -> Void)?
+    @ObservationIgnored var completedBackupLoader: (@MainActor (MediaAccountScope) async throws -> [PhotoBackupJob])?
+    private(set) var recoveringCompletedAssociations = false
+    @ObservationIgnored private var completedRecoveryGeneration: UUID?
+    @ObservationIgnored private var completedRecoveryActive = true
     @ObservationIgnored private var activeDisplayLookups = 0
     @ObservationIgnored private var pendingDisplayLookups = Set<String>()
     @ObservationIgnored private var missedDisplayLookups: [String: ContinuousClock.Instant] = [:]
@@ -190,6 +194,9 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             if access != nil, inventory.authorization != access {
                 sourcesChanged(); return changeTask
             }
+            if enabled, followsBackup {
+                return startCompletedAssociationRecovery(using: manager)
+            }
             guard enabled, !followsBackup, automaticGeneration != manager.generation, manager.client != nil,
                   inventory.authorization == .full || inventory.authorization == .limited else { return nil }
             automaticGeneration = manager.generation
@@ -197,9 +204,13 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         }
         let run = generation; let owner = manager.generation
         let operation = Task {
+            var restored = false
             defer {
                 if generation == run {
                     task = nil
+                    if restored {
+                        _ = startCompletedAssociationRecovery(using: manager)
+                    }
                 }
             }
             do {
@@ -224,6 +235,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 }
                 permission = inventory.authorization
                 startMonitoringIfNeeded()
+                restored = true
                 guard enabled, !followsBackup, automaticGeneration != owner, manager.client != nil, permission == .full || permission == .limited else { return }
                 automaticGeneration = owner
                 task = nil
@@ -510,15 +522,23 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
     /// 同CloudID的坏metadata阻止其元数据路径；重复候选保留供领域层拒绝，每128条yield后由validateContext核验代际。
     private func metadataCandidates(_ records: [LocalMediaRemoteMetadataRecord], validateContext: @MainActor () throws -> Void) async throws -> (candidates: [String: [LocalMediaRemoteCandidate]], rejected: Int) {
+        try validateContext()
+        let result = try await Self.decodeMetadataCandidates(records)
+        try validateContext()
+        return result
+    }
+
+    @concurrent private static func decodeMetadataCandidates(_ records: [LocalMediaRemoteMetadataRecord]) async throws -> (candidates: [String: [LocalMediaRemoteCandidate]], rejected: Int) {
         var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
         var blocked = Set<String>()
         var rejected = 0
+        let decoder = JSONDecoder()
         for (index, record) in records.enumerated() {
             if index.isMultiple(of: 128) {
-                await Task.yield(); try validateContext()
+                try Task.checkCancellation()
             }
             do {
-                let metadata = try JSONDecoder().decode(LocalMediaMobileMetadata.self, from: record.value)
+                let metadata = try decoder.decode(LocalMediaMobileMetadata.self, from: record.value)
                 candidates[metadata.cloudId, default: []].append(.init(assetID: record.assetID, metadata: metadata))
             } catch {
                 guard let object = try JSONSerialization.jsonObject(with: record.value) as? [String: Any], let id = object["iCloudId"] as? String else { throw LocalMediaMetadataError.invalidMetadata }
@@ -528,7 +548,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         for id in blocked {
             candidates[id] = []
         }
-        try validateContext()
+        try Task.checkCancellation()
         return (candidates, rejected)
     }
 
@@ -574,6 +594,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         missedDisplayLookups.removeAll()
         permit.invalidate(); permit = LocalMediaSavePermit()
         task?.cancel(); task = nil; changeTask?.cancel(); changeTask = nil
+        recoveringCompletedAssociations = false
         generation = UUID(); running = false
     }
 
@@ -586,6 +607,39 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     /// Photos变化立即撤销全部旧源关联，再合并短时间通知；未授权/离线只保存失效，不偷偷请求系统权限。
     private func sourcesChanged() {
         guard enabled, let manager, let scope else { return }
+        if followsBackup {
+            // 共享映射是持久事实。撤销在途组织/匹配许可，但不因无关新增或iCloud变化清空整库。
+            // 展示reader仍逐项核对当前Photos授权、修改时间和对象观察，失效源不能命中本机缓存。
+            invalidateRun(); revision += 1
+            permission = inventory.authorization
+            access = permission == .full || permission == .limited ? permission : nil
+            if access == nil {
+                associations = [:]; publishCounts()
+            }
+            let run = generation, owner = manager.generation
+            changeTask = Task {
+                do {
+                    try await Task.sleep(for: .milliseconds(400))
+                    try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
+                    guard inventory.authorization == .full || inventory.authorization == .limited else { changeTask = nil; return }
+                    if associations.isEmpty {
+                        let saved = try await backupAssociationLoader?(scope) ?? []
+                        try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
+                        access = inventory.authorization
+                        for value in saved {
+                            accept(value)
+                        }
+                    }
+                    changeTask = nil
+                    statusMessage = "已保留离线浏览映射；每张照片由PhotoKit核对当前权限和版本，不依赖服务器重新匹配。"
+                    _ = startCompletedAssociationRecovery(using: manager)
+                } catch {
+                    guard generation == run else { return }
+                    changeTask = nil
+                }
+            }
+            return
+        }
         invalidateRun(); associations = [:]; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
         metadataFailures = 0
         permission = inventory.authorization
@@ -609,6 +663,113 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 changeTask = nil; statusMessage = "照片库已变化，旧关联失效；等待下次可用刷新。"
             }
         }
+    }
+
+    /// 旧完成记录只补浏览映射：一次metadata流、64项Photos/资产批次、逐批落盘，不重排任务、不读原片、不写服务器。
+    @discardableResult private func startCompletedAssociationRecovery(using manager: LibraryManagementController) -> Task<Void, Never>? {
+        guard !Task.isCancelled, completedRecoveryActive, enabled, followsBackup, !running, task == nil, self.manager === manager,
+              let scope, scope == manager.backupScope, let client = manager.client,
+              let loader = completedBackupLoader, let saver = backupAssociationSaver,
+              completedRecoveryGeneration != manager.generation,
+              inventory.authorization == .full || inventory.authorization == .limited else { return nil }
+        let owner = manager.generation, run = generation, permission = inventory.authorization
+        running = true; recoveringCompletedAssociations = true; access = permission
+        let validateContext: @MainActor () throws -> Void = {
+            try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: permission)
+        }
+        let operation = Task {
+            defer {
+                if generation == run {
+                    running = false; recoveringCompletedAssociations = false; task = nil
+                }
+            }
+            do {
+                let jobs = try await loader(scope)
+                try validateContext()
+                let saved = Set(associations.values.map(\.localIdentity))
+                let pending = await Self.pendingCompletedJobs(jobs, saved: saved)
+                try validateContext()
+                total = pending.count; scanned = 0
+                guard !pending.isEmpty else { completedRecoveryGeneration = owner; return }
+                statusMessage = "正在补齐已完成项目的离线浏览关联；不会重新备份或下载原片。"
+                let retry = PhotoSyncRetry(validate: validateContext, status: { [weak self] in self?.statusMessage = $0 })
+                let records = try await retry.call { try await client.localMediaMetadataSnapshot() }
+                try validateContext()
+                let decoded = try await metadataCandidates(records, validateContext: validateContext)
+                for start in stride(from: 0, to: pending.count, by: 64) {
+                    try validateContext()
+                    let batch = Array(pending[start ..< min(start + 64, pending.count)])
+                    let ids = Array(Set(batch.map(\.source.localID))).sorted()
+                    let snapshots = try await metadata.snapshots(for: ids, validateContext: validateContext)
+                    try validateContext(); try validateSnapshots(snapshots, requested: ids)
+                    let byLocal = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.identity.localIdentifier, $0) })
+                    var candidates: [UUID: (snapshot: LocalPhotoSnapshot, checksum: String?)] = [:]
+                    for job in batch {
+                        guard let snapshot = byLocal[job.source.localID], snapshot.identity == Self.displayIdentity(job.source) else { continue }
+                        if job.stage == .completed, let id = job.primaryAssetID, let checksum = job.primaryChecksum {
+                            candidates[id] = (snapshot, checksum)
+                        } else if case let .resolved(cloud) = snapshot.cloudIdentity,
+                                  case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot,
+                                                                                               candidates: decoded.candidates[cloud] ?? [])
+                        {
+                            candidates[candidate.assetID] = (snapshot, nil)
+                        }
+                    }
+                    if !candidates.isEmpty {
+                        let requested = Array(candidates.keys)
+                        let remote = try await retry.call { try await client.localMediaAssets(requested) }
+                        try validateContext()
+                        let current = try await metadata.snapshots(for: ids, validateContext: validateContext)
+                        try validateContext(); try validateSnapshots(current, requested: ids)
+                        let byCurrent = Dictionary(uniqueKeysWithValues: current.map { ($0.identity.localIdentifier, $0) })
+                        let verified = remote.compactMap { remote -> LocalMediaAssociation? in
+                            guard let candidate = candidates[remote.id],
+                                  byCurrent[candidate.snapshot.identity.localIdentifier] == candidate.snapshot else { return nil }
+                            return .verified(remote: remote, requestedID: remote.id, ownerID: scope.userID, local: candidate.snapshot.identity,
+                                             source: candidate.checksum == nil ? .mobileMetadata : .checksum, expectedChecksum: candidate.checksum)
+                        }
+                        if !verified.isEmpty {
+                            try await saver(verified, scope)
+                            try validateContext()
+                            for value in verified {
+                                accept(value)
+                            }
+                        }
+                    }
+                    scanned = min(start + 64, pending.count)
+                    statusMessage = "离线浏览关联已保存 \(metadataMatches + checksumMatches) 项，已检查 \(scanned) / \(total)；备份完成记录保持不变。"
+                    // 后台任务让出CPU给滚动/打开图片；每批已落盘，中断后只检查缺失映射。
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+                try validateContext()
+                completedRecoveryGeneration = owner
+                statusMessage = "本轮关联检查完成，已保存 \(metadataMatches + checksumMatches) 项可离线浏览映射；未确认项目仍保留服务器显示，备份记录不变。"
+            } catch {
+                guard generation == run else { return }
+                statusMessage = "离线浏览关联补齐已暂停；已保存部分可离线使用，备份完成记录保持不变。"
+            }
+        }
+        task = operation; return operation
+    }
+
+    func pauseCompletedAssociationRecovery() {
+        completedRecoveryActive = false
+        guard recoveringCompletedAssociations else { return }
+        invalidateRun(); recoveringCompletedAssociations = false
+        statusMessage = "离线浏览关联补齐已暂停；回到前台后从已保存进度继续。"
+    }
+
+    func resumeCompletedAssociationRecovery() {
+        completedRecoveryActive = true
+    }
+
+    private nonisolated static func displayIdentity(_ source: PhotoBackupSource) -> LocalPhotoIdentity {
+        .init(localIdentifier: source.localID, modificationDate: source.modifiedAt,
+              mediaKind: source.kind == .video ? .video : source.kind == .livePhoto ? .livePhoto : .image)
+    }
+
+    @concurrent private static func pendingCompletedJobs(_ jobs: [PhotoBackupJob], saved: Set<LocalPhotoIdentity>) async -> [PhotoBackupJob] {
+        jobs.filter { ($0.stage == .existing || $0.stage == .completed) && !saved.contains(displayIdentity($0.source)) }
     }
 
     /// 旧版备份事实不包含浏览关联时，只恢复屏幕需要的资产；不扫描或重排整份备份队列。
@@ -685,6 +846,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         configure(using: manager)
         guard enabled, let scope, inventory.authorization == .full || inventory.authorization == .limited else { return }
         invalidateRun(); followsBackup = true; automaticGeneration = manager.generation
+        completedRecoveryGeneration = nil
         access = inventory.authorization; permission = inventory.authorization
         let run = generation, owner = manager.generation, writePermit = permit
         let document = LocalMediaAssociationDocument(scope: scope, enabled: true, access: access, associations: Array(associations.values), followsBackup: true)

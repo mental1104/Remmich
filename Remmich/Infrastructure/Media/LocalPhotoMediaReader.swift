@@ -5,6 +5,8 @@ import UIKit
 
 /// 本机current媒体展示边界；nil仅表示当前本机不可读，取消或调用方代际错误必须抛出，不能触发旧账户回源。
 @MainActor protocol LocalPhotoMediaReading: Sendable {
+    /// 仅由当前选中图片的详情页触发，可从iCloud取原图；不供网格预取或备份匹配使用。
+    func original(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     /// 仅核对当前授权/源版本，不读取图片或联网；nil表示不能安全复用展示缓存。
     func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String?
     /// expected来自已验证关联，targetPixels为当前界面请求像素；validateContext在读取前后验证账户/页面发布权。
@@ -17,6 +19,11 @@ import UIKit
 }
 
 extension LocalPhotoMediaReading {
+    func original(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage? {
+        try Task.checkCancellation(); try validateContext()
+        return nil
+    }
+
     func thumbnailSourceVersion(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
         try Task.checkCancellation(); try validateContext()
         return nil
@@ -92,6 +99,11 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         try await readImage(for: expected, targetPixels: targetPixels, acceptsDegraded: true, validateContext: validateContext)
     }
 
+    func original(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage? {
+        try await readImage(for: expected, targetPixels: .init(width: 4096, height: 4096), acceptsDegraded: false,
+                            original: true, validateContext: validateContext)
+    }
+
     func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
         try checkContext(validateContext)
         guard let value = currentObservation(expected) else { return nil }
@@ -99,7 +111,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         return "\(expected.localIdentifier)|\(expected.modificationDate!.timeIntervalSinceReferenceDate)|\(value.adjustmentTime?.timeIntervalSinceReferenceDate ?? -1)|\(value.hasAdjustments)|\(value.pixelWidth)x\(value.pixelHeight)|\(value.duration)|\(value.mediaSubtypes)|\(value.access)"
     }
 
-    private func readImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, acceptsDegraded: Bool,
+    private func readImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, acceptsDegraded: Bool, original: Bool = false,
                            validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     {
         try checkContext(validateContext)
@@ -108,7 +120,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         try checkContext(validateContext)
         guard let before = observation else { return nil }
         let read = PhotoResourceRead<UIImage>()
-        let timer = deadline(read)
+        let timer = deadline(read, duration: original ? .seconds(20) : nil)
         defer { timer.cancel() }
         return try await withTaskCancellationHandler {
             try checkContext(validateContext)
@@ -117,10 +129,10 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                 read.begin(continuation)
                 guard !Task.isCancelled else { read.cancel(); return }
                 let options = PHImageRequestOptions()
-                options.version = .current
+                options.version = original ? .original : .current
                 options.deliveryMode = acceptsDegraded ? .opportunistic : .highQualityFormat
                 options.resizeMode = .fast
-                options.isNetworkAccessAllowed = false
+                options.isNetworkAccessAllowed = original
                 let request = driver.requestImage(for: expected, targetPixels: targetPixels, options: options) { delivery in
                     if delivery.failed {
                         read.finish(nil)
@@ -185,8 +197,8 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     }
 
     /// read为单个实际请求gate；系统无最终回调时有界取消，取消计时Task不影响已返回的媒体对象。
-    private func deadline(_ read: PhotoResourceRead<some Sendable>) -> Task<Void, Never> {
-        let duration = timeout
+    private func deadline(_ read: PhotoResourceRead<some Sendable>, duration: Duration? = nil) -> Task<Void, Never> {
+        let duration = duration ?? timeout
         return Task {
             do { try await Task.sleep(for: duration) }
             catch { return }
@@ -216,9 +228,12 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     func requestImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, options: PHImageRequestOptions,
                       result: @escaping @Sendable (LocalPhotoImageDelivery) -> Void) -> LocalPhotoMediaRequest?
     {
-        guard let asset = asset(expected), options.version == .current, !options.isNetworkAccessAllowed else { return nil }
+        guard let asset = asset(expected),
+              (options.version == .current && !options.isNetworkAccessAllowed)
+              || (options.version == .original && options.isNetworkAccessAllowed) else { return nil }
         let manager = PHImageManager.default()
-        let id = manager.requestImage(for: asset, targetSize: CGSize(width: targetPixels.width, height: targetPixels.height),
+        let size = options.version == .original ? PHImageManagerMaximumSize : CGSize(width: targetPixels.width, height: targetPixels.height)
+        let id = manager.requestImage(for: asset, targetSize: size,
                                       contentMode: .aspectFit, options: options)
         { @Sendable image, info in
             let failed = (info?[PHImageCancelledKey] as? Bool == true) || info?[PHImageErrorKey] != nil

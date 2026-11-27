@@ -555,17 +555,44 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
     private var completeProjections: [TimelineSemanticScale: CompleteProjection] = [:]
     private var resolvedScenes: ResolvedTimelineScenes?
     private var pendingSceneAnchor: (assetID: String, viewportY: CGFloat)?
+    private var deferredAppearanceRebuild = false
 
     private struct CompleteProjection {
         let projection: TimelineSemanticProjection
         let verticalItems: [Int]
+        let nodeItems: [Int]
+        let headers: [Int]
 
         init(_ projection: TimelineSemanticProjection) {
             self.projection = projection
             let indexes = projection.items.indices.filter { !projection.items[$0].isHeader }
+            headers = projection.items.indices.filter { projection.items[$0].isHeader }
+            nodeItems = indexes.sorted {
+                let left = projection.items[$0].nodeIndex, right = projection.items[$1].nodeIndex
+                return left == right ? $0 < $1 : left < right
+            }
             verticalItems = projection.scale.isAssets ? indexes : indexes.sorted {
                 projection.items[$0].frame.midY < projection.items[$1].frame.midY
             }
+        }
+
+        /// 只物化窗口内节点；滚动扩窗不能每次遍历八万条完整布局。
+        func items(in range: Range<Int>) -> [TimelineSemanticProjection.Item] {
+            func boundary(_ node: Int) -> Int {
+                var low = 0, high = nodeItems.count
+                while low < high {
+                    let middle = (low + high) / 2
+                    if projection.items[nodeItems[middle]].nodeIndex < node {
+                        low = middle + 1
+                    } else {
+                        high = middle
+                    }
+                }
+                return low
+            }
+            let matches = nodeItems[boundary(range.lowerBound) ..< boundary(range.upperBound)]
+            let visibleHeaders = headers.filter { projection.items[$0].assetRange.overlaps(range) }
+            return (Array(matches) + visibleHeaders).sorted().map { projection.items[$0] }
         }
 
         func nearest(to y: CGFloat) -> TimelineSemanticProjection.Item? {
@@ -708,11 +735,13 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
             controller.rebuildForAppearance()
         }
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(restoreDeferredAppearance), name: UIApplication.didBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(receivedMemoryWarning), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        restoreDeferredAppearance()
         scheduleStartupPhotoDisplayCheck()
     }
 
@@ -752,6 +781,11 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
     }
 
     private func rebuildForAppearance() {
+        guard UIApplication.shared.applicationState == .active, viewIfLoaded?.window != nil else {
+            deferredAppearanceRebuild = true
+            return
+        }
+        deferredAppearanceRebuild = false
         guard catalog != nil, lastSize.width > 0 else { return }
         completeProjections.removeAll()
         interrupted()
@@ -761,6 +795,11 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         install(makeProjection(scale: scale, focus: asset), focusing: asset,
                 viewportY: focus.map { $0.frame.midY - collection.contentOffset.y },
                 latest: isAtLatest, alignTop: wasAtTop && !isAtLatest)
+    }
+
+    @objc private func restoreDeferredAppearance() {
+        guard deferredAppearanceRebuild else { return }
+        rebuildForAppearance()
     }
 
     func updateFromSwiftUI(_ value: TimelineSemanticCollectionView) {
@@ -1006,9 +1045,12 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
     private func makeProjection(scale: TimelineSemanticScale, focus: Int, range: Range<Int>? = nil) -> TimelineSemanticProjection {
         let interval = Self.signposter.beginInterval("ProjectionBuild", id: Self.signposter.makeSignpostID())
         defer { Self.signposter.endInterval("ProjectionBuild", interval) }
-        return completeProjection(at: scale).window(
+        let complete = completeProjection(at: scale)
+        let indexed = completeProjections[scale]
+        return complete.window(
             catalog: catalog!, focusAssetIndex: focus, size: lastSize,
-            isPhone: traitCollection.userInterfaceIdiom == .phone, requestedRange: range, scenes: scale.isAssets ? resolvedScenes : nil
+            isPhone: traitCollection.userInterfaceIdiom == .phone, requestedRange: range, scenes: scale.isAssets ? resolvedScenes : nil,
+            selectItems: indexed.map { cache in { range in cache.items(in: range) } }
         )
     }
 
@@ -2320,7 +2362,7 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         guard transitionWarmTask == nil else { return }
         transitionWarmTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(for: .milliseconds(70))
+                try await Task.sleep(for: .milliseconds(350))
             } catch {
                 return
             }
@@ -2354,7 +2396,8 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
         }
         let adjacentDirections = scale.isAssets ? [true, false] : [false, true]
         for coarser in adjacentDirections {
-            guard let nextScale = nextPinchScale(coarser: coarser) else { continue }
+            // 推测性预热不得在主线程创建整库布局；实际切换仍按需构建目标层级。
+            guard let nextScale = nextPinchScale(coarser: coarser), completeProjections[nextScale] != nil else { continue }
             let focus = representativeIndex(focused)
             let next = makeProjection(scale: nextScale, focus: focus)
             let y = offset(for: next, focus: focus, viewportY: focused.frame.midY - collection.contentOffset.y, latest: false)

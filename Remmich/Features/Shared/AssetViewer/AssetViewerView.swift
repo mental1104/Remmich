@@ -585,6 +585,14 @@ struct AssetViewerView: View {
                 seedVideoNowPlayingArtwork()
                 await videoPlaybackSession.prepare(using: media)
             }
+            .task(id: "\(session.selectedAssetID)|\(session.selectedAsset?.thumbnailRevision.timeIntervalSinceReferenceDate ?? 0)|\(openingIsActive)|\(isDismissing)") {
+                guard !openingIsActive, !isDismissing, let asset = session.selectedAsset, asset.mediaKind != .video else { return }
+                // 只升级当前停留的单张图片；快速翻页取消，不让相邻预取下载原片。
+                do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+                guard !Task.isCancelled, !isDismissing, session.selectedAssetID == asset.id,
+                      fullResolutionRequestIDs[asset.id] == nil else { return }
+                requestFullResolution(for: asset.id)
+            }
             .onChange(of: selectedAssetDetail) {
                 updateVideoNowPlayingTitle()
             }
