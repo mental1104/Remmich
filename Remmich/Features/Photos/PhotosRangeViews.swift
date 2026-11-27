@@ -1859,6 +1859,7 @@ struct PhotosRangeCard: View {
     @State private var coverOpacities: [String: Double] = [:]
     @State private var loadedRevision: UInt64?
     @State private var readyCoverRevisions: [String: Date] = [:]
+    @State private var failedCoverRevisions: [String: Date] = [:]
     @State private var slideshowLifetime = PhotosRangeCardSlideshowLifetime()
 
     private var currentAsset: TimelineAssetSummary? {
@@ -1903,9 +1904,11 @@ struct PhotosRangeCard: View {
                                         descriptor: descriptor,
                                         cacheType: $0.cacheType
                                     )
+                                    failedCoverRevisions.removeValue(forKey: asset.id)
                                     readyCoverRevisions[asset.id] = asset.thumbnailRevision
                                     imageLoaded(asset.id, $0.image)
-                                }
+                                },
+                                didFail: { coverFailed(asset) }
                             )
                             .frame(
                                 maxWidth: .infinity,
@@ -1984,12 +1987,32 @@ struct PhotosRangeCard: View {
         return TimelineGroupedCatalogEntry.boundedCovers(from: assets)
     }
 
+    /// 初始封面失败也必须尝试候选；不依赖轮播开关、Reduce Motion或用户点击不可交互的重试按钮。
+    private func coverFailed(_ asset: TimelineAssetSummary) {
+        failedCoverRevisions[asset.id] = asset.thumbnailRevision
+        guard currentAsset?.id == asset.id, readyCoverRevisions[asset.id] != asset.thumbnailRevision else { return }
+        if coverAssets.isEmpty {
+            coverAssets = TimelineGroupedCatalogEntry.boundedCovers(from: assets)
+        }
+        guard let next = coverAssets.indices.first(where: {
+            let value = coverAssets[$0]
+            return failedCoverRevisions[value.id] != value.thumbnailRevision
+        }) else { return }
+        currentIndex = next
+        incomingAsset = nil
+        coverScales = [coverAssets[next].id: 1]
+        coverOpacities = [coverAssets[next].id: 1]
+    }
+
     private func runSlideshow() async {
         let revision = store?.rangeCoverRevision ?? 0
         if loadedRevision != revision {
             coverAssets = []
             bucketIndex = 0
             currentIndex = 0
+            if loadedRevision != nil {
+                failedCoverRevisions = [:]
+            }
             loadedRevision = revision
             readyCoverRevisions = [:]
         }

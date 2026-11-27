@@ -81,6 +81,39 @@ final class MediaLibraryController {
         }
     #endif
 
+    /// UI完成回调覆盖直接缓存/远端请求，避免只记录本机优先通路造成成功偏差。
+    func recordThumbnailUICompletion(_ result: Result<ImageResponse, Error>, descriptor: MediaRequestDescriptor) {
+        guard descriptor.derivative == .thumbnail else { return }
+        switch result {
+        case let .success(response):
+            recordThumbnailRoute(response.cacheType == .memory ? "ui.success.memory" : response.cacheType == .disk ? "ui.success.disk" : "ui.success.loaded", descriptor: descriptor)
+        case let .failure(error):
+            let category: String = if let failure = error as? ImagePipeline.Error {
+                switch failure {
+                case .cancelled: "cancelled"
+                case .dataMissingInCache: "cacheMiss"
+                case .imageRequestMissing: "missingRequest"
+                case .pipelineInvalidated: "invalidated"
+                case .decodingFailed, .decoderNotRegistered: "decode"
+                case let .dataLoadingFailed(underlying):
+                    if let loader = underlying as? DataLoader.Error, case let .statusCodeUnacceptable(code) = loader {
+                        (500 ... 599).contains(code) ? "http5xx" : (400 ... 499).contains(code) ? "http4xx" : "httpOther"
+                    } else {
+                        (underlying as NSError).code == NSURLErrorCancelled ? "cancelled" : "transportOrLocalUnavailable"
+                    }
+                default: "other"
+                }
+            } else {
+                error is CancellationError || (error as NSError).code == NSURLErrorCancelled ? "cancelled" : "other"
+            }
+            recordThumbnailRoute("ui.failure." + category, descriptor: descriptor)
+            if category != "cancelled" {
+                let linked = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) != nil
+                recordThumbnailRoute(linked ? "ui.failure.withAssociation" : activeAPIURL == nil ? "ui.failure.noAssociationOffline" : "ui.failure.noAssociationOnline", descriptor: descriptor)
+            }
+        }
+    }
+
     private var localPhotoFallbackPipeline: ImagePipeline?
     private weak var localPhotoFallbackOwner: ImagePipeline?
     private static let savedPhotosFiles = MediaExportFiles(
@@ -446,7 +479,7 @@ final class MediaLibraryController {
         return request
     }
 
-    /// descriptor限定展示版本/规格；只为已确认关联创建本机优先请求，original及视频文件下载仍走原通道。
+    /// descriptor限定展示版本/规格；已确认Photos对象使用唯一展示来源，原图需详情入口显式请求。
     private func localPhotoImageRequest(for descriptor: MediaRequestDescriptor, priority: ImageRequest.Priority,
                                         useSavedPhotos: Bool, viewerOriginal: Bool = false) -> ImageRequest?
     {
@@ -498,19 +531,7 @@ final class MediaLibraryController {
     {
         try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
         recordThumbnailRoute(saved == nil ? "request.noSavedAssociation" : "request.savedAssociation", descriptor: descriptor)
-        // 旧记录的可见关联解析可能联网；已有服务器缩略图先从本机缓存显示，不能被解析阻塞。
-        if saved == nil, descriptor.derivative == .thumbnail, var cached = fallback,
-           pipeline.cache.containsCachedImage(for: cached)
-        {
-            cached.options.insert(.returnCacheDataDontLoad)
-            if let response = try? await pipeline.imageTask(with: cached).response {
-                try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
-                recordThumbnailRoute("result.immichCacheWithoutAssociation", descriptor: descriptor)
-                recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
-                return response.container
-            }
-            try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
-        }
+        // 先确定是否有Photos对象；远端缓存不能让可见项永久跳过本机关联解析。
         let association: LocalMediaAssociation? = if let saved {
             saved
         } else {
@@ -530,7 +551,7 @@ final class MediaLibraryController {
         return response.container
     }
 
-    /// association/scope/accountGeneration固定本次读取身份；本机miss才进入既有fallback，取消/换号绝不回源。
+    /// 关联/账号代际固定读取身份；存在Photos对象时仅由Photos/iCloud提供，只有对象缺失才回源。
     /// 返回已解码图像，不把当前Photos展示图伪装成可导出的原片字节或备份回执。
     private func readLocalPhotoImage(_ association: LocalMediaAssociation, descriptor: MediaRequestDescriptor,
                                      scope: MediaAccountScope, accountGeneration: UUID,
@@ -540,6 +561,7 @@ final class MediaLibraryController {
             try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
         }
         try validate()
+        let localObject = try localPhotoReader.currentIdentity(for: association.localIdentity, validateContext: validate)
         let limit = descriptor.derivative == .thumbnail ? 1024 : descriptor.derivative == .preview ? 2048 : 4096
         let requested = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
             ?? MediaPixelSize(width: limit, height: limit)
@@ -603,7 +625,11 @@ final class MediaLibraryController {
             }
         }
         try validate()
-        recordThumbnailRoute("fallback.localMissOrInvalidated", descriptor: descriptor)
+        if localObject != nil {
+            recordThumbnailRoute("result.photoKitUnavailableNoImmichFallback", descriptor: descriptor)
+            throw URLError(.resourceUnavailable)
+        }
+        recordThumbnailRoute("fallback.photosObjectAbsent", descriptor: descriptor)
         guard let fallback else { throw URLError(.resourceUnavailable) }
         let response = try await pipeline.imageTask(with: fallback).response
         try validate()
@@ -632,8 +658,12 @@ final class MediaLibraryController {
             try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
         }
         try validate()
+        let localObject = try localPhotoReader.currentIdentity(for: association.localIdentity, validateContext: validate)
         let item = try await localPhotoReader.playerItem(for: association.localIdentity, validateContext: validate)
         try validate()
+        if localObject != nil, item == nil {
+            throw URLError(.resourceUnavailable)
+        }
         guard localMediaMatches.association(assetID: assetID, revision: revision) == association else { return nil }
         if item != nil {
             recordMediaOrigin(.devicePhotos, assetID: assetID, revision: revision)

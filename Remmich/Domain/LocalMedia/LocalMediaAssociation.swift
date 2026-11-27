@@ -108,13 +108,15 @@ nonisolated struct LocalMediaAssociation: Codable, Equatable, Sendable {
                       checksum: values.decode(String.self, forKey: .checksum), source: values.decode(Source.self, forKey: .source), displayRevision: displayRevision)
     }
 
-    /// remote必须是当前账号同一可显示对象；未知状态/服务端编辑/坏SHA1均拒绝，expectedChecksum仅用于字节匹配路径。
+    /// 默认严核原匹配状态；明确的Photos当前展示可忽略服务端编辑/离线标记，不升级成字节备份证明。
     static func verified(remote: LocalMediaRemoteAsset, requestedID: UUID, ownerID: String, local: LocalPhotoIdentity,
-                         source: Source, expectedChecksum: String? = nil) -> LocalMediaAssociation?
+                         source: Source, expectedChecksum: String? = nil, prefersCurrentPhotos: Bool = false) -> LocalMediaAssociation?
     {
         guard let owner = UUID(uuidString: ownerID), remote.id == requestedID, remote.ownerId == owner, !local.localIdentifier.isEmpty,
               let modified = local.modificationDate, modified.timeIntervalSince1970.isFinite,
-              remote.isTrashed == false, remote.isOffline == false, remote.isEdited == false,
+              remote.isTrashed == false,
+              remote.isOffline == false || (prefersCurrentPhotos && remote.isOffline == true),
+              remote.isEdited == false || (prefersCurrentPhotos && remote.isEdited == true),
               remote.type == (local.mediaKind == .video ? "VIDEO" : "IMAGE"),
               let revision = remote.updatedAt, revision.timeIntervalSince1970.isFinite,
               let checksum = remote.checksum, let bytes = Data(base64Encoded: checksum), bytes.count == 20,

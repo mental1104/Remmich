@@ -33,6 +33,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     @ObservationIgnored private var completedRecoveryActive = true
     @ObservationIgnored private var activeDisplayLookups = 0
     @ObservationIgnored private var pendingDisplayLookups = Set<String>()
+    @ObservationIgnored private var sharedDisplayLookups: [String: Task<LocalMediaAssociation?, Error>] = [:]
     @ObservationIgnored private var missedDisplayLookups: [String: ContinuousClock.Instant] = [:]
     private(set) var running = false
     private(set) var total = 0
@@ -591,6 +592,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
     /// 每次取消/路由变化撤销原子写许可；同namespace已确认关联独立保留，新的任务拿新的代际。
     private func invalidateRun() {
+        for lookup in sharedDisplayLookups.values {
+            lookup.cancel()
+        }
+        sharedDisplayLookups.removeAll()
         missedDisplayLookups.removeAll()
         permit.invalidate(); permit = LocalMediaSavePermit()
         task?.cancel(); task = nil; changeTask?.cancel(); changeTask = nil
@@ -777,11 +782,33 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         if let saved = association(assetID: assetID, revision: revision) {
             return saved
         }
+        guard enabled, self.manager === manager, let scope, manager.backupScope == scope else { return nil }
+        let key = "\(generation)|\(scope.cacheNamespace)|\(assetID.lowercased())|\(revision.timeIntervalSince1970)"
+        if let pending = sharedDisplayLookups[key] {
+            let value = try await pending.value
+            try Task.checkCancellation()
+            return value
+        }
+        guard sharedDisplayLookups.count < 64 else { return nil }
+        let lookup = Task { [weak self] in
+            try await self?.performDisplayAssociationLookup(assetID: assetID, revision: revision, using: manager)
+        }
+        sharedDisplayLookups[key] = lookup
+        defer { sharedDisplayLookups.removeValue(forKey: key) }
+        let value = try await lookup.value
+        try Task.checkCancellation()
+        return value
+    }
+
+    private func performDisplayAssociationLookup(assetID: String, revision: Date, using manager: LibraryManagementController) async throws -> LocalMediaAssociation? {
+        if let saved = association(assetID: assetID, revision: revision) {
+            return saved
+        }
         guard enabled, self.manager === manager, let scope, scope == manager.backupScope,
               let id = UUID(uuidString: assetID), let client = manager.client,
               inventory.authorization == .full || inventory.authorization == .limited else { return nil }
         let run = generation, owner = manager.generation, permission = inventory.authorization
-        let key = "\(scope.cacheNamespace)|\(id)|\(revision.timeIntervalSinceReferenceDate)"
+        let key = "\(generation)|\(scope.cacheNamespace)|\(id)|\(revision.timeIntervalSinceReferenceDate)"
         if let missed = missedDisplayLookups[key], missed.duration(to: ContinuousClock.now) < .seconds(60) {
             return nil
         }
@@ -796,7 +823,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         let validateContext: @MainActor () throws -> Void = {
             try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: permission)
         }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
         while activeDisplayLookups >= 4 {
             try validateContext()
             guard ContinuousClock.now < deadline else { return nil }
@@ -817,10 +844,9 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             var matches: [LocalMediaAssociation] = []
             for snapshot in snapshots {
                 guard case let .resolved(cloud) = snapshot.cloudIdentity, mappings[cloud] == snapshot.identity.localIdentifier,
-                      case .candidate = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot,
-                                                                    candidates: candidates.filter { $0.metadata.cloudId == cloud }),
+                      candidates.contains(where: { $0.assetID == id && $0.metadata.cloudId == cloud }),
                       let value = LocalMediaAssociation.verified(remote: remote, requestedID: id, ownerID: scope.userID,
-                                                                 local: snapshot.identity, source: .mobileMetadata) else { continue }
+                                                                 local: snapshot.identity, source: .mobileMetadata, prefersCurrentPhotos: true) else { continue }
                 matches.append(value)
             }
             guard matches.count == 1, let value = matches.first else {

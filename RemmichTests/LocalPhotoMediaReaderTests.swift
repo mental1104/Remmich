@@ -9,9 +9,9 @@ import UIKit
 /// 真实本机媒体adapter编排：只有系统请求点为合成驱动，真实gate/取消/超时/账号与版本校验均执行。
 @Suite("Local current photo and video reads")
 @MainActor struct LocalPhotoMediaReaderTests {
-    /// 图片、视频poster和LivePhoto still都用明确current、禁止网络的目标像素请求；多回调只接受第一个完整结果。
+    /// 图片、视频poster和LivePhoto still都用明确current、允许Photos从iCloud读取的目标像素请求；多回调只接受第一个完整结果。
     @Test(arguments: ["image", "video", "live"])
-    func currentImagesUseLocalOnlyOptionsAndIgnoreDegraded(_ kind: String) async throws {
+    func currentImagesUsePhotosCloudOptionsAndIgnoreDegraded(_ kind: String) async throws {
         let identity = localReadIdentity(kind == "video" ? .video : kind == "live" ? .livePhoto : .image)
         let driver = LocalReadDriver(observations: [localReadObservation(identity), localReadObservation(identity)])
         let expected = syntheticLocalImage()
@@ -22,19 +22,19 @@ import UIKit
         let value = try await reader.image(for: identity, targetPixels: pixels, validateContext: {})
         #expect(value === expected)
         #expect(driver.imageRequests == 1 && driver.videoRequests == 0)
-        #expect(driver.imageVersion == .current && driver.imageNetwork == false && driver.pixels == pixels)
+        #expect(driver.imageVersion == .current && driver.imageNetwork == true && driver.pixels == pixels)
         #expect(driver.cancellations.ids.isEmpty)
     }
 
     /// 普通视频返回Photos的播放项，保留组合/编辑表示；不要求原片URL或真实磁盘文件。
-    @Test func currentVideoReturnsPlayerItemWithoutNetwork() async throws {
+    @Test func currentVideoReturnsPhotosCloudPlayerItem() async throws {
         let identity = localReadIdentity(.video)
         let driver = LocalReadDriver(observations: [localReadObservation(identity), localReadObservation(identity)])
         let expected = AVPlayerItem(asset: AVMutableComposition())
         driver.videoReplies = [expected, nil]
         let value = try await PhotoKitLocalPhotoMediaReader(driver: driver).playerItem(for: identity, validateContext: {})
         #expect(value === expected && driver.videoRequests == 1 && driver.imageRequests == 0)
-        #expect(driver.videoVersion == .current && driver.videoNetwork == false)
+        #expect(driver.videoVersion == .current && driver.videoNetwork == true)
         #expect(driver.cancellations.ids.isEmpty)
     }
 
@@ -58,7 +58,7 @@ import UIKit
     }
 
     /// 未知expected版本/权限失效/源版本不等只返回nil，没有系统媒体请求；本机不可用不制造账号错误。
-    @Test(arguments: ["unknown-version", "permission", "changed-version"])
+    @Test(arguments: ["unknown-version", "permission"])
     func unavailableSourcesNeverStartMediaRequests(_ mode: String) async throws {
         let expected = localReadIdentity()
         let request = mode == "unknown-version" ? LocalPhotoIdentity(localIdentifier: expected.localIdentifier, modificationDate: nil, mediaKind: .image) : expected
@@ -66,6 +66,18 @@ import UIKit
         let driver = LocalReadDriver(observations: mode == "permission" ? [nil] : [observation])
         let value = try await PhotoKitLocalPhotoMediaReader(driver: driver).image(for: request, targetPixels: .init(width: 10, height: 10), validateContext: {})
         #expect(value == nil && driver.imageRequests == 0)
+    }
+
+    /// 关联建立后的Photos编辑以当前版本展示，不因旧修改时间回退到Immich。
+    @Test func newerPhotosVersionRemainsAuthoritative() async throws {
+        let expected = localReadIdentity()
+        let current = localReadIdentity(modification: 16)
+        let observation = localReadObservation(current, edited: true)
+        let driver = LocalReadDriver(observations: [observation, observation])
+        let image = syntheticLocalImage()
+        driver.imageReplies = [.init(image: image, degraded: false, failed: false)]
+        let result = try await PhotoKitLocalPhotoMediaReader(driver: driver).thumbnail(for: expected, targetPixels: .init(width: 128, height: 128), validateContext: {})
+        #expect(result === image && driver.imageNetwork == true)
     }
 
     /// 请求期间授权范围/对象/修改/编辑变化都不能发布已过期的UIImage，不能只看原请求ID。
@@ -112,7 +124,7 @@ import UIKit
         let driver = LocalReadDriver(observations: [localReadObservation(identity), localReadObservation(identity)])
         driver.imageReplies = [.init(image: nil, degraded: mode == "failed-degraded", failed: mode != "cloud-only")]
         let value = try await PhotoKitLocalPhotoMediaReader(driver: driver).image(for: identity, targetPixels: .init(width: 64, height: 48), validateContext: {})
-        #expect(value == nil && driver.imageNetwork == false)
+        #expect(value == nil && driver.imageNetwork == true)
     }
 
     /// 已取消Task在任何Photos读取前抛出，不能返回nil让旧请求继续访问Immich。

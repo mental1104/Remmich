@@ -16,6 +16,7 @@ struct ImmichThumbnail: View {
     var logoPlaceholderCaption: RemmichCoverPlaceholder.Caption?
     var animatesImageLoading = true
     var didLoad: (ImageResponse) -> Void = { _ in }
+    var didFail: () -> Void = {}
 
     @State private var retryID = 0
 
@@ -45,6 +46,10 @@ struct ImmichThumbnail: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Retry image")
+                } else if state.error != nil, isCacheOnly {
+                    Image(systemName: "icloud.slash")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Thumbnail unavailable offline")
                 } else if let logoPlaceholderCaption {
                     RemmichCoverLoadingView(caption: logoPlaceholderCaption)
                         .transition(.opacity)
@@ -62,8 +67,17 @@ struct ImmichThumbnail: View {
         .pipeline(media.pipeline ?? .shared)
         .priority(priority)
         .onCompletion { result in
-            if case let .success(response) = result {
-                didLoad(response)
+            media.recordThumbnailUICompletion(result, descriptor: descriptor)
+            switch result {
+            case let .success(response): didLoad(response)
+            case let .failure(error):
+                if let pipelineError = error as? ImagePipeline.Error, case .cancelled = pipelineError {
+                    return
+                }
+                if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                    return
+                }
+                didFail()
             }
         }
         .onDisappear(.cancel)

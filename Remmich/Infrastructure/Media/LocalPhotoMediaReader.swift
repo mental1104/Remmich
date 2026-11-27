@@ -7,6 +7,8 @@ import UIKit
 @MainActor protocol LocalPhotoMediaReading: Sendable {
     /// 仅由当前选中图片的详情页触发，可从iCloud取原图；不供网格预取或备份匹配使用。
     func original(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    /// 已确认Photos对象的当前身份；nil表示当前授权下对象不存在。
+    func currentIdentity(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> LocalPhotoIdentity?
     /// 仅核对当前授权/源版本，不读取图片或联网；nil表示不能安全复用展示缓存。
     func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String?
     /// expected来自已验证关联，targetPixels为当前界面请求像素；validateContext在读取前后验证账户/页面发布权。
@@ -19,6 +21,10 @@ import UIKit
 }
 
 extension LocalPhotoMediaReading {
+    func currentIdentity(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> LocalPhotoIdentity? {
+        try Task.checkCancellation(); try validateContext(); return expected
+    }
+
     func original(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage? {
         try Task.checkCancellation(); try validateContext()
         return nil
@@ -63,14 +69,14 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     let cancel: @Sendable () -> Void
 }
 
-/// 隔离系统读取点以测试真实reader时序；默认实现只使用公开PhotoKit，options由reader构造并禁止网络。
+/// 隔离系统读取点以测试真实reader时序；默认实现只使用公开PhotoKit，options由reader构造，仅展示可从iCloud取图。
 @MainActor protocol LocalPhotoMediaRequesting: Sendable {
     /// localIdentifier是当前设备Photos身份；返回当前公开观察，权限不足或对象消失返回nil。
     func observation(for localIdentifier: String) -> LocalPhotoMediaObservation?
-    /// expected限定当前源版本，targetPixels为界面像素，options禁止网络；任意线程多次result由上层gate收束，nil表示未启动。
+    /// expected限定当前源版本，targetPixels为界面像素，options由展示策略允许iCloud；任意线程多次result由上层gate收束，nil表示未启动。
     func requestImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, options: PHImageRequestOptions,
                       result: @escaping @Sendable (LocalPhotoImageDelivery) -> Void) -> LocalPhotoMediaRequest?
-    /// expected仅普通video，options限定current/本机；result可在任意线程迟到，nil句柄表示未启动系统请求。
+    /// expected仅普通video，options限定current/Photos；result可在任意线程迟到，nil句柄表示未启动系统请求。
     func requestPlayerItem(for expected: LocalPhotoIdentity, options: PHVideoRequestOptions,
                            result: @escaping @Sendable (AVPlayerItem?) -> Void) -> LocalPhotoMediaRequest?
 }
@@ -80,8 +86,8 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     private let driver: any LocalPhotoMediaRequesting
     private let timeout: Duration
 
-    /// driver默认真实PhotoKit，timeout限制本机等待时间；超时取消实际请求后返回nil供当前调用方正常回源。
-    init(driver: any LocalPhotoMediaRequesting = PhotoKitLocalPhotoMediaDriver(), timeout: Duration = .seconds(4)) {
+    /// driver默认真实PhotoKit，timeout限制Photos/iCloud展示等待；nil不代表允许转向Immich。
+    init(driver: any LocalPhotoMediaRequesting = PhotoKitLocalPhotoMediaDriver(), timeout: Duration = .seconds(20)) {
         self.driver = driver
         self.timeout = max(.milliseconds(1), timeout)
     }
@@ -104,11 +110,18 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                             original: true, validateContext: validateContext)
     }
 
+    func currentIdentity(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> LocalPhotoIdentity? {
+        try checkContext(validateContext)
+        let identity = currentObservation(expected)?.identity
+        try checkContext(validateContext)
+        return identity
+    }
+
     func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
         try checkContext(validateContext)
-        guard let value = currentObservation(expected) else { return nil }
+        guard let value = currentObservation(expected), let modified = value.identity.modificationDate else { return nil }
         try checkContext(validateContext)
-        return "\(expected.localIdentifier)|\(expected.modificationDate!.timeIntervalSinceReferenceDate)|\(value.adjustmentTime?.timeIntervalSinceReferenceDate ?? -1)|\(value.hasAdjustments)|\(value.pixelWidth)x\(value.pixelHeight)|\(value.duration)|\(value.mediaSubtypes)|\(value.access)"
+        return "\(expected.localIdentifier)|\(modified.timeIntervalSinceReferenceDate)|\(value.adjustmentTime?.timeIntervalSinceReferenceDate ?? -1)|\(value.hasAdjustments)|\(value.pixelWidth)x\(value.pixelHeight)|\(value.duration)|\(value.mediaSubtypes)|\(value.access)"
     }
 
     private func readImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, acceptsDegraded: Bool, original: Bool = false,
@@ -120,7 +133,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         try checkContext(validateContext)
         guard let before = observation else { return nil }
         let read = PhotoResourceRead<UIImage>()
-        let timer = deadline(read, duration: original ? .seconds(20) : nil)
+        let timer = deadline(read)
         defer { timer.cancel() }
         return try await withTaskCancellationHandler {
             try checkContext(validateContext)
@@ -132,8 +145,8 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                 options.version = original ? .original : .current
                 options.deliveryMode = acceptsDegraded ? .opportunistic : .highQualityFormat
                 options.resizeMode = .fast
-                options.isNetworkAccessAllowed = original
-                let request = driver.requestImage(for: expected, targetPixels: targetPixels, options: options) { delivery in
+                options.isNetworkAccessAllowed = true
+                let request = driver.requestImage(for: before.identity, targetPixels: targetPixels, options: options) { delivery in
                     if delivery.failed {
                         read.finish(nil)
                     } else if !delivery.degraded || (acceptsDegraded && delivery.image != nil) {
@@ -163,7 +176,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         try checkContext(validateContext)
         guard let before = observation else { return nil }
         let read = PhotoResourceRead<AVPlayerItem>()
-        let timer = deadline(read)
+        let timer = deadline(read, duration: .seconds(20))
         defer { timer.cancel() }
         return try await withTaskCancellationHandler {
             try checkContext(validateContext)
@@ -173,8 +186,8 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                 guard !Task.isCancelled else { read.cancel(); return }
                 let options = PHVideoRequestOptions()
                 options.version = .current
-                options.isNetworkAccessAllowed = false
-                let request = driver.requestPlayerItem(for: expected, options: options) { read.finish($0) }
+                options.isNetworkAccessAllowed = true
+                let request = driver.requestPlayerItem(for: before.identity, options: options) { read.finish($0) }
                 if let request {
                     read.install(request.cancel)
                 } else {
@@ -189,10 +202,12 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         } onCancel: { read.cancel() }
     }
 
-    /// expected必须有已知修改版本；身份/权限/版本不可验证时不猜测本机内容可替代Immich显示。
+    /// 已确认的Photos对象以当前编辑版本为准；稳定本机ID及图片/视频大类必须一致。
     private func currentObservation(_ expected: LocalPhotoIdentity) -> LocalPhotoMediaObservation? {
         guard !expected.localIdentifier.isEmpty, expected.modificationDate != nil,
-              let observed = driver.observation(for: expected.localIdentifier), observed.identity == expected else { return nil }
+              let observed = driver.observation(for: expected.localIdentifier),
+              observed.identity.localIdentifier == expected.localIdentifier,
+              (observed.identity.mediaKind == .video) == (expected.mediaKind == .video) else { return nil }
         return observed
     }
 
@@ -224,13 +239,12 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                      pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight, duration: asset.duration, mediaSubtypes: asset.mediaSubtypes.rawValue)
     }
 
-    /// options由真实reader固定current/network=false；result只接收图片/质量状态，不发布原始PhotoKit错误正文。
+    /// options由真实展示reader固定current/original，可由Photos取iCloud；result只接收图片/质量状态，不发布原始PhotoKit错误正文。
     func requestImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, options: PHImageRequestOptions,
                       result: @escaping @Sendable (LocalPhotoImageDelivery) -> Void) -> LocalPhotoMediaRequest?
     {
         guard let asset = asset(expected),
-              (options.version == .current && !options.isNetworkAccessAllowed)
-              || (options.version == .original && options.isNetworkAccessAllowed) else { return nil }
+              options.version == .current || options.version == .original else { return nil }
         let manager = PHImageManager.default()
         let size = options.version == .original ? PHImageManagerMaximumSize : CGSize(width: targetPixels.width, height: targetPixels.height)
         let id = manager.requestImage(for: asset, targetSize: size,
@@ -246,7 +260,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     func requestPlayerItem(for expected: LocalPhotoIdentity, options: PHVideoRequestOptions,
                            result: @escaping @Sendable (AVPlayerItem?) -> Void) -> LocalPhotoMediaRequest?
     {
-        guard expected.mediaKind == .video, let asset = asset(expected), options.version == .current, !options.isNetworkAccessAllowed else { return nil }
+        guard expected.mediaKind == .video, let asset = asset(expected), options.version == .current, options.isNetworkAccessAllowed else { return nil }
         let manager = PHImageManager.default()
         let id = manager.requestPlayerItem(forVideo: asset, options: options) { @Sendable item, info in
             let failed = (info?[PHImageCancelledKey] as? Bool == true) || info?[PHImageErrorKey] != nil
@@ -255,7 +269,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         return .init(identifier: id, cancel: { manager.cancelImageRequest(id) })
     }
 
-    /// expected是匹配时已观察版本；在真正系统媒体调用前再次验证授权与本机身份，不使用旧PHAsset实例。
+    /// expected是本次读取前的最新观察版本；系统调用前再次核对，不使用旧PHAsset实例。
     private func asset(_ expected: LocalPhotoIdentity) -> PHAsset? {
         guard access() != nil, let asset = PHAsset.fetchAssets(withLocalIdentifiers: [expected.localIdentifier], options: nil).firstObject,
               identity(asset) == expected, access() != nil else { return nil }
@@ -269,7 +283,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         return .init(localIdentifier: asset.localIdentifier, modificationDate: asset.modificationDate, mediaKind: kind)
     }
 
-    /// 只接受系统已有授权；不在图片/视频加载期间触发权限提示或启用网络下载。
+    /// 只接受系统已有授权；不在图片/视频加载期间触发权限提示；联网仅由Photos展示请求管理。
     private func access() -> LocalPhotoMediaObservation.Access? {
         switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
         case .authorized: .full
