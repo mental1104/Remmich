@@ -1,3 +1,8 @@
+## 2026-11-28: Foreground retry after an unavailable route
+
+- 客户端在一次网络变化的路由验证失败后，原先只等下一次网络变化/前台切换；服务稍晚恢复而网络不再变化时会停在离线。新增前台5/10/20/30秒上限退避，复用串行路由验证gate，不新增上传或扫描通道。要求已登录、系统网络satisfied、自动同步门禁允许且App在前台；网络变化、后台、账号准备失效取消旧恢复任务，成功即停止。
+- Xcode27.2 / Remmich / Debug / -jobs1增量编译与签名校验通过。覆盖安装与实际恢复行为继续验收；不宣称恢复成功。缩略图PhotoKit的断网冷启动证据详见独立验收记录，原图来源未用于缩略图结论。自动测试按用户要求未执行。
+
 ## 2026-11-28: Thumbnail-only runtime provenance diagnostics
 
 - 用户纠正验收边界：详情原图来源不能证明网格缩略图来源。新增仅Debug的缩略图路由累计：已保存/缺失关联、经过Photos当前权限与源版本验证的本机磁盘缓存、真实PhotoKit成功、Photos miss与Immich回退。所有事件严格限定thumbnail，原图/preview不计入；只落本机会话随机ID和固定计数，不记照片ID、名称、内容或凭据。后台线程原子写入，300ms合并，Release不保存诊断。
@@ -1257,3 +1262,8 @@
 - The pre-upgrade stopped-device snapshot passed SQLite quick_check: 88,525 existing, 8 completed, 2 failed and 269 paused jobs, totaling 88,804. The 88,533 existing/completed records and receipts were canonically hashed and backed up locally. Private database contents are not committed. Actual post-install equality verification is pending; do not claim upgrade acceptance from this snapshot alone.
 - Remmich Debug signed iOS builds use Xcode 27.2, -jobs 1, existing signing, DerivedData and resolved packages. Both the browsing revision and final legacy-configuration migration incremental build succeeded. String syntax and diff whitespace checks passed. Automated tests were explicitly waived by the user; added/updated tests are not claimed to have run. Full CI is not claimed green.
 - Installation is deferred until the user returns. No uninstall, queue reset, original deletion, server deployment or automatic branch merge occurred. Byte-offset upload resumption, later automatic reporting of initially missing iCloud IDs, real background/iCloud/large-library/Live Photo/RAW acceptance remain outside verified coverage.
+
+## 2026-11-28: Thumbnail-only real-device acceptance follow-up
+
+- 用户完成开发者验证后，在2023网格实测：相比前一采样新增200次真实PhotoKit、104次经Photos校验的展示缓存命中。关闭Wi-Fi及蜂窝后重新启动，PID与诊断会话均变化；2023网格记录142次真实PhotoKit、144次本机展示缓存命中。缩略图PhotoKit请求network=false，不借原图来源判断。恢复Wi-Fi后同会话累计276次真实PhotoKit、374次展示缓存命中。
+- 统计覆盖本机优先读取通路，未关联而绕过该通路的请求不在其中；仍有云朵划线，不能宣称整库可离线。继续检查缺失关联与恢复联机状态。之前安装后88,804条备份记录逐项一致，24,180条浏览关联保留。

@@ -72,6 +72,8 @@ final class AppSessionController {
     private var isRestoringSession = false
     private var routeGeneration = 0
     private var pendingPathChangeTask: Task<Void, Never>?
+    @ObservationIgnored private var routeRecoveryTask: Task<Void, Never>?
+    private var routeRecoveryID: UUID?
     @ObservationIgnored var backgroundSyncInvalidated: (() -> Void)?
     private var preparationTask: Task<Void, Never>?
     private var foregroundPreparationTask: Task<Void, Never>?
@@ -696,6 +698,49 @@ final class AppSessionController {
                 media.photoBackups.networkRouteValidated(using: media.management, scope: media.scope, eventID: backupEvent)
             }
         }
+        if routeStatus == .connected {
+            cancelRouteRecovery()
+        } else {
+            scheduleRouteRecovery()
+        }
+    }
+
+    /// 网络已恢复但服务稍后才可达时，前台串行退避重检；不扫描或修改备份任务。
+    private func scheduleRouteRecovery() {
+        guard networkMonitoringEnabled, routeRecoveryTask == nil, isAppInForeground, automaticSyncAllowed,
+              !isPreparingAccountSelection, lastNetworkPathSignature?.status == "satisfied",
+              routeStatus != .connected, case let .signedIn(session) = state else { return }
+        let owner = preparationGeneration, id = UUID()
+        routeRecoveryID = id
+        routeRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if routeRecoveryID == id {
+                    routeRecoveryTask = nil; routeRecoveryID = nil
+                }
+            }
+            var delay = 5
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                guard routeRecoveryID == id, preparationGeneration == owner, isAppInForeground, automaticSyncAllowed,
+                      !isPreparingAccountSelection, lastNetworkPathSignature?.status == "satisfied",
+                      case let .signedIn(current) = state, current == session else { return }
+                if routeStatus == .connected {
+                    return
+                }
+                await reevaluateRoute(trigger: .recovery)
+                if routeStatus == .connected {
+                    return
+                }
+                delay = min(delay * 2, 30)
+            }
+        }
+    }
+
+    private func cancelRouteRecovery() {
+        routeRecoveryID = nil
+        routeRecoveryTask?.cancel()
+        routeRecoveryTask = nil
     }
 
     private func performRouteEvaluation(trigger: RouteEvaluationTrigger, startIndex: Bool) async {
@@ -796,6 +841,7 @@ final class AppSessionController {
     private func handleNetworkPathChange(_ signature: NetworkPathSignature) async {
         let isFirstCallback = !hasReceivedNetworkPath
         guard lastNetworkPathSignature != signature else { return }
+        cancelRouteRecovery()
         lastNetworkPathSignature = signature
         hasReceivedNetworkPath = true
         media.exports.networkAvailabilityChanged(available: signature.status == "satisfied")
@@ -956,6 +1002,7 @@ final class AppSessionController {
     }
 
     func handleBackgroundTransition() {
+        cancelRouteRecovery()
         isAppInForeground = false
         if let transfers = libraryTransfers {
             let handoff = LibraryTransferEventCompletion(protectExecution: true) {}
@@ -1122,6 +1169,7 @@ final class AppSessionController {
         if !isAppInForeground {
             automaticSyncAllowed = false
             routeGeneration += 1
+            cancelRouteRecovery()
             preparationGeneration += 1
             preparationTask?.cancel()
             preparationTask = nil
@@ -1134,6 +1182,7 @@ final class AppSessionController {
     }
 
     private func invalidatePreparation() {
+        cancelRouteRecovery()
         preparationGeneration += 1
         timelineEndpoint = nil
         isRestoringSession = false
@@ -1261,6 +1310,7 @@ private nonisolated enum RouteEvaluationTrigger: String, Sendable {
     case profileSave = "profile-save"
     case networkPath = "network-path"
     case foreground
+    case recovery
     case background
 }
 
