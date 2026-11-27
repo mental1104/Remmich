@@ -5,7 +5,7 @@ import Testing
 /// 合成系统/网络边界之上的真实Controller与JSON恢复；不请求PhotoKit、账号、媒体或任何外网。
 @Suite("Local media association controller")
 @MainActor struct LocalMediaMatchControllerTests {
-    /// 唯一官方元数据先匹配再fresh GET；没有哈希读取，保存后精确远端版本才可查询关联。
+    /// 唯一官方元数据先匹配再fresh GET；Photos身份关联不因Immich显示版本改变而消失。
     @Test func metadataMatchPersistsOnlyVerifiedAssociation() async throws {
         let directory = temporaryMatchDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let fixture = try matchFixture(directory: directory)
@@ -14,7 +14,8 @@ import Testing
         let value = try #require(fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision))
         #expect(value.source == .mobileMetadata && value.localIdentity == fixture.snapshot.identity)
         #expect(fixture.controller.metadataMatches == 1 && fixture.controller.checksumMatches == 0 && fixture.controller.scanned == 1)
-        #expect(fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision.addingTimeInterval(0.001)) == nil)
+        #expect(fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision.addingTimeInterval(0.001)) == value)
+        #expect(fixture.controller.association(assetID: UUID().uuidString, revision: matchRevision) == nil)
         #expect(fixture.checksum.requests == 0 && fixture.inventory.authorizationRequests == 1)
         let persisted = try await fixture.store.load(scope: fixture.scope)
         #expect(persisted?.enabled == true && persisted?.associations == [value])

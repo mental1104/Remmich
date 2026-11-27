@@ -1,3 +1,11 @@
+## 2026-11-28: Fix confirmed display identity rejection and reuse unique persisted witnesses
+
+- 已读取一次494字节手机诊断，120次实际身份查询分为：41次显示版本门禁拒绝、55次缺少Cloud元数据、24次解析成功；另6次排队超时。为累计查询事件，非独立照片数。无新增真机扫描/备份/原片操作。
+- 移除本机身份访问器及可见解析里的Immich显示时间戳一致性门禁：同账号/UUID已确认Photos身份不应随服务器显示时间戳失效。fresh owner/type/状态校验及Photos当前源前后校验仍保留，服务器时间变化只计诊断，不伪造上传/组织/字节完成证明。
+- 缺Cloud元数据时可按fresh远端SHA1复用同账号已持久化的关联证据。内存checksum→关联UUID索引随恢复、接受、删除与清空同步维护，不为每个封面扫描整库；最多64个证据，仅当当前授权范围有唯一可读Photos对象且fresh资产核验通过才保存新浏览关联，保留证据原来源类型。无证据或多候选保留未知，不按日期/文件名猜配，不重算/下载Photos原片。
+- 本机旧快照中88,525条existing任务不含远端主体回执，只有8条completed有primaryAssetID/primaryChecksum；不能由完成计数还原全部浏览身份。用户手机曾过热，后续仅在Mac编译；本补丁尚未安装，不能宣称41/55项实机已恢复。
+- Xcode27.2 / Remmich / Debug / -jobs1增量编译与签名验证通过，安装包保存待后续低负载验收。按用户要求未执行自动测试；现有身份访问器回归断言更新为Photos身份不随Immich时间变化失效，不同资产依然隔离。
+
 ## 2026-11-28: Audit unresolved display identities separately from Photos absence
 
 - 新版日封面采样已经显示图片，但后续同会话仍有264次未建立关联后的Immich加载，以及39次真实PhotoKit、100次经Photos校验的展示缓存。不能把未关联当作Photos对象确实不存在，也不能宣称全部预览已经严格符合本机唯一事实源。
