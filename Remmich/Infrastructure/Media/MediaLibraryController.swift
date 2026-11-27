@@ -58,7 +58,7 @@ final class MediaLibraryController {
                 while true {
                     try? await Task.sleep(for: .milliseconds(300))
                     let snapshot = thumbnailRouteCounts
-                    let data = try? JSONEncoder().encode(ThumbnailRouteSnapshot(session: thumbnailRouteSession, counts: snapshot))
+                    let data = try? JSONEncoder().encode(ThumbnailRouteSnapshot(session: thumbnailRouteSession, counts: snapshot, identityLookups: localMediaMatches.displayLookupDiagnostics))
                     if let data {
                         await Task.detached(priority: .utility) {
                             guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
@@ -78,6 +78,7 @@ final class MediaLibraryController {
         private nonisolated struct ThumbnailRouteSnapshot: Encodable, Sendable {
             let session: String
             let counts: [String: Int]
+            let identityLookups: [String: Int]
         }
     #endif
 

@@ -31,6 +31,13 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     private(set) var recoveringCompletedAssociations = false
     @ObservationIgnored private var completedRecoveryGeneration: UUID?
     @ObservationIgnored private var completedRecoveryActive = true
+    @ObservationIgnored private(set) var displayLookupDiagnostics: [String: Int] = [:]
+    private func traceDisplayLookup(_ reason: String) {
+        #if DEBUG
+            displayLookupDiagnostics[reason, default: 0] += 1
+        #endif
+    }
+
     @ObservationIgnored private var activeDisplayLookups = 0
     @ObservationIgnored private var pendingDisplayLookups = Set<String>()
     @ObservationIgnored private var sharedDisplayLookups: [String: Task<LocalMediaAssociation?, Error>] = [:]
@@ -785,11 +792,12 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         guard enabled, self.manager === manager, let scope, manager.backupScope == scope else { return nil }
         let key = "\(generation)|\(scope.cacheNamespace)|\(assetID.lowercased())|\(revision.timeIntervalSince1970)"
         if let pending = sharedDisplayLookups[key] {
+            traceDisplayLookup("joinedInFlight")
             let value = try await pending.value
             try Task.checkCancellation()
             return value
         }
-        guard sharedDisplayLookups.count < 64 else { return nil }
+        guard sharedDisplayLookups.count < 64 else { traceDisplayLookup("queueCapacity"); return nil }
         let lookup = Task { [weak self] in
             try await self?.performDisplayAssociationLookup(assetID: assetID, revision: revision, using: manager)
         }
@@ -806,10 +814,11 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         }
         guard enabled, self.manager === manager, let scope, scope == manager.backupScope,
               let id = UUID(uuidString: assetID), let client = manager.client,
-              inventory.authorization == .full || inventory.authorization == .limited else { return nil }
+              inventory.authorization == .full || inventory.authorization == .limited else { traceDisplayLookup("contextUnavailable"); return nil }
         let run = generation, owner = manager.generation, permission = inventory.authorization
         let key = "\(generation)|\(scope.cacheNamespace)|\(id)|\(revision.timeIntervalSinceReferenceDate)"
         if let missed = missedDisplayLookups[key], missed.duration(to: ContinuousClock.now) < .seconds(60) {
+            traceDisplayLookup("negativeCache")
             return nil
         }
         guard pendingDisplayLookups.insert(key).inserted else { return nil }
@@ -826,21 +835,27 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         let deadline = ContinuousClock.now.advanced(by: .seconds(8))
         while activeDisplayLookups >= 4 {
             try validateContext()
-            guard ContinuousClock.now < deadline else { return nil }
+            guard ContinuousClock.now < deadline else { traceDisplayLookup("queueDeadline"); return nil }
             try await Task.sleep(for: .milliseconds(100))
         }
         activeDisplayLookups += 1; ownsSlot = true
         do {
             try validateContext()
+            traceDisplayLookup("evidenceRequest")
             let (remote, candidates) = try await client.localPhotoDisplayEvidence(id)
             try validateContext()
-            guard (remote.displayRevision ?? remote.updatedAt)?.timeIntervalSince1970 == revision.timeIntervalSince1970 else { return nil }
+            guard (remote.displayRevision ?? remote.updatedAt)?.timeIntervalSince1970 == revision.timeIntervalSince1970 else { traceDisplayLookup("displayRevisionMismatch"); return nil }
+            guard !candidates.isEmpty else { traceDisplayLookup("missingCloudMetadata"); missedDisplayLookups[key] = ContinuousClock.now; return nil }
             let mappings = try await LocalPhotoCloudResolver.localIDs(for: Set(candidates.map(\.metadata.cloudId)))
             try validateContext()
+            guard !mappings.isEmpty else { traceDisplayLookup("cloudIDNotAccessibleInPhotos"); missedDisplayLookups[key] = ContinuousClock.now; return nil }
             let ids = Array(Set(mappings.values)).sorted()
             guard ids.count <= 64 else { throw LocalMediaMetadataError.invalidBatch }
             let snapshots = try await metadata.snapshots(for: ids, validateContext: validateContext)
             try validateContext(); try validateSnapshots(snapshots, requested: ids)
+            if snapshots.isEmpty {
+                traceDisplayLookup("photosSnapshotMissing")
+            }
             var matches: [LocalMediaAssociation] = []
             for snapshot in snapshots {
                 guard case let .resolved(cloud) = snapshot.cloudIdentity, mappings[cloud] == snapshot.identity.localIdentifier,
@@ -850,14 +865,17 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 matches.append(value)
             }
             guard matches.count == 1, let value = matches.first else {
+                traceDisplayLookup(matches.isEmpty ? "identityProofRejected" : "ambiguousPhotosIdentity")
                 missedDisplayLookups[key] = ContinuousClock.now
                 return nil
             }
             try await backupAssociationSaver?([value], scope)
             try validateContext()
+            traceDisplayLookup("resolved")
             access = permission; accept(value)
             return value
         } catch {
+            traceDisplayLookup(error is CancellationError ? "cancelled" : "requestOrDecodeFailed")
             try validateContext()
             if missedDisplayLookups.count >= 512 {
                 missedDisplayLookups.removeAll()
