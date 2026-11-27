@@ -459,12 +459,24 @@ final class MediaLibraryController {
         let fallbackPipeline = photoFallbackPipeline(for: pipeline)
         // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
         let localKey = association.map { "\($0.localIdentity.localIdentifier)|\($0.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)" } ?? "resolve-visible"
-        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(localKey)|context:\(accountGeneration.uuidString)"
+        // 内存命中前在主Actor核对当前Photos观察；权限/编辑/源变化生成不同身份或禁用读取。
+        let thumbnailSource: String? = if descriptor.derivative == .thumbnail, let association {
+            try? localPhotoReader.thumbnailSourceVersion(for: association.localIdentity) {
+                try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+            }
+        } else {
+            nil
+        }
+        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(localKey)|context:\(accountGeneration.uuidString)|source:\(thumbnailSource ?? "unchecked")"
+        var options: ImageRequest.Options = [.skipDataLoadingQueue, .disableDiskCache]
+        if thumbnailSource == nil {
+            options.insert(.disableMemoryCacheReads)
+        }
         return ImageRequest(id: id, image: { [weak self] in
             guard let self else { throw CancellationError() }
             return try await readPreferredPhotoImage(association, descriptor: descriptor, scope: scope,
                                                      accountGeneration: accountGeneration, fallback: fallback, pipeline: fallbackPipeline)
-        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
+        }, priority: priority, options: options)
     }
 
     /// Nuke的image闭包会持有dataLoadingQueue槽位，skipDataLoadingQueue只作用于data闭包。
@@ -529,17 +541,34 @@ final class MediaLibraryController {
         }
         try validate()
         let limit = descriptor.derivative == .thumbnail ? 1024 : descriptor.derivative == .preview ? 2048 : 4096
-        let pixels = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
+        let requested = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
             ?? MediaPixelSize(width: limit, height: limit)
+        let side = max(requested.width, requested.height)
+        let bucket = [128, 256, 512, 1024].first { $0 >= side } ?? 1024
+        let pixels = descriptor.derivative == .thumbnail ? MediaPixelSize(width: bucket, height: bucket) : requested
+        let cacheDescriptor = descriptor.derivative == .thumbnail
+            ? MediaRequestDescriptor(assetID: descriptor.assetID, updatedAt: descriptor.updatedAt, derivative: .thumbnail, targetPixels: pixels) : descriptor
         // 旧request可能在创建后才被实际执行；关联已关闭/失效时直接回退，不能再访问Photos。
         if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
             let sourceVersion = descriptor.derivative == .thumbnail
                 ? try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) : nil
             let cacheRequest = sourceVersion.map { version in
+                ImageRequest(id: "device-thumbnail-v1|" + Self.displayCacheKey(for: cacheDescriptor, scope: scope) + "|" + version,
+                             data: { throw URLError(.resourceUnavailable) })
+            }
+            // 已有精确尺寸缓存继续可读；逐步保存到归一尺寸键，不清空用户缓存。
+            let legacyRequest = sourceVersion.map { version in
                 ImageRequest(id: "device-thumbnail-v1|" + Self.displayCacheKey(for: descriptor, scope: scope) + "|" + version,
                              data: { throw URLError(.resourceUnavailable) })
             }
-            if let cacheRequest, let cached = await Self.readDisplayThumbnail(cacheRequest, pipeline: pipeline) {
+            let cached: ImageContainer? = if let cacheRequest, let value = await Self.readDisplayThumbnail(cacheRequest, pipeline: pipeline) {
+                value
+            } else if let legacyRequest {
+                await Self.readDisplayThumbnail(legacyRequest, pipeline: pipeline)
+            } else {
+                nil
+            }
+            if let cached {
                 try validate()
                 if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
                    try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion
