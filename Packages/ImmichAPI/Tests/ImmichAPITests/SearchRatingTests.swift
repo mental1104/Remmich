@@ -87,9 +87,9 @@ private struct RatingTransport: ClientTransport {
         if smart {
             #expect(operationID == "searchSmart")
             switch rating {
-            case .any: #expect(json["rating"] == nil)
-            case .unrated: #expect(json["rating"] is NSNull)
-            case let .stars(value): #expect(json["rating"] as? Int == value)
+            case .any: #expect((json["filter"] as? [String: Any])?["rating"] == nil)
+            case .unrated: #expect(((json["filter"] as? [String: Any])?["rating"] as? [String: Any])?["eq"] is NSNull)
+            case let .stars(value): #expect(((json["filter"] as? [String: Any])?["rating"] as? [String: Int])?["eq"] == value)
             }
             #expect(json["page"] as? Int == 1)
         } else {

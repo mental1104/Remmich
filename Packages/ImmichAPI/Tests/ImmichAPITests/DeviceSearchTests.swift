@@ -26,7 +26,7 @@ struct DeviceSearchTests {
         let client = try ImmichClient(apiURL: #require(URL(string: "https://example.invalid/immich/api")),
                                       credential: .bearer("synthetic"), transport: transport)
         let first = try await client.search(query)
-        #expect(first.continuation == (mode == .smart ? .forkCursor("device-next") : .cursor("device-next")))
+        #expect(first.continuation == (mode == .smart ? .cursor("device-next") : .cursor("device-next")))
         let last = try await client.search(query, continuation: first.continuation)
         #expect(last.continuation == nil)
     }
@@ -112,8 +112,8 @@ private struct DeviceSearchTransport: ClientTransport {
     /// request/body为SDK实际输出；baseURL保留部署前缀，返回首屏游标或明确终页。
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
         #expect(request.method == .post)
-        #expect(request.path == (smart ? "/fork/search/smart" : "/search/metadata"))
-        #expect(operationID == (smart ? "forkSearchSmart" : "searchAssets"))
+        #expect(request.path == (smart ? "/search/smart" : "/search/metadata"))
+        #expect(operationID == (smart ? "searchSmart" : "searchAssets"))
         #expect(baseURL.absoluteString == "https://example.invalid/immich/api")
         #expect(request.headerFields[.authorization] == "Bearer synthetic")
         let data = try await Data(collecting: #require(body), upTo: 1_000_000)

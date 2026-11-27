@@ -9,6 +9,51 @@ import UIKit
 /// 真实恢复/匹配Controller→MediaLibraryController→Nuke链；仅替换Photos/远端metadata/字节来源，不复制路由算法。
 @Suite("Local media Nuke routing", .serialized)
 @MainActor struct LocalMediaNukeRoutingTests {
+    /// 丢弃内存后仍从展示磁盘缓存读；Photos源版本变化后必须重新读取。
+    @Test func localThumbnailSurvivesMemoryEvictionAndInvalidatesWithSource() async throws {
+        let fixture = try await routingFixture()
+        defer { fixture.close() }
+        fixture.reader.thumbnailVersion = "current-v1"
+        let pipeline = try #require(fixture.media.pipeline)
+        let request = try #require(fixture.media.imageRequest(for: fixture.descriptor(.thumbnail)))
+        _ = try await pipeline.imageTask(with: request).response
+        pipeline.cache.removeAll(caches: [.memory])
+        _ = try await pipeline.imageTask(with: request).response
+        #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.isEmpty)
+        fixture.reader.thumbnailVersion = "current-v2"
+        _ = try await pipeline.imageTask(with: request).response
+        #expect(fixture.reader.imageReads == 2 && fixture.loader.requests.isEmpty)
+    }
+
+    /// 超过Nuke外层并发槽位的本机miss必须全部回源完成，不能持有槽位等待同一队列。
+    @Test(.timeLimit(.minutes(1)))
+    func concurrentLocalMissesCannotDeadlockRemoteFallback() async throws {
+        let fixture = try await routingFixture(localImage: false)
+        defer { fixture.close() }
+        let pipeline = try #require(fixture.media.pipeline)
+        var requests: [ImageRequest] = []
+        for side in 100 ..< 108 {
+            let descriptor = MediaRequestDescriptor(assetID: fixture.assetID, updatedAt: routingRevision,
+                                                    derivative: .thumbnail, targetPixels: .init(width: side, height: side))
+            try requests.append(#require(fixture.media.imageRequest(for: descriptor)))
+        }
+        let count = try await withThrowingTaskGroup(of: Int.self) { group in
+            for request in requests {
+                group.addTask {
+                    let response = try await pipeline.imageTask(with: request).response
+                    #expect(response.image.size == CGSize(width: 11, height: 7))
+                    return 1
+                }
+            }
+            var count = 0
+            for try await completed in group {
+                count += completed
+            }
+            return count
+        }
+        #expect(count == 8 && !fixture.loader.requests.isEmpty)
+    }
+
     /// 三种展示规格都优先当前本机图；已存在的普通远端内存图不能让请求跳过本机关联。
     @Test(arguments: [MediaDerivative.thumbnail, .preview, .fullSize])
     func confirmedLocalImageAvoidsEveryRemoteDataLoad(_ derivative: MediaDerivative) async throws {
@@ -349,10 +394,16 @@ private actor RoutingRemote: LocalMediaMatchingReading {
     let returnsImage: Bool
     let gate = RoutingGate()
     var holdImage = false
+    var thumbnailVersion: String?
     var holdVideo = false
     private(set) var imageReads = 0
     private(set) var videoReads = 0
     private(set) var lastPixels: MediaPixelSize?
+    func thumbnailSourceVersion(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
+        try Task.checkCancellation(); try validateContext()
+        return thumbnailVersion
+    }
+
     /// localImage决定当前本机是否miss，像素颜色/尺寸完全合成，不使用PhotoKit。
     init(localImage: Bool) {
         returnsImage = localImage; local = Self.image(width: 3, height: 2); remoteSizedImage = Self.image(width: 11, height: 7)

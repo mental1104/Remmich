@@ -33,7 +33,7 @@ nonisolated struct NativeSearchQuery: Hashable, Sendable {
     var text = ""
     /// 参考图使用服务端UUID v4；与文字互斥，只在smart模式使用，不包含本地文件或图片字节。
     var queryAssetID: String?
-    var mode: Mode = .fileName
+    var mode: Mode = .smart
     var media: Media = .all
     var mediaCategory: NativeSearchMediaCategory?
     var resolution: NativeSearchResolution?

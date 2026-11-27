@@ -5,7 +5,7 @@ import Testing
 @testable import ImmichAPI
 
 /// 检查独立Fork读取的真实字节、三种分页隔离及错误/取消，不连接照片服务器。
-@Suite("Fork smart search contracts")
+@Suite("Server smart search contracts")
 struct ForkSmartSearchTests {
     /// rating覆盖省略/null/0/5；全部基础及高级条件在首屏和下一页均须完整保留。
     @Test(arguments: [ImmichSearchRating.any, .unrated, .stars(0), .stars(5)])
@@ -19,7 +19,7 @@ struct ForkSmartSearchTests {
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
         let first = try await client.search(query)
         #expect(first.assets.map(\.id) == ["first"])
-        #expect(first.continuation == .forkCursor("fork-next"))
+        #expect(first.continuation == .cursor("fork-next"))
         let last = try await client.search(query, continuation: first.continuation)
         #expect(last.assets.map(\.id) == ["last"])
         #expect(last.continuation == nil)
@@ -39,7 +39,7 @@ struct ForkSmartSearchTests {
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
         let first = try await client.search(query)
         #expect(first.assets.map(\.id) == ["first"])
-        #expect(first.continuation == .forkCursor("fork-next"))
+        #expect(first.continuation == .cursor("fork-next"))
         let last = try await client.search(query, continuation: first.continuation)
         #expect(last.assets.map(\.id) == ["last"])
         #expect(last.continuation == nil)
@@ -83,7 +83,7 @@ struct ForkSmartSearchTests {
         query.text = "synthetic"
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query) }
         query.text = ""
-        for token in [ImmichSearchContinuation.cursor("metadata"), .page(2)] {
+        for token in [ImmichSearchContinuation.forkCursor("legacy")] {
             await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: token) }
         }
     }
@@ -130,7 +130,7 @@ struct ForkSmartSearchTests {
         let url = try #require(URL(string: "https://example.invalid/api"))
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: ForkNeverSendTransport())
         let query = try forkQuery()
-        for token in [ImmichSearchContinuation.cursor("metadata"), .page(2), .forkCursor("")] {
+        for token in [ImmichSearchContinuation.forkCursor("legacy"), .cursor("")] {
             await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: token) }
         }
         await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(.init(), continuation: .forkCursor("fork-next")) }
@@ -157,18 +157,18 @@ struct ForkSmartSearchTests {
         let url = try #require(URL(string: "https://example.invalid/api"))
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: ForkInvalidTransport(shape: shape))
         let query = try forkQuery()
-        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .forkCursor("same")) }
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .cursor("same")) }
     }
 
     /// Fork身份必须绑定只读POST路径；操作ID不能授权任意其他路径或方法。
     @Test func bindsPolicyToTheExactForkReadRoute() throws {
-        let good = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/search/smart")
-        #expect(throws: Never.self) { try ReadOnlyOperationPolicy.validate(request: good, operationID: "forkSearchSmart") }
-        for request in [HTTPRequest(method: .delete, scheme: nil, authority: nil, path: "/fork/search/smart"),
+        let good = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/search/smart")
+        #expect(throws: Never.self) { try ReadOnlyOperationPolicy.validate(request: good, operationID: "searchSmart") }
+        for request in [HTTPRequest(method: .delete, scheme: nil, authority: nil, path: "/search/smart"),
                         HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/assets")]
         {
-            #expect(throws: ImmichAPIError.readOnlyPolicyViolation(operationID: "forkSearchSmart")) {
-                try ReadOnlyOperationPolicy.validate(request: request, operationID: "forkSearchSmart")
+            #expect(throws: ImmichAPIError.readOnlyPolicyViolation(operationID: "searchSmart")) {
+                try ReadOnlyOperationPolicy.validate(request: request, operationID: "searchSmart")
             }
         }
     }
@@ -206,7 +206,7 @@ private struct ForkWireTransport: ClientTransport {
 
     /// request/body是包装器输出；baseURL必须保留API前缀，operationID是唯一Fork只读身份。
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
-        #expect(operationID == "forkSearchSmart" && request.method == .post && request.path == "/fork/search/smart")
+        #expect(operationID == "searchSmart" && request.method == .post && request.path == "/search/smart")
         #expect(baseURL.absoluteString == "https://example.invalid/immich/api")
         #expect(request.headerFields[.authorization] == "Bearer synthetic")
         #expect(request.headerFields[.cacheControl] == "no-store")
@@ -220,7 +220,7 @@ private struct ForkWireTransport: ClientTransport {
             #expect(json["query"] as? String == "synthetic")
             #expect(json["queryAssetId"] == nil)
         }
-        #expect(json["page"] == nil && json["orderBy"] == nil && json["rating"] == nil)
+        #expect((json["page"] == nil || json["page"] as? Int == 1) && json["orderBy"] == nil && json["rating"] == nil)
         #expect(json["size"] as? Int == 60 && json["withExif"] as? Bool == true)
         let filter = try #require(json["filter"] as? [String: Any])
         for (field, value) in ["city": "Synthetic City", "country": "Synthetic Country", "state": "Synthetic State",
@@ -278,7 +278,7 @@ private actor ForkStatusTransport: ClientTransport {
     /// 只允许实际Fork操作，返回所选错误状态，不读取凭据或请求内容。
     func send(_: HTTPRequest, body _: HTTPBody?, baseURL _: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
         calls += 1
-        #expect(operationID == "forkSearchSmart")
+        #expect(operationID == "searchSmart")
         return (HTTPResponse(status: .init(code: status)), HTTPBody("{}"))
     }
 }
@@ -292,7 +292,7 @@ private struct ForkInvalidTransport: ClientTransport {
         if shape == "malformed" {
             return (HTTPResponse(status: .ok), HTTPBody("invalid"))
         }
-        let page = shape == "page" ? "\"2\"" : "null"
+        let page = shape == "page" ? "\"1\"" : "null"
         let cursor = shape == "empty" ? "\"\"" : "\"same\""
         let response = "{\"albums\":{\"total\":0,\"count\":0,\"items\":[],\"facets\":[]},\"assets\":{\"total\":0,\"count\":0,\"items\":[],\"facets\":[],\"nextPage\":\(page),\"nextCursor\":\(cursor)}}"
         return (HTTPResponse(status: .ok), HTTPBody(response))

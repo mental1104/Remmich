@@ -1622,6 +1622,7 @@
 "默认关闭，独立于前台开关。iOS 可延后运行；后台只使用保存的相簿、排除和 iCloud 选项，失败或未知历史保持待核查。系统到期会暂停并保存回执。" = "Off by default and separate from foreground backup. iOS may delay execution. Uses saved albums, exclusions, and iCloud options. Failures and unknown history stay under review. Expiration pauses work and saves receipts.";
 "Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup." = "Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup.";
 "Photo Sync" = "Photo Sync";
+"服务器暂不可用；已恢复本机保存的同步进度，连接恢复后可继续。" = "Server temporarily unavailable. Saved sync progress is restored locally; continue when connected.";
 "Thumbnail unavailable offline" = "Thumbnail unavailable offline";
 "服务器暂不可用，%lld 秒后继续（重试 %lld）；进度已保留，可随时暂停。" = "Server temporarily unavailable. Continuing in %lld seconds (retry %lld). Progress is saved; you can pause anytime.";
 "照片同步的已验证匹配同时用于本机浏览，无需单独扫描；未匹配的新照片继续查重后备份。" = "Verified sync matches also enable local browsing, without a separate scan. New unmatched photos are checked for duplicates before backup.";

@@ -41,6 +41,8 @@ final class MediaLibraryController {
     @ObservationIgnored private let localLivePhotoReader: any LocalLivePhotoMediaReading
     @ObservationIgnored private let localLivePhotoRemote: (any LocalMediaMatchingReading)?
     private var mediaReadOrigins: [MediaReadOriginKey: MediaReadOrigin] = [:]
+    private var localPhotoFallbackPipeline: ImagePipeline?
+    private weak var localPhotoFallbackOwner: ImagePipeline?
     private static let savedPhotosFiles = MediaExportFiles(
         root: FileManager.default.temporaryDirectory.appending(path: "RemmichSavedPhotos", directoryHint: .isDirectory)
     )
@@ -411,20 +413,47 @@ final class MediaLibraryController {
         guard association != nil || (priority != .low && management.client != nil) else { return nil }
         let accountGeneration = management.generation
         let fallback = imageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos, useLocalPhotos: false)
+        let fallbackPipeline = photoFallbackPipeline(for: pipeline)
         // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
         let localKey = association.map { "\($0.localIdentity.localIdentifier)|\($0.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)" } ?? "resolve-visible"
         let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(localKey)|context:\(accountGeneration.uuidString)"
         return ImageRequest(id: id, image: { [weak self] in
             guard let self else { throw CancellationError() }
             return try await readPreferredPhotoImage(association, descriptor: descriptor, scope: scope,
-                                                     accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
+                                                     accountGeneration: accountGeneration, fallback: fallback, pipeline: fallbackPipeline)
         }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
+    }
+
+    /// Nuke的image闭包会持有dataLoadingQueue槽位，skipDataLoadingQueue只作用于data闭包。
+    /// 回源使用独立队列、共享原缓存/加载器，避免外层本机请求占满槽位后等待同队列的网络请求。
+    private func photoFallbackPipeline(for owner: ImagePipeline) -> ImagePipeline {
+        if localPhotoFallbackOwner === owner, let localPhotoFallbackPipeline {
+            return localPhotoFallbackPipeline
+        }
+        localPhotoFallbackPipeline?.invalidate()
+        var configuration = owner.configuration
+        configuration.dataLoadingQueue = .init(maxConcurrentOperationCount: 4)
+        let fallback = ImagePipeline(configuration: configuration)
+        localPhotoFallbackOwner = owner; localPhotoFallbackPipeline = fallback
+        return fallback
     }
 
     private func readPreferredPhotoImage(_ saved: LocalMediaAssociation?, descriptor: MediaRequestDescriptor, scope: MediaAccountScope,
                                          accountGeneration: UUID, fallback: ImageRequest?, pipeline: ImagePipeline) async throws -> ImageContainer
     {
         try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        // 旧记录的可见关联解析可能联网；已有服务器缩略图先从本机缓存显示，不能被解析阻塞。
+        if saved == nil, descriptor.derivative == .thumbnail, var cached = fallback,
+           pipeline.cache.containsCachedImage(for: cached)
+        {
+            cached.options.insert(.returnCacheDataDontLoad)
+            if let response = try? await pipeline.imageTask(with: cached).response {
+                try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+                recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+                return response.container
+            }
+            try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        }
         let association: LocalMediaAssociation? = if let saved {
             saved
         } else {
@@ -457,6 +486,21 @@ final class MediaLibraryController {
             ?? MediaPixelSize(width: limit, height: limit)
         // 旧request可能在创建后才被实际执行；关联已关闭/失效时直接回退，不能再访问Photos。
         if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
+            let sourceVersion = descriptor.derivative == .thumbnail
+                ? try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) : nil
+            let cacheRequest = sourceVersion.map { version in
+                ImageRequest(id: "device-thumbnail-v1|" + Self.displayCacheKey(for: descriptor, scope: scope) + "|" + version,
+                             data: { throw URLError(.resourceUnavailable) })
+            }
+            if let cacheRequest, let cached = await Self.readDisplayThumbnail(cacheRequest, pipeline: pipeline) {
+                try validate()
+                if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
+                   try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion
+                {
+                    recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+                    return cached
+                }
+            }
             let image: UIImage? = if descriptor.derivative == .thumbnail {
                 try await localPhotoReader.thumbnail(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
             } else {
@@ -464,8 +508,17 @@ final class MediaLibraryController {
             }
             if let image, localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
                 try validate()
+                let container = ImageContainer(image: image)
+                if let cacheRequest,
+                   try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion
+                {
+                    await Self.storeDisplayThumbnail(container, request: cacheRequest, pipeline: pipeline)
+                    try validate()
+                    guard localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
+                          try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion else { throw CancellationError() }
+                }
                 recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
-                return ImageContainer(image: image)
+                return container
             }
         }
         try validate()
@@ -474,6 +527,17 @@ final class MediaLibraryController {
         try validate()
         recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
         return response.container
+    }
+
+    /// 仅缓存展示缩略图；解码/编码和磁盘读取离开主线程，不进入导出manifest或备份完成记录。
+    @concurrent private static func readDisplayThumbnail(_ request: ImageRequest, pipeline: ImagePipeline) async -> ImageContainer? {
+        guard !Task.isCancelled else { return nil }
+        return pipeline.cache.cachedImage(for: request)
+    }
+
+    @concurrent private static func storeDisplayThumbnail(_ image: ImageContainer, request: ImageRequest, pipeline: ImagePipeline) async {
+        guard !Task.isCancelled else { return }
+        pipeline.cache.storeCachedImage(image, for: request)
     }
 
     /// assetID/revision为当前普通视频；仅匹配同版Photos current时返回播放器，nil交给既有缓存/远端路径。
@@ -1300,6 +1364,8 @@ final class MediaLibraryController {
     }
 
     func clearAll() {
+        localPhotoFallbackPipeline?.invalidate()
+        localPhotoFallbackPipeline = nil; localPhotoFallbackOwner = nil
         management.configure(session: nil, endpoint: nil)
         // 换号先撤销旧scope，但前台事实由scene生命周期维护；新账号配置后仍须能读取其独立开关。
         photoBackups.automaticConditionsChanged(using: management, scope: nil)

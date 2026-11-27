@@ -5,6 +5,8 @@ import UIKit
 
 /// 本机current媒体展示边界；nil仅表示当前本机不可读，取消或调用方代际错误必须抛出，不能触发旧账户回源。
 @MainActor protocol LocalPhotoMediaReading: Sendable {
+    /// 仅核对当前授权/源版本，不读取图片或联网；nil表示不能安全复用展示缓存。
+    func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String?
     /// expected来自已验证关联，targetPixels为当前界面请求像素；validateContext在读取前后验证账户/页面发布权。
     func image(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
                validateContext: @MainActor () throws -> Void) async throws -> UIImage?
@@ -15,6 +17,11 @@ import UIKit
 }
 
 extension LocalPhotoMediaReading {
+    func thumbnailSourceVersion(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
+        try Task.checkCancellation(); try validateContext()
+        return nil
+    }
+
     func thumbnail(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
                    validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     {
@@ -83,6 +90,13 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                    validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     {
         try await readImage(for: expected, targetPixels: targetPixels, acceptsDegraded: true, validateContext: validateContext)
+    }
+
+    func thumbnailSourceVersion(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
+        try checkContext(validateContext)
+        guard let value = currentObservation(expected) else { return nil }
+        try checkContext(validateContext)
+        return "\(expected.localIdentifier)|\(expected.modificationDate!.timeIntervalSinceReferenceDate)|\(value.adjustmentTime?.timeIntervalSinceReferenceDate ?? -1)|\(value.hasAdjustments)|\(value.pixelWidth)x\(value.pixelHeight)|\(value.duration)|\(value.mediaSubtypes)|\(value.access)"
     }
 
     private func readImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, acceptsDegraded: Bool,

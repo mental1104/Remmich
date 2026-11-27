@@ -694,6 +694,9 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
         // SDK类型仅存在于基础设施层；界面和领域不导入ImmichAPI。
         var dto = ImmichMetadataSearch()
         dto.text = query.text
+        dto.language = await MainActor.run { L10n.language.resolvedCode() == "zh-Hans" ? "zh-CN" : "en" }
+        try Task.checkCancellation()
+        try requireCurrent(owner)
         dto.queryAssetID = query.queryAssetID
         dto.mode = switch query.mode {
         case .fileName: .fileName
@@ -758,9 +761,6 @@ actor ImmichTimelineRepository: TimelineReading, VideoReading, AssetDetailReadin
                 throw CancellationError()
             }
             if let api = error as? ImmichAPIError {
-                if query.requiresForkSmartSearch, api == .notFound || api == .httpStatus(405) || api == .serverError(501) {
-                    throw NativeSearchError.unsupportedExtension
-                }
                 switch api {
                 case .unauthorized: throw NativeSearchError.unauthorized
                 case .forbidden: throw NativeSearchError.forbidden

@@ -34,6 +34,8 @@ public struct ImmichMetadataSearch: Hashable, Sendable {
     /// 服务端参考图的UUID v4；必须在smart模式与非空text二选一，始终走完整Fork协议。
     public var queryAssetID: String?
     public var mode: Mode = .fileName
+    /// 与服务端Web智能搜索一致的当前界面语言；不写入保存条件或凭据。
+    public var language: String?
     public var media: Media = .all
     public var mediaCategory: ImmichSearchMediaCategory?
     public var resolution: ImmichSearchResolution?

@@ -141,25 +141,30 @@ import Photos
     /// 调用取消在读取前后与发布前检查；取消或账号退役不应用迟到配置，已完成的安全暂停恢复仍保留。
     func load(using manager: LibraryManagementController) async {
         guard !configuringAutomatic else { return }
-        guard let scope = manager.backupScope else { statusMessage = "请先连接服务器。"; return }
+        guard let scope = manager.savedAccountScope else { statusMessage = "请先连接服务器。"; return }
         let owner = manager.generation
+        let validateSavedAccount: @MainActor () throws -> Void = {
+            guard manager.generation == owner, manager.savedAccountScope == scope else { throw LibraryWriteError.changedAccount }
+        }
         do {
             try Task.checkCancellation()
             let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
                 try Task.checkCancellation()
-                try Self.validate(manager, owner: owner, scope: scope)
+                try validateSavedAccount()
                 try await store.recoverPhotoBackupWork(scope: scope)
                 try Task.checkCancellation()
-                try Self.validate(manager, owner: owner, scope: scope)
+                try validateSavedAccount()
                 let journal = try await store.loadPhotoBackups(scope: scope)
                 try Task.checkCancellation()
                 return journal
             }
             try Task.checkCancellation()
-            try Self.validate(manager, owner: owner, scope: scope)
+            try validateSavedAccount()
             // 草稿只属于原configurationScope；切换账号的冷恢复不能把旧账号选择带入新账号。
             apply(journal, scope: scope, restoreConfiguration: configurationScope != scope || !requiresSelectionScan)
-            if requiresSelectionScan {
+            if manager.client == nil {
+                statusMessage = "服务器暂不可用；已恢复本机保存的同步进度，连接恢复后可继续。"
+            } else if requiresSelectionScan {
                 statusMessage = "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
             } else {
                 statusMessage = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"

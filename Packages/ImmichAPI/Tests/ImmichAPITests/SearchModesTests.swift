@@ -56,7 +56,7 @@ struct SearchModesTests {
         var query = ImmichMetadataSearch()
         query.mode = .smart
         query.text = "synthetic"
-        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .cursor("opaque")) }
+        await #expect(throws: ImmichAPIError.invalidResponse) { try await client.search(query, continuation: .forkCursor("legacy")) }
     }
 
     /// mode选择合成断言，nextPage为合成响应，expectRegions要求保留地点；返回客户端，GET队列不应被调用。
@@ -86,10 +86,10 @@ private struct ModeTransport: ClientTransport {
             #expect(request.path == "/search/smart")
             #expect(json["query"] as? String == "synthetic")
             #expect(json["page"] as? Int == 2)
-            #expect(json["filter"] == nil && json["cursor"] == nil)
+            #expect(json["filter"] != nil && json["cursor"] == nil)
             if expectRegions {
-                #expect(json["country"] as? String == "Synthetic Country")
-                #expect(json["state"] as? String == "Synthetic State")
+                #expect((json["filter"] as? [String: [String: String]])?["country"]?["eq"] == "Synthetic Country")
+                #expect((json["filter"] as? [String: [String: String]])?["state"]?["eq"] == "Synthetic State")
             }
         } else {
             #expect(operationID == "searchAssets")

@@ -47,7 +47,7 @@ struct SearchTagTests {
             let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
             let first = try await client.search(query)
             #expect(first.assets.isEmpty)
-            let expected: ImmichSearchContinuation = mode == .smart ? (tags == .any ? .page(2) : .forkCursor("tag-next")) : .cursor("tag-next")
+            let expected: ImmichSearchContinuation = mode == .smart ? (tags == .any ? .page(2) : .cursor("tag-next")) : .cursor("tag-next")
             #expect(first.continuation == expected)
             let last = try await client.search(query, continuation: first.continuation)
             #expect(last.continuation == nil)
@@ -69,7 +69,7 @@ struct SearchTagTests {
         let url = try #require(URL(string: "https://example.invalid/api"))
         let client = ImmichClient(apiURL: url, credential: .bearer("synthetic"), transport: transport)
         let first = try await client.search(query)
-        #expect(first.continuation == (mode == .smart ? .forkCursor("tag-next") : .cursor("tag-next")))
+        #expect(first.continuation == (mode == .smart ? .cursor("tag-next") : .cursor("tag-next")))
         let last = try await client.search(query, continuation: first.continuation)
         #expect(last.continuation == nil)
     }
@@ -147,17 +147,17 @@ private struct TagFilterTransport: ClientTransport {
         let nextCursor: String
         if mode == .smart, tags == .any {
             #expect(operationID == "searchSmart" && request.path == "/search/smart")
-            #expect(json["city"] as? String == "Synthetic City")
-            #expect(json["tagIds"] == nil && json["filter"] == nil)
+            #expect((json["filter"] as? [String: [String: String]])?["city"]?["eq"] == "Synthetic City")
+            #expect(json["tagIds"] == nil && (json["filter"] as? [String: Any])?["tagIds"] == nil)
             let page = try #require(json["page"] as? Int)
             #expect(page == 1 || page == 2)
             nextPage = page == 1 ? "\"2\"" : "null"
             nextCursor = "null"
         } else {
-            #expect(operationID == (mode == .smart ? "forkSearchSmart" : "searchAssets"))
-            #expect(request.path == (mode == .smart ? "/fork/search/smart" : "/search/metadata"))
+            #expect(operationID == (mode == .smart ? "searchSmart" : "searchAssets"))
+            #expect(request.path == (mode == .smart ? "/search/smart" : "/search/metadata"))
             let filter = try #require(json["filter"] as? [String: Any])
-            #expect(json["page"] == nil)
+            #expect(json["page"] == nil || json["page"] as? Int == 1)
             if let cursor = json["cursor"] as? String {
                 #expect(cursor == "tag-next")
             }

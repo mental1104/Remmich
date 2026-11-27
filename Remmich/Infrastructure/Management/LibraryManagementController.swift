@@ -22,6 +22,11 @@ final class LibraryManagementController {
         return MediaAccountScope(session: account)
     }
 
+    /// 只供恢复本机资料；没有在线客户端时仍保留已登录账号身份，不授权任何网络写入。
+    var savedAccountScope: MediaAccountScope? {
+        account.map { MediaAccountScope(session: $0) }
+    }
+
     /// configurationFactory可为每个客户端提供隔离会话配置；nil保持现有生产构造与取消行为。
     /// 注入配置仅改变传输来源，不替换LibraryMutationClient的鉴权、序列化、状态码或代际检查。
     init(configurationFactory: (() -> URLSessionConfiguration)? = nil) {

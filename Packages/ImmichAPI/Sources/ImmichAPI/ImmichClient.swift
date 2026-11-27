@@ -475,70 +475,25 @@ public actor ImmichClient {
             return ImmichSearchPage(assets: page.assets, continuation: page.nextCursor.map(ImmichSearchContinuation.cursor))
         }
         guard credential != nil else { throw ImmichAPIError.unauthorized }
-        if query.requiresForkSmartSearch {
-            return try await forkSmartSearch(query, continuation: continuation, size: size)
-        }
-        // 旧式smart没有这些组合的可靠分页契约，不得丢弃高级条件冒充成功。
-        guard query.exifConditions.isEmpty, query.orientation == nil, query.hasAlbums == nil, (1 ... 1000).contains(size), query.personIDs.allSatisfy({ UUID(uuidString: $0) != nil }) else { throw ImmichAPIError.invalidResponse }
-        var pageNumber = 1
-        if let continuation {
-            guard case let .page(value) = continuation, value > 0 else { throw ImmichAPIError.invalidResponse }
-            pageNumber = value
-        }
-        let after = try query.takenAfter.map { try query.captureBoundary($0, endOfDay: false) }
-        let before = try query.takenBefore.map { try query.captureBoundary($0, endOfDay: true) }
-        if let after, let before, after > before {
-            throw ImmichAPIError.invalidResponse
-        }
-        let output = try await makeClient().searchSmart(.init(body: .json(.init(
-            city: query.city.isEmpty ? nil : query.city,
-            country: query.country.isEmpty ? nil : query.country,
-            isFavorite: query.favoritesOnly ? true : nil,
-            lensModel: query.lensModel.isEmpty ? nil : query.lensModel,
-            make: query.cameraMake.isEmpty ? nil : query.cameraMake,
-            model: query.cameraModel.isEmpty ? nil : query.cameraModel,
-            page: pageNumber,
-            personIds: query.personIDs.isEmpty ? nil : query.personIDs,
-            query: text,
-            rating: legacyRating(query.rating),
-            size: size,
-            state: query.state.isEmpty ? nil : query.state,
-            takenAfter: after,
-            takenBefore: before,
-            _type: query.media == .all ? nil : query.media == .image ? .IMAGE : .VIDEO,
-            visibility: query.archivedOnly ? .archive : .timeline,
-            withExif: true
-        ))))
-        switch output {
-        case let .ok(response):
-            let page = try response.body.json.assets
-            // 不把未知形状或倒退/重复页码当成正常终页。
-            guard page.nextCursor == nil else { throw ImmichAPIError.invalidResponse }
-            var next: ImmichSearchContinuation?
-            if let raw = page.nextPage {
-                guard let value = Int(raw), value > pageNumber else { throw ImmichAPIError.invalidResponse }
-                next = .page(value)
-            }
-            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
-        case let .undocumented(statusCode, _):
-            throw Self.map(status: statusCode)
-        }
+        return try await serverSmartSearch(query, continuation: continuation, size: size)
     }
 
-    /// 独立Fork只读请求体；query/queryAssetId必须二选一，缺省Optional由合成编码器省略。
+    /// 与服务端Web相同的智能搜索请求；保留语言、完整filter和分页，不降级成文件名匹配。
     /// 不向生成的官方SmartSearchDto加入自定义字段或路径。
-    private struct ForkSmartSearchBody: Encodable {
+    private struct ServerSmartSearchBody: Encodable {
         let query: String?
         let queryAssetId: String?
         let filter: Components.Schemas.SearchFilter
         let size: Int
         let cursor: String?
+        let page: Int?
+        let language: String?
         let withExif = true
     }
 
-    /// query完整保留筛选并验证文字/UUID v4参考图互斥；continuation仅接受Fork令牌，size为1–1000。
+    /// query完整保留筛选并验证文字/UUID v4参考图互斥；continuation保留服务端页码或游标，size为1–1000。
     /// 返回本次结果页；非法来源/令牌发送前失败，缺路由和其他HTTP错误保留给账号范围界面提示。
-    private func forkSmartSearch(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation?, size: Int) async throws -> ImmichSearchPage {
+    private func serverSmartSearch(_ query: ImmichMetadataSearch, continuation: ImmichSearchContinuation?, size: Int) async throws -> ImmichSearchPage {
         guard (1 ... 1000).contains(size) else { throw ImmichAPIError.invalidResponse }
         let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let reference = query.queryAssetID {
@@ -548,9 +503,17 @@ public actor ImmichClient {
             guard !text.isEmpty, text.utf16.count <= 2000 else { throw ImmichAPIError.invalidResponse }
         }
         var cursor: String?
+        var pageNumber = 1
         if let continuation {
-            guard case let .forkCursor(value) = continuation, !value.isEmpty, value.utf16.count <= 4096 else { throw ImmichAPIError.invalidResponse }
-            cursor = value
+            switch continuation {
+            case let .cursor(value):
+                guard !value.isEmpty, value.utf16.count <= 4096 else { throw ImmichAPIError.invalidResponse }
+                cursor = value
+            case let .page(value):
+                guard value > 0 else { throw ImmichAPIError.invalidResponse }
+                pageNumber = value
+            case .forkCursor: throw ImmichAPIError.invalidResponse
+            }
         }
         let transcoder = Self.dateTranscoder
         let encoder = JSONEncoder()
@@ -559,10 +522,10 @@ public actor ImmichClient {
             var value = encoder.singleValueContainer()
             try value.encode(transcoder.encode(date))
         }
-        let data = try encoder.encode(ForkSmartSearchBody(query: query.queryAssetID == nil ? text : nil,
-                                                          queryAssetId: query.queryAssetID, filter: structuredSearchFilter(query), size: size, cursor: cursor))
-        let operationID = "forkSearchSmart"
-        let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/fork/search/smart",
+        let data = try encoder.encode(ServerSmartSearchBody(query: query.queryAssetID == nil ? text : nil,
+                                                            queryAssetId: query.queryAssetID, filter: structuredSearchFilter(query), size: size, cursor: cursor, page: cursor == nil ? pageNumber : nil, language: query.language))
+        let operationID = "searchSmart"
+        let request = HTTPRequest(method: .post, scheme: nil, authority: nil, path: "/search/smart",
                                   headerFields: [.contentType: "application/json", .accept: "application/json", .cacheControl: "no-store"])
         let network = forkSmartTransport
         do {
@@ -583,11 +546,17 @@ public actor ImmichClient {
             }
             let page = try decoder.decode(Components.Schemas.SearchResponseDto.self, from: bytes).assets
             try Task.checkCancellation()
-            guard page.nextPage == nil else { throw ImmichAPIError.invalidResponse }
-            if let next = page.nextCursor, next.isEmpty || next == cursor {
-                throw ImmichAPIError.invalidResponse
+            let next: ImmichSearchContinuation?
+            if let raw = page.nextPage {
+                guard let value = Int(raw), value > pageNumber else { throw ImmichAPIError.invalidResponse }
+                next = .page(value)
+            } else if let value = page.nextCursor {
+                guard !value.isEmpty, value != cursor else { throw ImmichAPIError.invalidResponse }
+                next = .cursor(value)
+            } else {
+                next = nil
             }
-            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: page.nextCursor.map(ImmichSearchContinuation.forkCursor))
+            return ImmichSearchPage(assets: page.items.map(Self.timelineAsset), continuation: next)
         } catch {
             throw Self.map(error)
         }

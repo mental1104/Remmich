@@ -1,3 +1,12 @@
+## 2026-11-27: Smart search, cold progress restore and persistent display thumbnails
+
+- 普通文字搜索默认智能搜索，与当前服务端 Web 同走 POST /search/smart，保留 query/queryAssetId、language、完整 filter、withExif 和服务端分页；显式文件名/OCR 模式保留原行为。没有修改或部署服务端。
+- 本地备份进度读取使用已保存账号范围，不再依赖在线 API client；扫描、上传和其他写入仍要求当前在线账号门禁。
+- Nuke 的 image 闭包不会遵守 skipDataLoadingQueue；本机 miss 的远端回退改用独立并发队列，避免外层占满槽位后等待自身。真机已见历史缩略图显示，但这不证明所有图片都来自本机。
+- 本机展示缩略图新增账号/远端版本/目标尺寸/当前 Photos 源观察绑定的磁盘缓存；磁盘编解码离开主线程，复用前后核对权限、关联和当前修改版本。无关联但已有远端缩略图缓存时先显示缓存，不再等待网络关联查询。缓存不属于原片导出或备份回执。
+- 最新已安装版本的设备数据库 quick_check 通过；88,804 条任务的 ID、状态和完整 payload 与安装前逐项一致（88,525 existing、8 completed、269 paused、2 failed）。未开始新的扫描或备份。
+- 用户通过蜂窝网络完成 iOS App 验证，应用已打开；Wi-Fi 验证链路具体原因未确认。缩略图持久缓存的单路真机 Debug 增量编译和本地签名验证通过，覆盖安装成功。安装后再次逐项比对 88,804 条任务与原基线一致；启动被 iOS 验证拦截，等待用户按已验证有效的蜂窝方式验证。新增/更新测试源但按用户要求未执行自动测试，冷启动体验待完成。完整 CI 不声明全绿。
+
 ## 2026-11-26: Profile tab, simpler backup UI and bilingual interface
 
 - 分组筛选仅翻译“未分组”占位文案，外部分组名即使恰好等于资源键也保持原样。

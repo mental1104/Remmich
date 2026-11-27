@@ -84,7 +84,7 @@ struct SearchMediaTests {
         let client = ImmichClient(apiURL: endpoint, credential: .bearer("synthetic"), transport: MediaSearchTransport(query: query))
         let first = try await client.search(query)
         let token = try #require(first.continuation)
-        #expect(token == (query.requiresForkSmartSearch ? .forkCursor("next") : .cursor("next")))
+        #expect(token == (query.requiresForkSmartSearch ? .cursor("next") : .cursor("next")))
         let last = try await client.search(query, continuation: token)
         #expect(last.continuation == nil)
     }
@@ -98,8 +98,8 @@ private struct MediaSearchTransport: ClientTransport {
     func send(_ request: HTTPRequest, body: HTTPBody?, baseURL _: URL, operationID: String) async throws -> (HTTPResponse, HTTPBody?) {
         #expect(request.method == .post)
         #expect(request.headerFields[.authorization] == "Bearer synthetic")
-        #expect(operationID == (query.requiresForkSmartSearch ? "forkSearchSmart" : "searchAssets"))
-        #expect(request.path == (query.requiresForkSmartSearch ? "/fork/search/smart" : "/search/metadata"))
+        #expect(operationID == (query.requiresForkSmartSearch ? "searchSmart" : "searchAssets"))
+        #expect(request.path == (query.requiresForkSmartSearch ? "/search/smart" : "/search/metadata"))
         let encoded = try #require(body)
         let bytes = try await Data(collecting: encoded, upTo: 1_000_000)
         let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
