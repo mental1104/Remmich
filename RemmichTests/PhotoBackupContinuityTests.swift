@@ -233,6 +233,126 @@ struct PhotoBackupContinuityTests {
 /// 无导入场景以独立Photos/网络端口观察真实Checker与Worker；交集零导出，新源进入字节查重通道。
 @Suite("Server iCloud backup matching without imports")
 struct PhotoBackupServerMatchingTests {
+    /// 第70次读取断线时第一批64项已真实落盘；冷启动只核查余下66项，不导出或伪造上传回执。
+    @Test(arguments: [false, true]) @MainActor func interruptedMatchingColdResumesOnlyUnfinishedJobs(_ serverFirst: Bool) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appending(path: "index.sqlite"), scope = continuityScope()
+        let store = SQLiteLibraryIndexStore(databaseURL: url)
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let jobs = (0 ..< 130).map { index -> PhotoBackupJob in
+            let name = "checkpoint-\(index)"
+            _ = addServerContinuityCandidate(name, photos: photos, client: client)
+            return .init(source: continuitySource(name, modified: 200))
+        }
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue(jobs.map(\.source))
+        try await store.savePhotoBackups(journal, scope: scope)
+        client.failAssetAt = 70
+        var checkpointReadCounts: [Int] = []
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, checkpointMatches: { batch in
+            checkpointReadCounts.append(photos.reads)
+            try await store.checkpointPhotoBackupMatches(batch, scope: scope)
+        }, serverFirst: serverFirst)
+        await #expect(throws: URLError.self) {
+            try await checker.plan(jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {})
+        }
+        let cold = SQLiteLibraryIndexStore(databaseURL: url)
+        let saved = try await cold.loadPhotoBackups(scope: scope)
+        #expect(saved.jobs.count { $0.stage == .existing } == 64)
+        #expect(saved.jobs.count { $0.stage == .queued } == 66)
+        #expect(saved.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
+        #expect(checkpointReadCounts == [serverFirst ? 2 : 4])
+        client.failAssetAt = nil; client.assetReads.removeAll()
+        // 模拟服务器只返回本次请求的66个云标识，不混入已落盘的前64项。
+        if !serverFirst {
+            client.records = Array(client.records.dropFirst(64))
+        }
+        let resumed = PhotoBackupContinuityChecker(store: cold, metadata: photos, checkpointMatches: { batch in
+            try await cold.checkpointPhotoBackupMatches(batch, scope: scope)
+        }, serverFirst: serverFirst)
+        let remaining = saved.jobs.filter { $0.stage == .queued }
+        let plan = try await resumed.plan(jobs: remaining, scope: scope, client: client, progress: { _, _ in }, validateContext: {})
+        #expect(client.assetReads.count == 66 && plan.checkpointedExisting.count == 66)
+        let result = try await PhotoBackupWorker(store: cold, exporter: ContinuityNoExport()).run(
+            scope: scope, userID: scope.userID, allowCloud: false, client: ContinuityNoUpload(), preflight: plan,
+            validateContext: {}, progress: { _, _ in }
+        )
+        #expect(result.skipped == 66 && result.completed == 0)
+        let complete = try await cold.loadPhotoBackups(scope: scope)
+        #expect(complete.jobs.count == 130 && complete.jobs.allSatisfy { $0.stage == .existing && $0.attempts == 0 })
+    }
+
+    /// 未确认标记、本机源变更和账号退役均不能提交本批断点；恢复不能把未验证项伪称为已完成。
+    @Test(arguments: ["marker", "source", "account"])
+    @MainActor func rejectsUnsafeCheckpointPublication(_ mode: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        _ = addServerContinuityCandidate("checkpoint-safe", photos: photos, client: client)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue([continuitySource("checkpoint-safe", modified: 200)])
+        try await store.savePhotoBackups(journal, scope: scope)
+        client.rejectWrites = mode == "marker"
+        var current = true
+        client.onAsset = {
+            if mode == "account" {
+                current = false
+            }
+            if mode == "source" {
+                photos.values["checkpoint-safe"] = continuitySnapshot("checkpoint-safe", created: 201, cloud: true)
+            }
+        }
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, checkpointMatches: { batch in
+            try await store.checkpointPhotoBackupMatches(batch, scope: scope)
+        })
+        await #expect(throws: (any Error).self) {
+            try await checker.plan(jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {
+                if !current {
+                    throw LibraryWriteError.changedAccount
+                }
+            })
+        }
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        #expect(cold.jobs.allSatisfy { $0.stage == .queued && $0.attempts == 0 })
+    }
+
+    /// 本机预检分批推进且不读取原片；状态回调在下一批前仍遵守取消门禁。
+    @Test @MainActor func localMetadataPublishesProgressAndHonorsCancellation() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var messages: [String] = []
+        let checker = PhotoBackupContinuityChecker(
+            store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")),
+            metadata: ContinuityPhotos(), status: { messages.append(String(localized: $0)) }
+        )
+        let jobs = (0 ..< 130).map { PhotoBackupJob(source: continuitySource("synthetic-\($0)")) }
+        let plan = try await checker.plan(jobs: jobs, scope: continuityScope(), client: ContinuityQueries(), progress: { _, _ in }, validateContext: {})
+        #expect(plan.review.count == 130 && plan.allowed.isEmpty && plan.existing.isEmpty)
+        #expect(messages.contains { $0.contains("64 / 130") })
+        #expect(messages.contains { $0.contains("128 / 130") })
+        #expect(messages.contains { $0.contains("130 / 130") })
+        var cancelled = false
+        let cancelling = PhotoBackupContinuityChecker(
+            store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")),
+            metadata: ContinuityPhotos(), status: { value in
+                if String(localized: value).contains("64 / 130") {
+                    cancelled = true
+                }
+            }
+        )
+        await #expect(throws: CancellationError.self) {
+            try await cancelling.plan(jobs: jobs, scope: continuityScope(), client: ContinuityQueries(), progress: { _, _ in }, validateContext: {
+                if cancelled {
+                    throw CancellationError()
+                }
+            })
+        }
+    }
+
     /// 无导入新照片可按原片查重；没有云ID也可备份，只有可解析的公开元组会附加来源上报。
     @Test(arguments: [LocalPhotoCloudIdentity.resolved("cloud-fresh"), .unavailable, .incomplete, .failed])
     @MainActor func admitsUnmatchedSourcesForOriginalChecksum(_ cloud: LocalPhotoCloudIdentity) async throws {
@@ -691,6 +811,8 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
 
 /// 只读HTTP边界的确定性替身；真实请求编码与严格响应仍由既有LibraryMutationClient HTTP测试覆盖。
 @MainActor private final class ContinuityQueries: PhotoBackupContinuityQuerying {
+    var failAssetAt: Int?
+    var assetReads: [String] = []
     var batches: [[PhotoBackupCachedChecksumQuery]] = []
     var missEveryOther = false
     var fails = false
@@ -730,8 +852,16 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
         return [.init(assetID: UUID(), value: Data("{\"iCloudId\":\"\(associatedCloud)\"}".utf8))]
     }
 
+    @MainActor func localMediaMetadataSnapshot() async throws -> [LocalMediaRemoteMetadataRecord] {
+        records
+    }
+
     /// id必须属于合成候选；返回独立详情或明确不可读，不提供媒体。
     @MainActor func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset {
+        assetReads.append(id)
+        if assetReads.count == failAssetAt {
+            throw URLError(.networkConnectionLost)
+        }
         onAsset?()
         guard let value = assets[id] else { throw LocalMediaCandidateError.inaccessible }
         return value

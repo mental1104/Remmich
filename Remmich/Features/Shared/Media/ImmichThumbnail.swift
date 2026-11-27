@@ -49,7 +49,9 @@ struct ImmichThumbnail: View {
                     RemmichCoverLoadingView(caption: logoPlaceholderCaption)
                         .transition(.opacity)
                 } else if isCacheOnly {
-                    ProgressView()
+                    Image(systemName: "icloud.slash")
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Thumbnail unavailable offline")
                 } else if state.isLoading {
                     ProgressView(value: Double(state.progress.fraction))
                         .progressViewStyle(.circular)

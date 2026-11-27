@@ -357,3 +357,13 @@ NAS uncommitted `codex/feature-media-ai-analysis` work is excluded from the base
 ## Known Mac build pitfalls
 
 On the M1 Mac with 8 GB RAM, concurrent compilation caused excessive swap/disk pressure. Use `xcodebuild ... -jobs 1 COMPILER_INDEX_STORE_ENABLE=NO`; preserve existing dependency/build caches. Both app and test targets must use the local Apple Team and unique bundle identifiers. Personal signing is for local builds; CI creates unsigned products, and distribution remains subject to the account's signing capabilities.
+
+## Unified photo sync compatibility and verification — 2026-11-27
+
+Photo Sync now combines backup and local-first browsing. Metadata-verified associations are saved atomically with completed match checkpoints and remain separate from original-byte upload receipts. Legacy records keep their existing/completed states; display-only cache recovery does not update backup jobs. Old preferences default to the shared workflow, preventing an independent automatic full-library scan after upgrade.
+
+Visible assets with no saved browsing association can recover one through official GET asset/metadata APIs and public PhotoKit cloud-ID mapping. Owner, remote revision/state, local metadata tuple, source version and Photos permission must all match. Ambiguous, missing or unavailable evidence is not promoted to a match. Cached reduced-quality images are usable only for thumbnails; iCloud original downloads remain disabled in the display reader. Previously uncached associations need server availability once before they can be reused offline.
+
+Temporary HTTP 500–599, 408/429 and selected transport errors use capped cancellable backoff. Foreground work waits for recovery; background retry remains bounded by policy and the OS lease. Deterministic metadata PUTs may retry, while a media retry re-enters checksum/precheck before any POST. Unknown or incomplete receipts never count as completed backups. This does not implement byte-offset media upload resumption or automatic later reporting of an initially unavailable iCloud ID.
+
+The stopped pre-upgrade phone queue passed SQLite quick_check with 88,525 existing, 8 completed, 2 failed and 269 paused jobs. A local canonical baseline preserves the 88,533 completed/matched records for post-install comparison. No private database is included in Git. The signed browsing revision and final migration incremental build succeeded with Xcode 27.2 / Remmich / Debug / -jobs 1. Automated tests were waived, and full CI is not claimed green. Installation and real-device image/progress recovery verification are deferred until the user returns; real iCloud/background/Live Photo/RAW acceptance remains incomplete.

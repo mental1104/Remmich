@@ -30,15 +30,9 @@ struct MyView: View {
             if let sessionController {
                 Section("Backup & Sync") {
                     Button { showsBackup = true } label: {
-                        Label("Photo Backup", systemImage: "icloud.and.arrow.up")
+                        Label("Photo Sync", systemImage: "arrow.triangle.2.circlepath.icloud")
                     }
                     .accessibilityIdentifier("my-photo-backup")
-                    NavigationLink {
-                        LocalMediaMatchingView(controller: sessionController.media.localMediaMatches, manager: sessionController.media.management)
-                    } label: {
-                        Label("Local Photo Matching", systemImage: "iphone.and.arrow.forward")
-                    }
-                    .accessibilityIdentifier("my-local-matching")
                     NavigationLink {
                         settings(initialPage: .index)
                     } label: {
@@ -70,7 +64,7 @@ struct MyView: View {
         .sheet(isPresented: $showsBackup) {
             if let sessionController {
                 PhotoBackupView(controller: sessionController.media.management, backup: sessionController.media.photoBackups,
-                                albumSync: sessionController.media.photoBackupAlbumSync, albumAutomation: sessionController.media.photoBackupAlbumAutomation)
+                                albumSync: sessionController.media.photoBackupAlbumSync, albumAutomation: sessionController.media.photoBackupAlbumAutomation, localMatches: sessionController.media.localMediaMatches)
             }
         }
         .sheet(isPresented: $showsPartners) {

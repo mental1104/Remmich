@@ -14,7 +14,7 @@ nonisolated enum LocalMediaMetadataStreamError: Error, Equatable, Sendable {
 /// 按字节解析官方JSONL，只保留本轮本机cloud ID对应的关联；不确认同步、不改变远端检查点。
 /// 每行/全流有限，结束标记和EOF均确认后才交出候选，网络中断不能发布部分匹配。
 nonisolated struct LocalMediaMetadataStreamDecoder {
-    private let cloudIDs: Set<String>
+    private let cloudIDs: Set<String>?
     private let maximumLineBytes: Int
     private let maximumResponseBytes: Int
     private var receivedBytes = 0
@@ -29,10 +29,9 @@ nonisolated struct LocalMediaMetadataStreamDecoder {
         let metadata: LocalMediaMobileMetadata
     }
 
-    /// cloudIDs为本机公开Photos映射的完整不透明ID；两个字节上限分别限制单行和全响应，不截断后继续匹配。
-    init(cloudIDs: Set<String>, maximumLineBytes: Int = 262_144, maximumResponseBytes: Int = 268_435_456) throws {
-        guard !cloudIDs.isEmpty, cloudIDs.count <= 200_000,
-              cloudIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 4096 }),
+    /// cloudIDs为本机公开Photos映射的完整不透明ID；nil先建立完整远端索引，仍受字节/候选数上限约束。
+    init(cloudIDs: Set<String>?, maximumLineBytes: Int = 262_144, maximumResponseBytes: Int = 268_435_456) throws {
+        guard cloudIDs.map({ !$0.isEmpty && $0.count <= 200_000 && $0.allSatisfy { !$0.isEmpty && $0.utf8.count <= 4096 } }) ?? true,
               maximumLineBytes > 0, maximumResponseBytes > 0 else { throw LocalMediaMetadataStreamError.invalidInput }
         self.cloudIDs = cloudIDs
         self.maximumLineBytes = maximumLineBytes
@@ -109,11 +108,13 @@ nonisolated struct LocalMediaMetadataStreamDecoder {
                 let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: JSONSerialization.data(withJSONObject: value))
                 try origin.validate()
                 guard key == PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId) else { throw LocalMediaMetadataStreamError.invalidResponse }
-                guard cloudIDs.contains(origin.metadata.cloudId) else { return }
+                guard cloudIDs?.contains(origin.metadata.cloudId) ?? true else { return }
+                guard records.count + backupRecords.count < 200_000 else { throw LocalMediaMetadataStreamError.limitExceeded }
                 try backupRecords.append(.init(assetID: assetID, value: JSONEncoder().encode(origin.metadata)))
                 return
             }
-            guard key == "mobile-app", let cloudID = value["iCloudId"] as? String, cloudIDs.contains(cloudID) else { return }
+            guard key == "mobile-app", let cloudID = value["iCloudId"] as? String, cloudIDs?.contains(cloudID) ?? true else { return }
+            guard records.count + backupRecords.count < 200_000 else { throw LocalMediaMetadataStreamError.limitExceeded }
             // 不按asset或cloud ID去重：多个候选必须留给领域匹配器明确判为歧义。
             try records.append(.init(assetID: assetID, value: JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])))
         default:

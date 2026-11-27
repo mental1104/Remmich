@@ -1,9 +1,11 @@
 import Foundation
 import Observation
+import OSLog
 import Photos
 
 /// 备份页面、前台自动与明确同意的系统后台共用持久队列；真实逐项上传由唯一Coordinator/worker串行执行。
 @MainActor @Observable final class PhotoBackupController {
+    private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "BackupFailure")
     /// id是PhotoKit集合身份，只在此设备授权照片库内解析；不以相簿名推断远端相簿关系。
     nonisolated struct Album: Identifiable, Equatable, Sendable {
         let id: String
@@ -53,6 +55,16 @@ import Photos
     private(set) var failed = 0
     private(set) var total = 0
     private(set) var processed = 0
+    private(set) var preflighting = false
+    private(set) var phaseDone = 0
+    private(set) var phaseTotal = 0
+    var progressFraction: Double? {
+        let count = preflighting ? phaseDone : processed
+        let limit = preflighting ? phaseTotal : total
+        guard limit > 0 else { return nil }
+        return min(1, max(0, Double(count) / Double(limit)))
+    }
+
     private(set) var jobs: [PhotoBackupJob] = []
     /// 界面读取时按当前语言格式化，不改变队列、取消代际或后台执行状态。
     var status: String {
@@ -82,7 +94,8 @@ import Photos
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let store: SQLiteLibraryIndexStore
     @ObservationIgnored private let exporter: any PhotoBackupResourceExporting
-    @ObservationIgnored private let preflight: any PhotoBackupPreflighting
+    @ObservationIgnored private let preflight: (any PhotoBackupPreflighting)?
+    @ObservationIgnored weak var localMatches: LocalMediaMatchController?
     @ObservationIgnored private let albumLoader: @MainActor () async throws -> AlbumCatalog
     @ObservationIgnored private let albumScanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private var configurationScope: MediaAccountScope?
@@ -117,7 +130,7 @@ import Photos
     {
         self.store = store
         self.exporter = exporter
-        self.preflight = preflight ?? PhotoBackupContinuityChecker(store: store)
+        self.preflight = preflight
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
         self.albumScanner = albumScanner ?? { ids in try await Self.albumSnapshots(for: ids) }
         self.authorizationStatus = authorizationStatus
@@ -378,6 +391,8 @@ import Photos
         let owner = manager.generation
         running = true
         completed = 0; duplicates = 0; failed = 0; processed = 0
+        statusMessage = "正在准备备份队列，可随时暂停。"
+        continuityMessage = "正在读取并核对已保存的任务。"
         task = Task {
             defer {
                 running = false; task = nil
@@ -422,9 +437,9 @@ import Photos
                         } else {
                             []
                         }
-                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs)
+                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs, keepWaiting: !mode.isBackground)
                         return try await PhotoBackupWorker(store: store, exporter: exporter).run(
-                            scope: scope, userID: client.userID, allowCloud: cloud, client: client,
+                            scope: scope, userID: client.userID, allowCloud: cloud, client: self.retryingUploader(client, manager: manager, owner: owner, scope: scope, keepWaiting: !mode.isBackground),
                             preflight: plan,
                             validateContext: {
                                 try Self.validate(manager, owner: owner, scope: scope)
@@ -553,10 +568,31 @@ import Photos
 
     /// journal是Coordinator内固定的实际待执行队列；完整在线核查通过才发放Worker许可，每个await后继续核原账号。
     private func prepareContinuity(_ journal: PhotoBackupJournal, manager: LibraryManagementController, owner: UUID,
-                                   scope: MediaAccountScope, client: LibraryMutationClient, verificationIDs: Set<UUID>) async throws -> PhotoBackupPreflightPlan
+                                   scope: MediaAccountScope, client: LibraryMutationClient, verificationIDs: Set<UUID>, keepWaiting: Bool = true) async throws -> PhotoBackupPreflightPlan
     {
         let queued = journal.jobs.filter { $0.stage == .queued }
-        let plan = try await preflight.plan(jobs: queued, scope: scope, client: client, verificationIDs: verificationIDs, progress: { [self] done, total in
+        preflighting = true; phaseDone = 0; phaseTotal = queued.count
+        defer { preflighting = false }
+        await localMatches?.beginBackupMatching(using: manager)
+        try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+        let publishStatus: @MainActor (String.LocalizationValue) -> Void = { [weak self] message in self?.continuityMessage = message }
+        let reader = PhotoBackupRetryingQueries(base: client, validate: {
+            try Self.validate(manager, owner: owner, scope: scope)
+        }, status: publishStatus, keepWaiting: keepWaiting, retryMatchedWrites: true)
+        let checker = preflight ?? PhotoBackupContinuityChecker(store: store, status: { [weak self] message in
+            self?.continuityMessage = message
+        }, phaseProgress: { [weak self] done, total in
+            self?.phaseDone = done; self?.phaseTotal = total
+        }, serverFirst: true, verifiedCheckpoint: { [self] jobs, associations in
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            try await store.checkpointPhotoBackupMatches(jobs, scope: scope, associations: associations)
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            processed += jobs.count
+            localMatches?.acceptBackupMatches(associations, using: manager)
+            statusMessage = "已保存匹配进度 \(processed) 项；中断后可继续剩余项目。"
+        })
+        let plan = try await checker.plan(jobs: queued, scope: scope, client: reader, verificationIDs: verificationIDs, progress: { [self] done, total in
+            phaseDone = done; phaseTotal = total
             continuityMessage = "正在核查 \(done) / \(total) 项，可随时暂停。"
         }, validateContext: {
             try Self.validate(manager, owner: owner, scope: scope)
@@ -567,6 +603,22 @@ import Photos
         return plan
     }
 
+    func matchingAssociations(scope: MediaAccountScope) async throws -> [LocalMediaAssociation] {
+        try await store.loadPhotoSyncAssociations(scope: scope)
+    }
+
+    func cacheMatchingAssociations(_ values: [LocalMediaAssociation], scope: MediaAccountScope) async throws {
+        try await store.cachePhotoSyncAssociations(values, scope: scope)
+    }
+
+    private func retryingUploader(_ client: LibraryMutationClient, manager: LibraryManagementController, owner: UUID,
+                                  scope: MediaAccountScope, keepWaiting: Bool = true) -> PhotoSyncRetryingUploader
+    {
+        .init(base: client, retry: .init(keepWaiting: keepWaiting, validate: {
+            try Self.validate(manager, owner: owner, scope: scope)
+        }, status: { [weak self] message in self?.continuityMessage = message }))
+    }
+
     /// owner/scope必须仍属于manager当前认证上下文；不检查Task取消，供worker取消清理判断是否仍可落盘。
     private static func validate(_ manager: LibraryManagementController, owner: UUID, scope: MediaAccountScope) throws {
         guard manager.generation == owner, manager.backupScope == scope else { throw LibraryWriteError.changedAccount }
@@ -575,11 +627,20 @@ import Photos
     /// error只影响原代际界面，不向用户显示私人PhotoKit标识或底层响应正文。
     private func showFailure(_ error: any Error, manager: LibraryManagementController, owner: UUID) {
         guard manager.generation == owner else { return }
+        if !(error is CancellationError) {
+            let value = error as NSError
+            Self.logger.error("Backup failed domain=\(value.domain, privacy: .public) code=\(value.code) phaseDone=\(self.phaseDone) phaseTotal=\(self.phaseTotal)")
+            if let write = error as? LibraryWriteError, case let .http(code) = write {
+                Self.logger.error("Backup failed HTTP status=\(code)")
+            }
+        }
         if let error = error as? PhotoBackupContinuityError {
             switch error {
             case .wrongAccount: statusMessage = "备份记录属于其他账户，未导入。"
             default: statusMessage = "接续核查未完成；记录与队列保留，本次没有开始上传。"
             }
+        } else if PhotoBackupRetryingQueries.isTransient(error) {
+            statusMessage = "连接中断。已确认的匹配结果已保存，点击继续仅核查未完成项目。"
         } else {
             statusMessage = error is CancellationError ? "已停止。队列与部分回执已保留；继续时重新查重。" : "操作未确认完成。恢复资料保留；检查权限、连接或存储后再试。"
         }
@@ -663,7 +724,7 @@ extension PhotoBackupController {
                 var journal = try await store.loadPhotoBackups(scope: scope)
                 try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                 try journal.setForegroundNetworkRecoveryEnabled(enabled)
-                try await store.savePhotoBackups(journal, scope: scope)
+                try await store.updatePhotoBackupAutomationSettings(scope: scope, networkRecovery: enabled)
                 try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                 return journal
             }
@@ -702,7 +763,7 @@ extension PhotoBackupController {
                 var journal = try await store.loadPhotoBackups(scope: scope)
                 try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                 try journal.setBackgroundAutomaticEnabled(enabled)
-                try await store.savePhotoBackups(journal, scope: scope)
+                try await store.updatePhotoBackupAutomationSettings(scope: scope, background: enabled)
                 try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                 return journal
             }
@@ -883,7 +944,7 @@ extension PhotoBackupController {
                             let plan = try await prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs)
                             try await validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
                             return try await PhotoBackupWorker(store: store, exporter: exporter).run(
-                                scope: scope, userID: client.userID, allowCloud: cloud, client: client,
+                                scope: scope, userID: client.userID, allowCloud: cloud, client: retryingUploader(client, manager: manager, owner: owner, scope: scope),
                                 preflight: plan,
                                 // cleanup仍须在Task取消后保存安全暂停；正常Worker检查点先检查Task取消。
                                 validateContext: {
@@ -964,7 +1025,7 @@ extension PhotoBackupController {
             var journal = try await store.loadPhotoBackups(scope: scope)
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
             try journal.setForegroundAutomaticEnabled(enabled)
-            try await store.savePhotoBackups(journal, scope: scope)
+            try await store.updatePhotoBackupAutomationSettings(scope: scope, foreground: enabled)
             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
             return journal
         }

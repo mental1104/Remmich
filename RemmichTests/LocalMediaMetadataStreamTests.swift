@@ -5,6 +5,15 @@ import Testing
 /// 直接消费独立JSONL字节，证明匹配读取只接受完整快照，不把同步终止或元数据当备份确认。
 @Suite("Local media metadata stream")
 struct LocalMediaMetadataStreamTests {
+    @Test func buildsCompleteIndexBeforeLocalCloudIDsAreKnown() throws {
+        var decoder = try LocalMediaMetadataStreamDecoder(cloudIDs: nil)
+        try feed(localMetadataRow(cloudID: "first"), to: &decoder)
+        try feed(localMetadataRow(cloudID: "second", assetID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), to: &decoder)
+        #expect(throws: LocalMediaMetadataStreamError.incomplete) { try decoder.finish() }
+        try feed(localMetadataComplete, to: &decoder)
+        #expect(try decoder.finish().count == 2)
+    }
+
     /// 任意网络分块不能截坏UTF8；筛选保留完整opaque ID与官方字符串坐标，不读取媒体。
     @Test func preservesRelevantMetadataAcrossByteBoundaries() throws {
         var decoder = try LocalMediaMetadataStreamDecoder(cloudIDs: ["照片:opaque-id"])

@@ -8,8 +8,18 @@ import UIKit
     /// expected来自已验证关联，targetPixels为当前界面请求像素；validateContext在读取前后验证账户/页面发布权。
     func image(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
                validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    func thumbnail(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
+                   validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     /// 仅普通video身份可返回current播放项；LivePhoto motion不能伪装成独立video或原片备份证明。
     func playerItem(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> AVPlayerItem?
+}
+
+extension LocalPhotoMediaReading {
+    func thumbnail(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
+                   validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    {
+        try await image(for: expected, targetPixels: targetPixels, validateContext: validateContext)
+    }
 }
 
 /// 只比较当前可访问的公开Photos观察；补充编辑时间/尺寸，防止媒体请求期间的同对象变化被发布。
@@ -66,6 +76,18 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     func image(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
                validateContext: @MainActor () throws -> Void) async throws -> UIImage?
     {
+        try await readImage(for: expected, targetPixels: targetPixels, acceptsDegraded: false, validateContext: validateContext)
+    }
+
+    func thumbnail(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize,
+                   validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    {
+        try await readImage(for: expected, targetPixels: targetPixels, acceptsDegraded: true, validateContext: validateContext)
+    }
+
+    private func readImage(for expected: LocalPhotoIdentity, targetPixels: MediaPixelSize, acceptsDegraded: Bool,
+                           validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    {
         try checkContext(validateContext)
         guard targetPixels.width > 0, targetPixels.height > 0 else { return nil }
         let observation = currentObservation(expected)
@@ -82,13 +104,13 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
                 guard !Task.isCancelled else { read.cancel(); return }
                 let options = PHImageRequestOptions()
                 options.version = .current
-                options.deliveryMode = .highQualityFormat
+                options.deliveryMode = acceptsDegraded ? .opportunistic : .highQualityFormat
                 options.resizeMode = .fast
                 options.isNetworkAccessAllowed = false
                 let request = driver.requestImage(for: expected, targetPixels: targetPixels, options: options) { delivery in
                     if delivery.failed {
                         read.finish(nil)
-                    } else if !delivery.degraded {
+                    } else if !delivery.degraded || (acceptsDegraded && delivery.image != nil) {
                         read.finish(delivery.image)
                     }
                 }
@@ -184,7 +206,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
         let manager = PHImageManager.default()
         let id = manager.requestImage(for: asset, targetSize: CGSize(width: targetPixels.width, height: targetPixels.height),
                                       contentMode: .aspectFit, options: options)
-        { image, info in
+        { @Sendable image, info in
             let failed = (info?[PHImageCancelledKey] as? Bool == true) || info?[PHImageErrorKey] != nil
             result(.init(image: failed ? nil : image, degraded: info?[PHImageResultIsDegradedKey] as? Bool == true, failed: failed))
         }
@@ -197,7 +219,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
     {
         guard expected.mediaKind == .video, let asset = asset(expected), options.version == .current, !options.isNetworkAccessAllowed else { return nil }
         let manager = PHImageManager.default()
-        let id = manager.requestPlayerItem(forVideo: asset, options: options) { item, info in
+        let id = manager.requestPlayerItem(forVideo: asset, options: options) { @Sendable item, info in
             let failed = (info?[PHImageCancelledKey] as? Bool == true) || info?[PHImageErrorKey] != nil
             result(failed ? nil : item)
         }

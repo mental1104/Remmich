@@ -133,6 +133,28 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         }
     }
 
+    /// 自动化开关只更新当前账号的已验证日志头；不读取、删除或重写整份任务队列。
+    func updatePhotoBackupAutomationSettings(scope: MediaAccountScope, foreground: Bool? = nil,
+                                             background: Bool? = nil, networkRecovery: Bool? = nil) throws
+    {
+        try Task.checkCancellation()
+        let db = try photoBackupDatabase(scope: scope)
+        try db.transaction {
+            guard let previous = try photoBackupHeader(scope: scope, database: db) else { throw PhotoBackupStateError.invalidJournal }
+            let header = PhotoBackupJournal.Header(
+                version: previous.version, namespace: previous.namespace, selectedAlbumIDs: previous.selectedAlbumIDs,
+                allowCloud: previous.allowCloud, excludedAlbumIDs: previous.excludedAlbumIDs, rawJPEGVersion: previous.rawJPEGVersion,
+                foregroundAutomaticEnabled: foreground ?? previous.foregroundAutomaticEnabled,
+                backgroundAutomaticEnabled: background ?? previous.backgroundAutomaticEnabled,
+                foregroundNetworkRecoveryEnabled: networkRecovery ?? previous.foregroundNetworkRecoveryEnabled
+            )
+            try header.validate(namespace: scope.cacheNamespace)
+            let json = try String(decoding: JSONEncoder().encode(header), as: UTF8.self)
+            try db.execute("UPDATE main.photo_backup_headers SET payload=? WHERE scope=?", [.text(json), .text(scope.cacheNamespace)])
+            try Task.checkCancellation()
+        }
+    }
+
     /// job必须已由批量扫描创建且源版本相同；只验证/编码/更新这一行，不插入未知任务或重写其他回执。
     /// 调用方须在下一次导出/网络副作用前等待成功，并仍检查自己的账号/端点代际。
     func savePhotoBackupJob(_ job: PhotoBackupJob, scope: MediaAccountScope) throws {
@@ -146,6 +168,67 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
                                               [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
                   saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }
             try updatePhotoBackupRow(job, scope: scope, database: db)
+            try Task.checkCancellation()
+        }
+    }
+
+    /// 已完整读取远端候选且逐项复核的有限匹配批次；事务只更新这些queued行，取消或任何坏行整批回滚。
+    func checkpointPhotoBackupMatches(_ jobs: [PhotoBackupJob], scope: MediaAccountScope, associations: [LocalMediaAssociation] = []) throws {
+        try Task.checkCancellation()
+        guard jobs.count <= 64, associations.count <= jobs.count, Set(jobs.map(\.id)).count == jobs.count else { throw PhotoBackupStateError.invalidJournal }
+        let db = try photoBackupDatabase(scope: scope)
+        try db.execute("CREATE TABLE IF NOT EXISTS main.photo_sync_associations(scope TEXT NOT NULL REFERENCES scopes(scope) ON DELETE CASCADE,remote_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,remote_id))")
+        try db.transaction {
+            guard let header = try photoBackupHeader(scope: scope, database: db) else { throw PhotoBackupStateError.invalidJournal }
+            for expected in jobs {
+                try Task.checkCancellation()
+                guard let saved = try db.queryOne("SELECT job_id,stage,payload FROM photo_backup_jobs WHERE scope=? AND job_id=?",
+                                                  [.text(scope.cacheNamespace), .text(expected.id.uuidString)], map: Self.decodePhotoBackupJob),
+                    saved.source == expected.source, saved.stage == .queued,
+                    saved.source.kind != .rawJPEG || header.version == 3 else { throw PhotoBackupStateError.invalidTransition }
+                var matched = saved
+                try matched.confirmExistingMatch()
+                try matched.validate()
+                try updatePhotoBackupRow(matched, scope: scope, database: db)
+            }
+            for association in associations {
+                try Task.checkCancellation()
+                guard jobs.contains(where: { $0.source.localID == association.localIdentity.localIdentifier && $0.source.modifiedAt == association.localIdentity.modificationDate }),
+                      association.remoteRevision.timeIntervalSince1970.isFinite,
+                      Data(base64Encoded: association.checksum)?.count == 20 else { throw PhotoBackupStateError.invalidJournal }
+                let json = try String(decoding: JSONEncoder().encode(association), as: UTF8.self)
+                try db.execute("INSERT INTO main.photo_sync_associations(scope,remote_id,payload) VALUES(?,?,?) ON CONFLICT(scope,remote_id) DO UPDATE SET payload=excluded.payload",
+                               [.text(scope.cacheNamespace), .text(association.remoteID.uuidString), .text(json)])
+            }
+            try Task.checkCancellation()
+        }
+    }
+
+    /// 与备份检查点同事务保存的显示关联；仅供同账号、当前Photos授权/版本的Reader再次核证。
+    func loadPhotoSyncAssociations(scope: MediaAccountScope) throws -> [LocalMediaAssociation] {
+        guard try canRead(scope) else { return [] }
+        let db = try preparedDatabase(scope: scope)
+        guard try db.scalarInt64("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='photo_sync_associations'") == 1 else { return [] }
+        return try db.query("SELECT payload FROM main.photo_sync_associations WHERE scope=?", [.text(scope.cacheNamespace)]) {
+            try Self.decode(LocalMediaAssociation.self, from: $0.text(0))
+        }
+    }
+
+    /// 按需恢复的浏览关联只写独立缓存表，不更新/重新排队任何备份任务或回执。
+    func cachePhotoSyncAssociations(_ values: [LocalMediaAssociation], scope: MediaAccountScope) throws {
+        try Task.checkCancellation()
+        guard values.count <= 64, try canRead(scope) else { throw CancellationError() }
+        let db = try preparedDatabase(scope: scope)
+        guard try db.scalarInt64("SELECT COUNT(*) FROM scopes WHERE scope=?", [.text(scope.cacheNamespace)]) == 1 else { throw CancellationError() }
+        try db.execute("CREATE TABLE IF NOT EXISTS main.photo_sync_associations(scope TEXT NOT NULL REFERENCES scopes(scope) ON DELETE CASCADE,remote_id TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(scope,remote_id))")
+        try db.transaction {
+            for value in values {
+                try Task.checkCancellation()
+                let encoded = try JSONEncoder().encode(value)
+                _ = try JSONDecoder().decode(LocalMediaAssociation.self, from: encoded)
+                try db.execute("INSERT INTO main.photo_sync_associations(scope,remote_id,payload) VALUES(?,?,?) ON CONFLICT(scope,remote_id) DO UPDATE SET payload=excluded.payload",
+                               [.text(scope.cacheNamespace), .text(value.remoteID.uuidString), .text(String(decoding: encoded, as: UTF8.self))])
+            }
             try Task.checkCancellation()
         }
     }

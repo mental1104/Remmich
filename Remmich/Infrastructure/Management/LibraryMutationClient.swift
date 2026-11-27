@@ -222,6 +222,43 @@ final nonisolated class LibraryMutationClient: Sendable {
         return asset
     }
 
+    /// 旧版仅保存备份匹配时，按当前可见资产只读补回浏览证据；不遍历整库、不更改备份任务。
+    @concurrent func localPhotoDisplayEvidence(_ id: UUID) async throws -> (LocalMediaRemoteAsset, [LocalMediaRemoteCandidate]) {
+        let canonical = try validID(id.uuidString)
+        var assetRequest = try request("GET", ["assets", canonical])
+        assetRequest.timeoutInterval = 5
+        assetRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        let (assetData, assetResponse) = try await session.data(for: assetRequest)
+        let assetBytes = try checked(assetData, assetResponse)
+        guard (assetResponse as? HTTPURLResponse)?.statusCode == 200, assetBytes.count <= 1_048_576 else { throw LibraryWriteError.malformedResponse }
+        let remote = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: assetBytes)
+        guard remote.id == id else { throw LibraryWriteError.malformedResponse }
+        var metadataRequest = try request("GET", ["assets", canonical, "metadata"])
+        metadataRequest.timeoutInterval = 5
+        metadataRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await session.data(for: metadataRequest)
+        let bytes = try checked(data, response)
+        guard (response as? HTTPURLResponse)?.statusCode == 200, bytes.count <= 262_144,
+              let rows = try JSONSerialization.jsonObject(with: bytes) as? [[String: Any]], rows.count <= 256 else { throw LibraryWriteError.malformedResponse }
+        var keys = Set<String>(), values = Set<LocalMediaMobileMetadata>()
+        for row in rows {
+            guard let key = row["key"] as? String, keys.insert(key).inserted else { throw LibraryWriteError.malformedResponse }
+            guard key == "mobile-app" || key.hasPrefix(PhotoBackupOrigin.keyPrefix) else { continue }
+            guard let value = row["value"] as? [String: Any] else { throw LibraryWriteError.malformedResponse }
+            let encoded = try JSONSerialization.data(withJSONObject: value)
+            if key == "mobile-app" {
+                try values.insert(JSONDecoder().decode(LocalMediaMobileMetadata.self, from: encoded))
+            } else {
+                let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: encoded)
+                try origin.validate()
+                guard key == PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId) else { throw LibraryWriteError.malformedResponse }
+                values.insert(origin.metadata)
+            }
+        }
+        try Task.checkCancellation()
+        return (remote, values.map { .init(assetID: id, metadata: $0) })
+    }
+
     /// queries为最多64个不重复nonce的本机完整字节摘要；官方precheck只查现有资源，accept仅返回未命中，绝不上传。
     /// 精确200、逐ID唯一回执及duplicate/isTrashed必须完整；结果仍须调用方fresh owner/版本/编辑状态验证。
     @concurrent func lookupLocalMediaChecksums(_ queries: [LocalMediaChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
@@ -335,6 +372,14 @@ final nonisolated class LibraryMutationClient: Sendable {
     /// 返回完整流中的未验证候选；现有metadata检查点、SyncReset、HTTP/协议失败均抛错，不返回部分结果。
     @concurrent func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord] {
         guard !cloudIDs.isEmpty else { return [] }
+        return try await readLocalMediaMetadata(cloudIDs: cloudIDs)
+    }
+
+    @concurrent func localMediaMetadataSnapshot() async throws -> [LocalMediaRemoteMetadataRecord] {
+        try await readLocalMediaMetadata(cloudIDs: nil)
+    }
+
+    @concurrent private func readLocalMediaMetadata(cloudIDs: Set<String>?) async throws -> [LocalMediaRemoteMetadataRecord] {
         var decoder = try LocalMediaMetadataStreamDecoder(cloudIDs: cloudIDs)
         let acknowledgements = try await send("GET", ["sync", "ack"], expectedStatus: 200)
         try LocalMediaMetadataStreamDecoder.requireFullMetadataSnapshot(acknowledgements)

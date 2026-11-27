@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 /// 当前账号的持久前台备份入口；扫描与上传分开确认，离开前台只暂停，不删除手机或服务器资源。
 struct PhotoBackupView: View {
     let controller: LibraryManagementController
+    let localMatches: LocalMediaMatchController?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.locale) private var locale
@@ -22,8 +23,9 @@ struct PhotoBackupView: View {
 
     /// controller提供当前鉴权通道，backup由Media统一持有，页面草稿/手动任务与前台自动化共享同一持久队列事实。
     /// albumSync/albumAutomation同由Media持有；页面只借用，关闭页面不能销毁正在运行的自动规则。
-    init(controller: LibraryManagementController, backup: PhotoBackupController, albumSync: PhotoBackupAlbumSyncController, albumAutomation: PhotoBackupAlbumAutomation) {
+    init(controller: LibraryManagementController, backup: PhotoBackupController, albumSync: PhotoBackupAlbumSyncController, albumAutomation: PhotoBackupAlbumAutomation, localMatches: LocalMediaMatchController? = nil) {
         self.controller = controller
+        self.localMatches = localMatches
         _backup = State(initialValue: backup)
         _albumSync = State(initialValue: albumSync)
         _albumAutomation = State(initialValue: albumAutomation)
@@ -40,7 +42,11 @@ struct PhotoBackupView: View {
                     Text(backup.status)
                     Text(backup.continuityStatus).font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
-                        ProgressView(value: Double(backup.processed), total: Double(max(1, backup.total)))
+                        if let fraction = backup.progressFraction {
+                            ProgressView(value: fraction, total: 1)
+                        } else {
+                            ProgressView()
+                        }
                     } else {
                         // 冷摘要只表示上次保存的累计结果；运行中的实时数值由上方进度文案发布。
                         LabeledContent("Matched on Server") { Text(backup.unattemptedSummary.matched, format: .number) }
@@ -79,6 +85,19 @@ struct PhotoBackupView: View {
                 } footer: {
                     Text("Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup.")
                 }
+                if let localMatches {
+                    Section("本机照片优先") {
+                        Toggle("自动匹配并优先使用本机照片", isOn: Binding(get: { localMatches.enabled }, set: {
+                            localMatches.setEnabled($0, using: controller, followBackup: true)
+                        }))
+                        .disabled(backup.running)
+                        Text("照片同步的已验证匹配同时用于本机浏览，无需单独扫描；未匹配的新照片继续查重后备份。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        if localMatches.enabled {
+                            Text(localMatches.status).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if !backup.running, !backup.jobs.isEmpty {
                     Section {
                         DisclosureGroup("Recent Tasks (\(backup.jobs.count))") {
@@ -108,7 +127,7 @@ struct PhotoBackupView: View {
                     }
                 }
             }
-            .navigationTitle("照片备份")
+            .navigationTitle("Photo Sync")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showsConfiguration = true } label: { Image(systemName: "gearshape") }

@@ -1,13 +1,33 @@
 import Foundation
+import OSLog
 
 /// 导出前整批核查；iCloud元数据交集直接跳过，未匹配新源交给既有Worker按原片摘要查重后备份。
 @MainActor struct PhotoBackupContinuityChecker: PhotoBackupPreflighting {
+    typealias MatchCheckpoint = @MainActor ([PhotoBackupJob]) async throws -> Void
+    typealias VerifiedCheckpoint = @MainActor ([PhotoBackupJob], [LocalMediaAssociation]) async throws -> Void
     private let store: SQLiteLibraryIndexStore
     private let metadata: any LocalPhotoMetadataReading
+    private let status: @MainActor (String.LocalizationValue) -> Void
+    private let phaseProgress: @MainActor (Int, Int) -> Void
+    private let checkpointMatches: MatchCheckpoint?
+    private let verifiedCheckpoint: VerifiedCheckpoint?
+    private var checkpointsEnabled: Bool {
+        checkpointMatches != nil || verifiedCheckpoint != nil
+    }
+
+    private let serverFirst: Bool
+    private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "BackupPreflight")
 
     /// store复用当前账号数据库；metadata仅替换公开Photos元数据边界，不接触媒体字节。
-    init(store: SQLiteLibraryIndexStore, metadata: any LocalPhotoMetadataReading = PhotoKitLocalPhotoMetadataReader()) {
-        self.store = store; self.metadata = metadata
+    init(store: SQLiteLibraryIndexStore, metadata: any LocalPhotoMetadataReading = PhotoKitLocalPhotoMetadataReader(),
+         status: @escaping @MainActor (String.LocalizationValue) -> Void = { _ in },
+         phaseProgress: @escaping @MainActor (Int, Int) -> Void = { _, _ in },
+         checkpointMatches: MatchCheckpoint? = nil, serverFirst: Bool = false, verifiedCheckpoint: VerifiedCheckpoint? = nil)
+    {
+        self.store = store; self.metadata = metadata; self.status = status
+        self.phaseProgress = phaseProgress; self.checkpointMatches = checkpointMatches
+        self.serverFirst = serverFirst
+        self.verifiedCheckpoint = verifiedCheckpoint
     }
 
     /// jobs只含待执行版本；verificationIDs仅来自明确单项核查或已验证网络恢复，仍不能授权历史源。
@@ -19,6 +39,7 @@ import Foundation
               validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {
         try check(validateContext)
+        Self.logger.info("Preflight started jobs=\(jobs.count)")
         guard let history = try await store.loadPhotoBackupHistory(scope: scope) else {
             return try await planFromServer(jobs: jobs, scope: scope, client: client, verificationIDs: verificationIDs,
                                             progress: progress, validateContext: validateContext)
@@ -27,6 +48,7 @@ import Foundation
         let index = try await Self.makeIndex(history)
         try check(validateContext)
         var existing: Set<PhotoBackupSource> = []
+        var checkpointed: Set<PhotoBackupSource> = []
         var review: Set<PhotoBackupSource> = []
         var newCandidates: [String: PhotoBackupSource] = [:]
         var uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:]
@@ -83,6 +105,11 @@ import Foundation
                     review.insert(source)
                 }
             }
+            if checkpointsEnabled {
+                let saved = try await checkpoint(batch.filter { existing.contains($0.source) }, matches: [:], snapshots: nil,
+                                                 client: client, validateContext: validateContext)
+                checkpointed.formUnion(saved)
+            }
             done += batch.count; progress(done, jobs.count)
             await Task.yield()
         }
@@ -102,7 +129,7 @@ import Foundation
             }
         }
         let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review,
-                                            uploadMetadata: uploadMetadata.filter { allowed.contains($0.key) })
+                                            uploadMetadata: uploadMetadata.filter { allowed.contains($0.key) }, checkpointedExisting: checkpointed)
         try plan.validate(sources: Set(jobs.map(\.source)))
         try check(validateContext)
         return plan
@@ -118,36 +145,80 @@ import Foundation
                                 validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
     {
         try check(validateContext)
+        guard !jobs.isEmpty else { return .init(allowed: [], existing: [], review: []) }
         var snapshots: [String: LocalPhotoSnapshot] = [:]
+        var candidates: [String: [LocalMediaRemoteCandidate]]
         progress(0, jobs.count)
-        for offset in stride(from: 0, to: jobs.count, by: 64) {
-            let ids = jobs[offset ..< min(offset + 64, jobs.count)].map(\.source.localID)
-            let values = try await metadata.snapshots(for: ids, validateContext: validateContext)
+        phaseProgress(0, jobs.count)
+        if serverFirst {
+            // 远端完整流先建一次索引；随后每64项读取本机→fresh服务器核查→复核/落盘，无整库本机预扫。
+            status("正在读取服务器匹配信息，可随时暂停。")
+            phaseProgress(0, 0)
+            let records = try await client.localMediaMetadataSnapshot()
             try check(validateContext)
-            guard Set(values.map(\.identity.localIdentifier)).count == values.count,
-                  values.allSatisfy({ ids.contains($0.identity.localIdentifier) }) else { throw PhotoBackupContinuityError.incompleteResponse }
-            for value in values {
-                snapshots[value.identity.localIdentifier] = value
+            candidates = try await Self.makeServerCandidates(records, clouds: nil)
+        } else {
+            status("正在读取本机 iCloud 信息 0 / \(jobs.count) 项；不下载原片。")
+            for offset in stride(from: 0, to: jobs.count, by: 64) {
+                let ids = jobs[offset ..< min(offset + 64, jobs.count)].map(\.source.localID)
+                let values = try await metadata.snapshots(for: ids, validateContext: validateContext)
+                try check(validateContext)
+                guard Set(values.map(\.identity.localIdentifier)).count == values.count,
+                      values.allSatisfy({ ids.contains($0.identity.localIdentifier) }) else { throw PhotoBackupContinuityError.incompleteResponse }
+                for value in values {
+                    snapshots[value.identity.localIdentifier] = value
+                }
+                let done = min(offset + 64, jobs.count)
+                phaseProgress(done, jobs.count)
+                status("正在读取本机 iCloud 信息 \(done) / \(jobs.count) 项；不下载原片。")
+                if done.isMultiple(of: 1024) || done == jobs.count {
+                    Self.logger.info("Local metadata progress=\(done) total=\(jobs.count)")
+                }
+                await Task.yield()
             }
-            await Task.yield()
+            let clouds = Set(snapshots.values.compactMap { snapshot -> String? in
+                if case let .resolved(value) = snapshot.cloudIdentity {
+                    return value
+                }
+                return nil
+            })
+            status("正在读取服务器匹配信息，可随时暂停。")
+            phaseProgress(0, 0)
+            Self.logger.info("Reading server metadata cloudCount=\(clouds.count)")
+            let records = try await client.localMediaMetadata(cloudIDs: clouds)
+            try check(validateContext)
+            Self.logger.info("Server metadata received records=\(records.count)")
+            candidates = try await Self.makeServerCandidates(records, clouds: clouds)
         }
-        let clouds = Set(snapshots.values.compactMap { snapshot -> String? in
-            if case let .resolved(value) = snapshot.cloudIdentity {
-                return value
-            }
-            return nil
-        })
-        let records = try await client.localMediaMetadata(cloudIDs: clouds)
-        try check(validateContext)
-        let candidates = try await Self.makeServerCandidates(records, clouds: clouds)
         try check(validateContext)
         var existing: Set<PhotoBackupSource> = [], allowed: Set<PhotoBackupSource> = [], review: Set<PhotoBackupSource> = []
+        var checkpointed: Set<PhotoBackupSource> = []
+        var pending: [PhotoBackupJob] = []
+        var pendingAssociations: [LocalMediaAssociation] = []
         var matches: [UUID: String] = [:]
         for (index, job) in jobs.enumerated() {
             try check(validateContext)
             // 未匹配新源可能整批走continue；每64项主动交还UI并发布一次进度，避免大图库形成同步热循环。
             if index.isMultiple(of: 64) {
+                if !pending.isEmpty {
+                    try await checkpointed.formUnion(checkpoint(pending, matches: matches, snapshots: snapshots, associations: pendingAssociations,
+                                                                client: client, validateContext: validateContext))
+                    pending.removeAll(keepingCapacity: true); matches.removeAll(keepingCapacity: true)
+                    pendingAssociations.removeAll(keepingCapacity: true)
+                }
                 await Task.yield(); try check(validateContext)
+                if serverFirst {
+                    let ids = jobs[index ..< min(index + 64, jobs.count)].map(\.source.localID)
+                    status("正在读取本机 iCloud 信息 \(index) / \(jobs.count) 项；不下载原片。")
+                    let values = try await metadata.snapshots(for: ids, validateContext: validateContext)
+                    try check(validateContext)
+                    guard Set(values.map(\.identity.localIdentifier)).count == values.count,
+                          values.allSatisfy({ ids.contains($0.identity.localIdentifier) }) else { throw PhotoBackupContinuityError.incompleteResponse }
+                    for value in values {
+                        snapshots[value.identity.localIdentifier] = value
+                    }
+                    phaseProgress(index, jobs.count)
+                }
             }
             defer {
                 if (index + 1).isMultiple(of: 64) || index + 1 == jobs.count {
@@ -184,48 +255,100 @@ import Foundation
             do { remote = try await client.localMediaAsset(candidate.assetID.uuidString) }
             catch LocalMediaCandidateError.inaccessible { try check(validateContext); review.insert(source); continue }
             try check(validateContext)
-            guard LocalMediaAssociation.verified(remote: remote, requestedID: candidate.assetID, ownerID: scope.userID,
-                                                 local: snapshot.identity, source: .mobileMetadata) != nil
+            guard let association = LocalMediaAssociation.verified(remote: remote, requestedID: candidate.assetID, ownerID: scope.userID,
+                                                                   local: snapshot.identity, source: .mobileMetadata)
             else {
                 review.insert(source); continue
             }
             existing.insert(source); matches[candidate.assetID] = cloud
+            if checkpointsEnabled {
+                pending.append(job)
+                pendingAssociations.append(association)
+            }
             await Task.yield()
+        }
+        if !pending.isEmpty {
+            try await checkpointed.formUnion(checkpoint(pending, matches: matches, snapshots: snapshots, associations: pendingAssociations,
+                                                        client: client, validateContext: validateContext))
+            matches.removeAll(keepingCapacity: true)
         }
         var uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:]
         for source in allowed {
             uploadMetadata[source] = try snapshots[source.localID]?.mobileMetadata()
         }
-        let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review, uploadMetadata: uploadMetadata)
+        let plan = PhotoBackupPreflightPlan(allowed: allowed, existing: existing, review: review,
+                                            uploadMetadata: uploadMetadata, checkpointedExisting: checkpointed)
         try plan.validate(sources: Set(jobs.map(\.source)))
         // 许可新源与跳过交集都重读元数据，避免整批核查期间变化的源获得旧许可。
-        let confirmed = Array(existing.union(allowed))
+        let confirmed = Array(existing.subtracting(checkpointed).union(allowed))
+        phaseProgress(0, confirmed.count)
+        status("正在复核本机版本 0 / \(confirmed.count) 项。")
         for offset in stride(from: 0, to: confirmed.count, by: 64) {
             let ids = confirmed[offset ..< min(offset + 64, confirmed.count)].map(\.localID)
             let current = try await metadata.snapshots(for: ids, validateContext: validateContext)
             try check(validateContext)
             guard current.count == ids.count, Set(current.map(\.identity.localIdentifier)) == Set(ids),
                   current.allSatisfy({ snapshots[$0.identity.localIdentifier] == $0 }) else { throw LocalMediaMetadataError.sourceChanged }
+            status("正在复核本机版本 \(min(offset + 64, confirmed.count)) / \(confirmed.count) 项。")
+            phaseProgress(min(offset + 64, confirmed.count), confirmed.count)
         }
         // 已完成整批分类才保存ID匹配依据；字节校验始终为false，部分写入失败不发放任何上传许可。
         let ids = Array(matches.keys)
+        status("正在保存匹配结果 0 / \(ids.count) 项。")
+        phaseProgress(0, ids.count)
         for offset in stride(from: 0, to: ids.count, by: 64) {
             try check(validateContext)
             let batch = ids[offset ..< min(offset + 64, ids.count)]
             try await client.recordICloudMatches(Dictionary(uniqueKeysWithValues: batch.compactMap { id in matches[id].map { (id, $0) } }))
             try check(validateContext)
+            status("正在保存匹配结果 \(min(offset + 64, ids.count)) / \(ids.count) 项。")
+            phaseProgress(min(offset + 64, ids.count), ids.count)
         }
+        Self.logger.info("Preflight finished matched=\(existing.count) allowed=\(allowed.count) review=\(review.count)")
         return plan
     }
 
+    /// 完整远端候选流之后，只提交已fresh核验的有限匹配批次；先复核本机版本、确认标记，再原子保存任务。
+    /// 部分完成可冷恢复为existing，但不会授权任何未完成源上传；账号/权限变化和取消不吞错误。
+    private func checkpoint(_ jobs: [PhotoBackupJob], matches: [UUID: String], snapshots: [String: LocalPhotoSnapshot]?, associations: [LocalMediaAssociation] = [],
+                            client: any PhotoBackupContinuityQuerying, validateContext: @MainActor () throws -> Void) async throws -> Set<PhotoBackupSource>
+    {
+        guard checkpointsEnabled, !jobs.isEmpty else { return [] }
+        try check(validateContext)
+        let ids = jobs.map(\.source.localID)
+        let current = try await metadata.snapshots(for: ids, validateContext: validateContext)
+        try check(validateContext)
+        guard current.count == ids.count, Set(current.map(\.identity.localIdentifier)) == Set(ids) else { throw LocalMediaMetadataError.sourceChanged }
+        let sources = Dictionary(uniqueKeysWithValues: jobs.map { ($0.source.localID, $0.source) })
+        guard current.allSatisfy({ value in
+            if let snapshots {
+                return snapshots[value.identity.localIdentifier] == value
+            }
+            guard let source = sources[value.identity.localIdentifier], source.modifiedAt == value.identity.modificationDate else { return false }
+            return (source.kind == .photo && value.identity.mediaKind == .image) || (source.kind == .video && value.identity.mediaKind == .video)
+        }) else { throw LocalMediaMetadataError.sourceChanged }
+        if !matches.isEmpty {
+            try await client.recordICloudMatches(matches)
+            try check(validateContext)
+        }
+        if let verifiedCheckpoint {
+            try await verifiedCheckpoint(jobs, associations)
+        } else {
+            try await checkpointMatches?(jobs)
+        }
+        try check(validateContext)
+        Self.logger.info("Saved matching checkpoint jobs=\(jobs.count)")
+        return Set(jobs.map(\.source))
+    }
+
     /// records来自完整流，clouds限定本轮本机云标识；后台一次建立索引，坏值/范围外响应或取消均拒绝整批。
-    @concurrent private static func makeServerCandidates(_ records: [LocalMediaRemoteMetadataRecord], clouds: Set<String>) async throws -> [String: [LocalMediaRemoteCandidate]] {
+    @concurrent private static func makeServerCandidates(_ records: [LocalMediaRemoteMetadataRecord], clouds: Set<String>?) async throws -> [String: [LocalMediaRemoteCandidate]] {
         var candidates: [String: [LocalMediaRemoteCandidate]] = [:]
         let decoder = JSONDecoder()
         for record in records {
             try Task.checkCancellation()
             let value = try decoder.decode(LocalMediaMobileMetadata.self, from: record.value)
-            guard clouds.contains(value.cloudId) else { throw PhotoBackupContinuityError.incompleteResponse }
+            guard clouds?.contains(value.cloudId) ?? true else { throw PhotoBackupContinuityError.incompleteResponse }
             candidates[value.cloudId, default: []].append(.init(assetID: record.assetID, metadata: value))
         }
         return candidates

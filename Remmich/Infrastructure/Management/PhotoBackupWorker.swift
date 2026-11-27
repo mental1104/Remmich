@@ -63,6 +63,7 @@ nonisolated struct PhotoBackupRunResult: Sendable {
              progress: @MainActor (PhotoBackupJob, PhotoBackupRunResult) -> Void) async throws -> PhotoBackupRunResult
     {
         var result = PhotoBackupRunResult()
+        result.skipped = preflight?.checkpointedExisting.count ?? 0
         do {
             while true {
                 try checkContext(validateContext)

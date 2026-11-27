@@ -207,7 +207,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
 
 /// PhotoKit回调可能跨线程；Mutex保护文件、continuation及请求ID安装，确保取消/完成只释放一次。
 /// requestData提供cancelDataRequest所需ID；writeData没有可用ID，无法满足中途停止iCloud读取的要求。
-private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendable {
+final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendable {
     /// 文件句柄与完成权只在锁内变更；cancel可早于continuation或PhotoKit请求ID的安装。
     private struct State {
         var handle: FileHandle?
@@ -220,16 +220,25 @@ private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendab
 
     private let state: Mutex<State>
     private let manager = PHAssetResourceManager.default()
+    private let cancelRequest: @Sendable (PHAssetResourceDataRequestID) -> Void
 
     /// file必须是新的私有临时路径；无法创建/打开时失败，不覆盖已有文件。
-    init(file: URL) throws {
+    init(file: URL, cancelRequest: (@Sendable (PHAssetResourceDataRequestID) -> Void)? = nil) throws {
         guard !FileManager.default.fileExists(atPath: file.path),
               FileManager.default.createFile(atPath: file.path, contents: nil) else { throw CocoaError(.fileWriteFileExists) }
         state = try Mutex(State(handle: FileHandle(forWritingTo: file)))
+        self.cancelRequest = cancelRequest ?? { PHAssetResourceManager.default().cancelDataRequest($0) }
     }
 
     /// resource/options只在主Actor内交给PhotoKit；后台回调仅持有本线程安全writer，不传递PHAsset对象。
     @MainActor func read(_ resource: PHAssetResource, options: PHAssetResourceRequestOptions) async throws {
+        try await read { [self] receive, complete in
+            manager.requestData(for: resource, options: options, dataReceivedHandler: receive, completionHandler: complete)
+        }
+    }
+
+    /// start只替换系统请求入口；回调必须Sendable，禁止继承主Actor隔离后在PhotoKit后台线程触发断言。
+    @MainActor func read(start: @MainActor (@escaping @Sendable (Data) -> Void, @escaping @Sendable ((any Error)?) -> Void) -> PHAssetResourceDataRequestID) async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let mayStart = state.withLock { value in
@@ -238,9 +247,9 @@ private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendab
                     return true
                 }
                 guard mayStart else { continuation.resume(throwing: CancellationError()); return }
-                let requestID = manager.requestData(for: resource, options: options, dataReceivedHandler: { [self] data in
+                let requestID = start({ @Sendable [self] data in
                     write(data)
-                }, completionHandler: { [self] error in
+                }, { @Sendable [self] error in
                     finish(error)
                 })
                 let mustCancel = state.withLock { value in
@@ -249,7 +258,7 @@ private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendab
                 }
                 // cancel可能发生在requestData已启动、返回ID尚未安装的窗口，安装后仍必须取消实际请求。
                 if mustCancel {
-                    manager.cancelDataRequest(requestID)
+                    cancelRequest(requestID)
                 }
             }
         } onCancel: { [self] in cancel() }
@@ -264,7 +273,7 @@ private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendab
         if let failure {
             finish(failure)
             if let id = state.withLock({ $0.requestID }) {
-                manager.cancelDataRequest(id)
+                cancelRequest(id)
             }
         }
     }
@@ -297,7 +306,7 @@ private final nonisolated class PhotoBackupResourceFileWriter: @unchecked Sendab
         let id = state.withLock { value in value.cancelled = true; return value.requestID }
         finish(CancellationError())
         if let id {
-            manager.cancelDataRequest(id)
+            cancelRequest(id)
         }
     }
 }

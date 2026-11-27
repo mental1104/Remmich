@@ -6,6 +6,68 @@ import Testing
 /// 用真实账号SQLite文件验证冷恢复、部分Live Photo回执、账号隔离和删除后晚写，不访问PhotoKit或网络。
 @Suite("Durable photo backup journal")
 struct PhotoBackupJournalTests {
+    /// 第二行失去queued资格时必须回滚第一行；成功批次只改变选中任务，冷连接看到相同边界。
+    @Test func matchingCheckpointIsAtomicAndKeepsOtherJobs() async throws {
+        let root = backupTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = backupTestScope("match-checkpoint"), url = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: url)
+        try await store.prepare(scope: scope)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue((0 ..< 3).map { .init(localID: "checkpoint-\($0)", modifiedAt: nil, kind: .photo) })
+        try await store.savePhotoBackups(journal, scope: scope)
+        var held = journal.jobs[1]; held.pause()
+        try await store.savePhotoBackupJob(held, scope: scope)
+        await #expect(throws: PhotoBackupStateError.invalidTransition) {
+            try await store.checkpointPhotoBackupMatches(Array(journal.jobs.prefix(2)), scope: scope)
+        }
+        let cold = SQLiteLibraryIndexStore(databaseURL: url)
+        let unchanged = try await cold.loadPhotoBackups(scope: scope)
+        #expect(unchanged.jobs.map(\.stage) == [.queued, .paused, .queued])
+        try await store.checkpointPhotoBackupMatches([journal.jobs[0], journal.jobs[2]], scope: scope)
+        let saved = try await cold.loadPhotoBackups(scope: scope)
+        #expect(saved.jobs.map(\.stage) == [.existing, .paused, .existing])
+        #expect(saved.jobs.map(\.id) == journal.jobs.map(\.id))
+        #expect(saved.jobs.allSatisfy { $0.attempts == 0 && $0.primaryAssetID == nil })
+    }
+
+    /// 开关保存不得重写任何任务；真实SQLite触发器拒绝INSERT/UPDATE/DELETE，保留回执和范围。
+    @Test func automationSettingsOnlyWriteTheHeader() async throws {
+        let root = backupTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = backupTestScope("header-settings")
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        journal.selectedAlbumIDs = ["synthetic-selected"]
+        journal.allowCloud = true
+        try journal.enqueue((0 ..< 512).map { .init(localID: "synthetic-\($0)", modifiedAt: nil, kind: .photo) })
+        try journal.update(journal.jobs[0].id) { job in
+            try job.begin(); try job.exported(); try job.recordPrimary(UUID(), duplicate: true)
+        }
+        try await store.savePhotoBackups(journal, scope: scope)
+        let probe = try await BackupJournalSQLProbe(url: store.databaseFiles(scope: scope).catalog)
+        let before = try probe.rows("SELECT job_id,position,stage,payload FROM photo_backup_jobs ORDER BY position")
+        for event in ["INSERT", "UPDATE", "DELETE"] {
+            try probe.execute("CREATE TRIGGER reject_job_\(event) BEFORE \(event) ON photo_backup_jobs BEGIN SELECT RAISE(ABORT,'settings rewrote jobs'); END")
+        }
+        try await store.updatePhotoBackupAutomationSettings(scope: scope, foreground: true, background: true, networkRecovery: true)
+        try await store.updatePhotoBackupAutomationSettings(scope: scope, foreground: false, background: false)
+        let saved = try await store.loadPhotoBackups(scope: scope)
+        #expect(saved.foregroundAutomaticEnabled == false && saved.backgroundAutomaticEnabled == false)
+        #expect(saved.foregroundNetworkRecoveryEnabled == true)
+        #expect(saved.allowCloud && saved.selectedAlbumIDs == journal.selectedAlbumIDs)
+        #expect(try probe.rows("SELECT job_id,position,stage,payload FROM photo_backup_jobs ORDER BY position") == before)
+        try probe.execute("UPDATE photo_backup_headers SET payload=json_set(payload,'$.version',99)")
+        await #expect(throws: PhotoBackupStateError.invalidJournal) {
+            try await store.updatePhotoBackupAutomationSettings(scope: scope, foreground: false)
+        }
+        try await store.removeAccount(namespace: scope.cacheNamespace)
+        await #expect(throws: CancellationError.self) {
+            try await store.updatePhotoBackupAutomationSettings(scope: scope, background: false)
+        }
+    }
+
     /// 动态资源已确认、静态帧未确认时进程退出；新store恢复暂停并保留回执，重新验证后才完成。
     @Test func coldRestoreRetainsMotionWithoutClaimingCompleteBackup() async throws {
         let root = backupTestRoot()

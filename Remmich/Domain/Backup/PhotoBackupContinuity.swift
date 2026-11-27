@@ -38,19 +38,22 @@ nonisolated struct PhotoBackupPreflightPlan: Sendable {
     let existing: Set<PhotoBackupSource>
     let review: Set<PhotoBackupSource>
     let uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata]
+    let checkpointedExisting: Set<PhotoBackupSource>
 
     /// 三个集合完整分区；uploadMetadata仅附加已许可源的公开云身份，缺省空兼容无云ID与既有测试端口。
     init(allowed: Set<PhotoBackupSource>, existing: Set<PhotoBackupSource>, review: Set<PhotoBackupSource>,
-         uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:])
+         uploadMetadata: [PhotoBackupSource: LocalMediaMobileMetadata] = [:], checkpointedExisting: Set<PhotoBackupSource> = [])
     {
         self.allowed = allowed; self.existing = existing; self.review = review; self.uploadMetadata = uploadMetadata
+        self.checkpointedExisting = checkpointedExisting
     }
 
     /// sources是本轮实际queued源；必须一一覆盖且互斥，部分响应不能留下默认允许的尾队列。
     func validate(sources: Set<PhotoBackupSource>) throws {
         guard allowed.isDisjoint(with: existing), allowed.isDisjoint(with: review), existing.isDisjoint(with: review),
               allowed.union(existing).union(review) == sources,
-              Set(uploadMetadata.keys).isSubset(of: allowed) else { throw PhotoBackupContinuityError.incompleteResponse }
+              Set(uploadMetadata.keys).isSubset(of: allowed), checkpointedExisting.isSubset(of: existing)
+        else { throw PhotoBackupContinuityError.incompleteResponse }
     }
 }
 
@@ -58,6 +61,8 @@ nonisolated struct PhotoBackupPreflightPlan: Sendable {
 nonisolated protocol PhotoBackupContinuityQuerying: Sendable {
     func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup]
     func localMediaMetadata(cloudIDs: Set<String>) async throws -> [LocalMediaRemoteMetadataRecord]
+    /// 完整只读远端索引，用于先建索引、再逐小批读取本机照片；不推进服务端同步检查点。
+    func localMediaMetadataSnapshot() async throws -> [LocalMediaRemoteMetadataRecord]
     /// id为元数据候选的服务端UUID；读取当前拥有者、版本和资源状态，不读取原片。
     func localMediaAsset(_ id: String) async throws -> LocalMediaRemoteAsset
     /// matches的键是已核验的服务端UUID，值是完整iCloud ID；原子批次仅记录ID匹配且未校验字节的事实。
@@ -65,6 +70,12 @@ nonisolated protocol PhotoBackupContinuityQuerying: Sendable {
 }
 
 extension LibraryMutationClient: PhotoBackupContinuityQuerying {}
+
+extension PhotoBackupContinuityQuerying {
+    func localMediaMetadataSnapshot() async throws -> [LocalMediaRemoteMetadataRecord] {
+        throw LibraryWriteError.unavailable
+    }
+}
 
 /// Controller的导出前门禁；任务安全、账号代际和完整分区均由生产调用方继续验证。
 @MainActor protocol PhotoBackupPreflighting: Sendable {

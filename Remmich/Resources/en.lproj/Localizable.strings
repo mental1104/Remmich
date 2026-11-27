@@ -1,4 +1,16 @@
 /* Application interface text. Protocol values and user content are not localized. */
+"连接暂时中断，%lld 秒后重试读取（%lld / %lld）；已确认匹配进度保留。" = "Connection interrupted. Retrying the read in %lld seconds (%lld / %lld). Confirmed matches are saved.";
+"已保存匹配进度 %lld 项；中断后可继续剩余项目。" = "Saved %lld matches. Remaining items can resume after interruption.";
+"连接中断。已确认的匹配结果已保存，点击继续仅核查未完成项目。" = "Connection interrupted. Confirmed matches are saved. Continue to check only unfinished items.";
+"正在准备备份队列，可随时暂停。" = "Preparing the backup queue. You can pause at any time.";
+"正在读取并核对已保存的任务。" = "Reading and checking saved tasks.";
+"正在读取本机 iCloud 信息 0 / %lld 项；不下载原片。" = "Reading local iCloud metadata 0 / %lld. Originals are not downloaded.";
+"正在读取本机 iCloud 信息 %lld / %lld 项；不下载原片。" = "Reading local iCloud metadata %lld / %lld. Originals are not downloaded.";
+"正在读取服务器匹配信息，可随时暂停。" = "Reading server matching metadata. You can pause at any time.";
+"正在复核本机版本 0 / %lld 项。" = "Rechecking local versions 0 / %lld.";
+"正在复核本机版本 %lld / %lld 项。" = "Rechecking local versions %lld / %lld.";
+"正在保存匹配结果 0 / %lld 项。" = "Saving matches 0 / %lld.";
+"正在保存匹配结果 %lld / %lld 项。" = "Saving matches %lld / %lld.";
 " 部分元数据不可用，已独立尝试本机校验和。" = " Some metadata is unavailable. Independent local checksum matching was attempted.";
 "%@ / %@ assets" = "%@ / %@ assets";
 "%@ / %@ cached" = "%@ / %@ cached";
@@ -1609,3 +1621,9 @@
 "默认关闭公共坐标查询。地图瓦片仍按服务器配置的地图源加载。" = "Public coordinate lookup is off by default. Map tiles still use the server-configured source.";
 "默认关闭，独立于前台开关。iOS 可延后运行；后台只使用保存的相簿、排除和 iCloud 选项，失败或未知历史保持待核查。系统到期会暂停并保存回执。" = "Off by default and separate from foreground backup. iOS may delay execution. Uses saved albums, exclusions, and iCloud options. Failures and unknown history stay under review. Expiration pauses work and saves receipts.";
 "Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup." = "Matched items skip original downloads and uploads. New unmatched items continue through checksum verification before backup.";
+"Photo Sync" = "Photo Sync";
+"Thumbnail unavailable offline" = "Thumbnail unavailable offline";
+"服务器暂不可用，%lld 秒后继续（重试 %lld）；进度已保留，可随时暂停。" = "Server temporarily unavailable. Continuing in %lld seconds (retry %lld). Progress is saved; you can pause anytime.";
+"照片同步的已验证匹配同时用于本机浏览，无需单独扫描；未匹配的新照片继续查重后备份。" = "Verified sync matches also enable local browsing, without a separate scan. New unmatched photos are checked for duplicates before backup.";
+"使用照片同步的匹配结果，无需单独扫描。" = "Using verified photo sync matches. No separate scan is needed.";
+"本机浏览设置暂未保存；照片同步队列保留。" = "Local browsing settings could not be saved. The photo sync queue is kept.";

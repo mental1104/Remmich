@@ -26,10 +26,12 @@ nonisolated struct LocalMediaAssociationDocument: Codable, Sendable {
     let enabled: Bool
     let access: LocalPhotoLibraryAccess?
     let associations: [LocalMediaAssociation]
+    let followsBackup: Bool?
 
     /// scope限定服务器与账号；access是确认时授权范围，nil表示尚未完成可用扫描。
-    init(scope: MediaAccountScope, enabled: Bool, access: LocalPhotoLibraryAccess?, associations: [LocalMediaAssociation]) {
+    init(scope: MediaAccountScope, enabled: Bool, access: LocalPhotoLibraryAccess?, associations: [LocalMediaAssociation], followsBackup: Bool? = nil) {
         formatVersion = 1; namespace = scope.cacheNamespace; self.enabled = enabled; self.access = access; self.associations = associations
+        self.followsBackup = followsBackup
     }
 }
 

@@ -7,20 +7,21 @@ import Testing
 @Suite("Local media metadata HTTP sequence")
 @MainActor struct LocalMediaMetadataHTTPTests {
     /// 官方JSONL envelope/ack形状保持完整opaque ID和重复候选；只读GET→POST，绝不reset/ACK/读取媒体。
-    @Test func fullGoldenStreamUsesOnlyFixedReadSequence() async throws {
+    @Test(arguments: [false, true]) func fullGoldenStreamUsesOnlyFixedReadSequence(_ fullIndex: Bool) async throws {
         let fixture = LocalMetadataHTTPFixture([
             .ack(#"[{"type":"AssetV2","ack":"AssetV2|previous-checkpoint"}]"#),
             .stream(metadataHTTPGolden, mime: "Application/Jsonlines+Json; charset=UTF-8"),
         ])
         defer { fixture.close() }
-        let result = try await fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
+        let result = try await fullIndex ? fixture.client.localMediaMetadataSnapshot() : fixture.client.localMediaMetadata(cloudIDs: [metadataHTTPOpaqueID])
         let expectedA = try #require(UUID(uuidString: metadataHTTPAssetA))
         let expectedB = try #require(UUID(uuidString: metadataHTTPAssetB))
-        #expect(result.map(\.assetID) == [expectedA, expectedB])
+        let foreign = try #require(UUID(uuidString: "cccccccc-cccc-4ccc-8ccc-cccccccccccc"))
+        #expect(result.map(\.assetID) == (fullIndex ? [foreign, expectedA, expectedB] : [expectedA, expectedB]))
         for record in result {
             let json = try JSONSerialization.jsonObject(with: record.value)
             let body = try #require(json as? [String: String])
-            #expect(body == ["iCloudId": metadataHTTPOpaqueID, "createdAt": "2020-01-02T03:04:05Z", "latitude": "0", "longitude": "0"])
+            #expect(body == ["iCloudId": record.assetID == foreign ? metadataHTTPOpaqueID + "-foreign" : metadataHTTPOpaqueID, "createdAt": "2020-01-02T03:04:05Z", "latitude": "0", "longitude": "0"])
         }
         let requests = await fixture.script.requests
         try metadataHTTPAssertSequence(requests, endpoint: fixture.endpoint, count: 2)

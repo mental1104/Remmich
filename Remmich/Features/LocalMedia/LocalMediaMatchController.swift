@@ -24,6 +24,12 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
 /// 显式前台本机关联扫描；账号代际隔离、批量有界，不将进度/哈希查重写成备份成功。
 @MainActor @Observable final class LocalMediaMatchController {
+    private(set) var followsBackup = false
+    @ObservationIgnored var backupAssociationLoader: (@MainActor (MediaAccountScope) async throws -> [LocalMediaAssociation])?
+    @ObservationIgnored var backupAssociationSaver: (@MainActor ([LocalMediaAssociation], MediaAccountScope) async throws -> Void)?
+    @ObservationIgnored private var activeDisplayLookups = 0
+    @ObservationIgnored private var pendingDisplayLookups = Set<String>()
+    @ObservationIgnored private var missedDisplayLookups: [String: ContinuousClock.Instant] = [:]
     private(set) var running = false
     private(set) var total = 0
     private(set) var scanned = 0
@@ -88,6 +94,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         let changedScope = scope != nextScope
         self.manager = manager; managerGeneration = manager.generation; scope = nextScope
         if changedScope {
+            followsBackup = false
             associations = [:]; revision += 1; enabled = false; access = nil; restoredNamespace = nil
             total = 0; scanned = 0; metadataMatches = 0; checksumMatches = 0; unmatched = 0; metadataFailures = 0
             automaticGeneration = nil; monitor?.stop(); monitor = nil
@@ -183,7 +190,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             if access != nil, inventory.authorization != access {
                 sourcesChanged(); return changeTask
             }
-            guard enabled, automaticGeneration != manager.generation, manager.client != nil,
+            guard enabled, !followsBackup, automaticGeneration != manager.generation, manager.client != nil,
                   inventory.authorization == .full || inventory.authorization == .limited else { return nil }
             automaticGeneration = manager.generation
             return startScan(using: manager, requestPermission: false)
@@ -200,14 +207,24 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
                 restoredNamespace = scope.cacheNamespace
                 enabled = document?.enabled ?? false
+                // 旧配置升级到共享匹配，不因缺少新字段而重新启动独立整库扫描。
+                followsBackup = document?.followsBackup ?? true
                 access = document?.access
                 if enabled, document?.access == inventory.authorization {
                     associations = Dictionary(uniqueKeysWithValues: (document?.associations ?? []).map { ($0.remoteID, $0) })
                     publishCounts(); revision += 1
                 }
+                if enabled, followsBackup {
+                    let shared = try await backupAssociationLoader?(scope) ?? []
+                    try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
+                    access = inventory.authorization
+                    for value in shared {
+                        accept(value)
+                    }
+                }
                 permission = inventory.authorization
                 startMonitoringIfNeeded()
-                guard enabled, automaticGeneration != owner, manager.client != nil, permission == .full || permission == .limited else { return }
+                guard enabled, !followsBackup, automaticGeneration != owner, manager.client != nil, permission == .full || permission == .limited else { return }
                 automaticGeneration = owner
                 task = nil
                 if let scan = startScan(using: manager, requestPermission: false) {
@@ -241,27 +258,35 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     }
 
     /// 仅用户操作改变启用配置；关闭立即失效关联并保存，启用后显式扫描可请求初次Photos授权。
-    @discardableResult func setEnabled(_ value: Bool, using manager: LibraryManagementController) -> Task<Void, Never>? {
+    @discardableResult func setEnabled(_ value: Bool, using manager: LibraryManagementController, followBackup: Bool = false) -> Task<Void, Never>? {
         guard self.manager === manager, let scope else { return nil }
-        invalidateRun(); enabled = value; associations = [:]; revision += 1; publishCounts()
+        invalidateRun(); enabled = value; followsBackup = followBackup; associations = [:]; revision += 1; publishCounts()
         metadataFailures = 0
         access = nil; automaticGeneration = manager.generation
         if value {
             startMonitoringIfNeeded()
-            if let scan = startScan(using: manager, requestPermission: true) {
+            if !followBackup, let scan = startScan(using: manager, requestPermission: true) {
                 return scan
             }
         } else {
             monitor?.stop(); monitor = nil
         }
         let run = generation; let owner = manager.generation; let writePermit = permit
-        let document = LocalMediaAssociationDocument(scope: scope, enabled: value, access: nil, associations: [])
+        let document = LocalMediaAssociationDocument(scope: scope, enabled: value, access: nil, associations: [], followsBackup: followsBackup)
         let operation = Task {
             do {
                 let saved = try await persistence.save(document, scope: scope, permit: writePermit)
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
                 guard saved else { return }
-                statusMessage = value ? "已保存启用配置；连接服务器后自动匹配。" : "已关闭本机优先，不修改或删除任何照片。"
+                if value, followBackup, inventory.authorization == .full || inventory.authorization == .limited {
+                    let shared = try await backupAssociationLoader?(scope) ?? []
+                    try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
+                    access = inventory.authorization; permission = inventory.authorization
+                    for association in shared {
+                        accept(association)
+                    }
+                }
+                statusMessage = value ? (followBackup ? "使用照片同步的匹配结果，无需单独扫描。" : "已保存启用配置；连接服务器后自动匹配。") : "已关闭本机优先，不修改或删除任何照片。"
             } catch {
                 guard generation == run else { return }
                 statusMessage = "本次设置已改变，但配置保存失败：\(error.localizedDescription)。"
@@ -282,7 +307,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     /// requestPermission只来自明确用户操作；自动刷新只检查当前已有授权，绝不主动弹框。
     private func startScan(using manager: LibraryManagementController, requestPermission: Bool) -> Task<Void, Never>? {
         guard self.manager === manager, !running, let scope, manager.backupScope == scope, let client = manager.client else { return nil }
-        let remote: any LocalMediaMatchingReading = remoteOverride ?? client
+        let baseRemote: any LocalMediaMatchingReading = remoteOverride ?? client
         let owner = manager.generation
         automaticGeneration = owner
         let run = UUID(); generation = run; running = true
@@ -298,7 +323,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             }
             do {
                 try validate(manager, owner: owner, scope: scope, run: run)
-                let setting = LocalMediaAssociationDocument(scope: scope, enabled: enabled, access: access, associations: Array(associations.values))
+                let setting = LocalMediaAssociationDocument(scope: scope, enabled: enabled, access: access, associations: Array(associations.values), followsBackup: followsBackup)
                 let settingSaved = try await persistence.save(setting, scope: scope, permit: writePermit)
                 try validate(manager, owner: owner, scope: scope, run: run)
                 guard settingSaved else { throw CancellationError() }
@@ -313,6 +338,9 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 access = permission
                 startMonitoringIfNeeded()
                 let validateContext: @MainActor () throws -> Void = { try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: permission) }
+                let remote = LocalMediaRetryingQueries(base: baseRemote, retry: .init(validate: validateContext, status: { [weak self] message in
+                    self?.statusMessage = message
+                }))
                 let ids = try await inventory.localIdentifiers(validateContext: validateContext)
                 try validateContext()
                 guard ids.count == Set(ids).count, ids.allSatisfy({ !$0.isEmpty }) else { throw LocalMediaMetadataError.invalidBatch }
@@ -424,7 +452,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 if freshAssociations != associations {
                     associations = freshAssociations; revision += 1; publishCounts()
                 }
-                let document = LocalMediaAssociationDocument(scope: scope, enabled: enabled, access: access, associations: Array(associations.values))
+                let document = LocalMediaAssociationDocument(scope: scope, enabled: enabled, access: access, associations: Array(associations.values), followsBackup: followsBackup)
                 let saved = try await persistence.save(document, scope: scope, permit: writePermit)
                 try validateContext()
                 guard saved else { throw CancellationError() }
@@ -543,6 +571,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
     /// 每次取消/路由变化撤销原子写许可；同namespace已确认关联独立保留，新的任务拿新的代际。
     private func invalidateRun() {
+        missedDisplayLookups.removeAll()
         permit.invalidate(); permit = LocalMediaSavePermit()
         task?.cancel(); task = nil; changeTask?.cancel(); changeTask = nil
         generation = UUID(); running = false
@@ -566,11 +595,11 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             do {
                 try await Task.sleep(for: .milliseconds(400))
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
-                let document = LocalMediaAssociationDocument(scope: scope, enabled: true, access: nil, associations: [])
+                let document = LocalMediaAssociationDocument(scope: scope, enabled: true, access: nil, associations: [], followsBackup: followsBackup)
                 _ = try await persistence.save(document, scope: scope, permit: writePermit)
                 try validate(manager, owner: owner, scope: scope, run: run, requireOnline: false)
                 changeTask = nil
-                guard manager.client != nil, inventory.authorization == .full || inventory.authorization == .limited else { return }
+                guard !followsBackup, manager.client != nil, inventory.authorization == .full || inventory.authorization == .limited else { return }
                 automaticGeneration = owner
                 if let task = startScan(using: manager, requestPermission: false) {
                     await task.value
@@ -580,5 +609,103 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 changeTask = nil; statusMessage = "照片库已变化，旧关联失效；等待下次可用刷新。"
             }
         }
+    }
+
+    /// 旧版备份事实不包含浏览关联时，只恢复屏幕需要的资产；不扫描或重排整份备份队列。
+    func resolveDisplayAssociation(assetID: String, revision: Date, using manager: LibraryManagementController) async throws -> LocalMediaAssociation? {
+        if let saved = association(assetID: assetID, revision: revision) {
+            return saved
+        }
+        guard enabled, self.manager === manager, let scope, scope == manager.backupScope,
+              let id = UUID(uuidString: assetID), let client = manager.client,
+              inventory.authorization == .full || inventory.authorization == .limited else { return nil }
+        let run = generation, owner = manager.generation, permission = inventory.authorization
+        let key = "\(scope.cacheNamespace)|\(id)|\(revision.timeIntervalSinceReferenceDate)"
+        if let missed = missedDisplayLookups[key], missed.duration(to: ContinuousClock.now) < .seconds(60) {
+            return nil
+        }
+        guard pendingDisplayLookups.insert(key).inserted else { return nil }
+        var ownsSlot = false
+        defer {
+            pendingDisplayLookups.remove(key)
+            if ownsSlot {
+                activeDisplayLookups -= 1
+            }
+        }
+        let validateContext: @MainActor () throws -> Void = {
+            try self.validate(manager, owner: owner, scope: scope, run: run, expectedAccess: permission)
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while activeDisplayLookups >= 4 {
+            try validateContext()
+            guard ContinuousClock.now < deadline else { return nil }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        activeDisplayLookups += 1; ownsSlot = true
+        do {
+            try validateContext()
+            let (remote, candidates) = try await client.localPhotoDisplayEvidence(id)
+            try validateContext()
+            guard remote.updatedAt == revision else { return nil }
+            let mappings = try await LocalPhotoCloudResolver.localIDs(for: Set(candidates.map(\.metadata.cloudId)))
+            try validateContext()
+            let ids = Array(Set(mappings.values)).sorted()
+            guard ids.count <= 64 else { throw LocalMediaMetadataError.invalidBatch }
+            let snapshots = try await metadata.snapshots(for: ids, validateContext: validateContext)
+            try validateContext(); try validateSnapshots(snapshots, requested: ids)
+            var matches: [LocalMediaAssociation] = []
+            for snapshot in snapshots {
+                guard case let .resolved(cloud) = snapshot.cloudIdentity, mappings[cloud] == snapshot.identity.localIdentifier,
+                      case .candidate = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot,
+                                                                    candidates: candidates.filter { $0.metadata.cloudId == cloud }),
+                      let value = LocalMediaAssociation.verified(remote: remote, requestedID: id, ownerID: scope.userID,
+                                                                 local: snapshot.identity, source: .mobileMetadata) else { continue }
+                matches.append(value)
+            }
+            guard matches.count == 1, let value = matches.first else {
+                missedDisplayLookups[key] = ContinuousClock.now
+                return nil
+            }
+            try await backupAssociationSaver?([value], scope)
+            try validateContext()
+            access = permission; accept(value)
+            return value
+        } catch {
+            try validateContext()
+            if missedDisplayLookups.count >= 512 {
+                missedDisplayLookups.removeAll()
+            }
+            missedDisplayLookups[key] = ContinuousClock.now
+            return nil
+        }
+    }
+
+    /// 同步队列接管匹配；取消旧的独立扫描，已验证关联与账号边界保留。
+    func beginBackupMatching(using manager: LibraryManagementController) async {
+        configure(using: manager)
+        guard enabled, let scope, inventory.authorization == .full || inventory.authorization == .limited else { return }
+        invalidateRun(); followsBackup = true; automaticGeneration = manager.generation
+        access = inventory.authorization; permission = inventory.authorization
+        let run = generation, owner = manager.generation, writePermit = permit
+        let document = LocalMediaAssociationDocument(scope: scope, enabled: true, access: access, associations: Array(associations.values), followsBackup: true)
+        do {
+            _ = try await persistence.save(document, scope: scope, permit: writePermit)
+            try validate(manager, owner: owner, scope: scope, run: run)
+            statusMessage = "使用照片同步的匹配结果，无需单独扫描。"
+        } catch {
+            guard generation == run else { return }
+            statusMessage = "本机浏览设置暂未保存；照片同步队列保留。"
+        }
+    }
+
+    /// 只接收已与备份任务原子落盘的fresh关联；显示Reader仍逐次验证当前照片版本和权限。
+    func acceptBackupMatches(_ values: [LocalMediaAssociation], using manager: LibraryManagementController) {
+        guard enabled, followsBackup, self.manager === manager, managerGeneration == manager.generation,
+              scope == manager.backupScope, access == inventory.authorization,
+              inventory.authorization == .full || inventory.authorization == .limited else { return }
+        for value in values {
+            accept(value)
+        }
+        statusMessage = "使用照片同步的匹配结果，无需单独扫描。"
     }
 }

@@ -140,6 +140,14 @@ final class MediaLibraryController {
     }
 
     func configure(session: AccountSession, activeEndpoint: URL?) {
+        photoBackups.localMatches = localMediaMatches
+        localMediaMatches.backupAssociationLoader = { [weak backups = photoBackups] scope in
+            try await backups?.matchingAssociations(scope: scope) ?? []
+        }
+        localMediaMatches.backupAssociationSaver = { [weak backups = photoBackups] values, scope in
+            guard let backups else { throw CancellationError() }
+            try await backups.cacheMatchingAssociations(values, scope: scope)
+        }
         let startedAt = Date()
         let nextScope = MediaAccountScope(session: session)
         if scope != nextScope {
@@ -398,17 +406,40 @@ final class MediaLibraryController {
                                         useSavedPhotos: Bool) -> ImageRequest?
     {
         guard [.thumbnail, .preview, .fullSize].contains(descriptor.derivative), let scope, let pipeline,
-              let association = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt)
-        else { return nil }
+              localMediaMatches.enabled else { return nil }
+        let association = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt)
+        guard association != nil || (priority != .low && management.client != nil) else { return nil }
         let accountGeneration = management.generation
         let fallback = imageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos, useLocalPhotos: false)
         // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
-        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(association.localIdentity.localIdentifier)|\(association.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)|context:\(accountGeneration.uuidString)"
+        let localKey = association.map { "\($0.localIdentity.localIdentifier)|\($0.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)" } ?? "resolve-visible"
+        let id = Self.displayCacheKey(for: descriptor, scope: scope) + "|device-current|\(localKey)|context:\(accountGeneration.uuidString)"
         return ImageRequest(id: id, image: { [weak self] in
             guard let self else { throw CancellationError() }
+            return try await readPreferredPhotoImage(association, descriptor: descriptor, scope: scope,
+                                                     accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
+        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
+    }
+
+    private func readPreferredPhotoImage(_ saved: LocalMediaAssociation?, descriptor: MediaRequestDescriptor, scope: MediaAccountScope,
+                                         accountGeneration: UUID, fallback: ImageRequest?, pipeline: ImagePipeline) async throws -> ImageContainer
+    {
+        try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        let association: LocalMediaAssociation? = if let saved {
+            saved
+        } else {
+            try await localMediaMatches.resolveDisplayAssociation(assetID: descriptor.assetID, revision: descriptor.updatedAt, using: management)
+        }
+        try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        if let association {
             return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
                                                  accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
-        }, priority: priority, options: [.skipDataLoadingQueue, .disableDiskCache, .disableMemoryCacheReads])
+        }
+        guard let fallback else { throw URLError(.resourceUnavailable) }
+        let response = try await pipeline.imageTask(with: fallback).response
+        try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+        return response.container
     }
 
     /// association/scope/accountGeneration固定本次读取身份；本机miss才进入既有fallback，取消/换号绝不回源。
@@ -425,13 +456,17 @@ final class MediaLibraryController {
         let pixels = descriptor.targetPixels.map { MediaPixelSize(width: min(limit, $0.width), height: min(limit, $0.height)) }
             ?? MediaPixelSize(width: limit, height: limit)
         // 旧request可能在创建后才被实际执行；关联已关闭/失效时直接回退，不能再访问Photos。
-        if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
-           let image = try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate),
-           localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association
-        {
-            try validate()
-            recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
-            return ImageContainer(image: image)
+        if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
+            let image: UIImage? = if descriptor.derivative == .thumbnail {
+                try await localPhotoReader.thumbnail(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
+            } else {
+                try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
+            }
+            if let image, localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
+                try validate()
+                recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
+                return ImageContainer(image: image)
+            }
         }
         try validate()
         guard let fallback else { throw URLError(.resourceUnavailable) }
