@@ -1,3 +1,10 @@
+## 2026-11-28: Separate display revision from remote metadata revision
+
+- 真机在线打开2023年照片已自动加载原图，但信息面板来源仍为 Immich/cache，尚不能判为离线 PhotoKit 通过。排查发现关联使用 asset.updatedAt，而图库使用 max(createdAt,fileCreatedAt) 作为显示版本；抽样2,884条关联全部因这两种版本语义不同而被浏览入口拒绝。
+- 关联新增独立 displayRevision，保留真实 remoteRevision 用于新鲜度与源证明。旧关联读取时从当前已接受图库按同账号、UUID、类型、可用状态补显示键；索引有checksum则必须一致，轻量索引缺checksum时保留既有已核实关联。备份任务与完成回执不重排、不清空。可见项恢复与新关联使用同一图库显示键。
+- 今晚上一版覆盖安装后，88,804条任务的ID、阶段、完整payload与安装前逐项一致：88,525 existing、8 completed、269 paused、2 failed。浏览关联从4增至324，后续checkpoint至少2,884；这是客户端关联数，不是服务器新增备份数。
+- 本补丁单路真机Debug增量编译通过（Xcode27.2 / Remmich / -jobs1），复用签名、依赖与DerivedData。按用户要求不跑自动测试；新增回归测试源未执行。安装包待用户洗澡后返回再覆盖安装，离线2023照片、本机来源与冷启动体验仍待验收；不声明完整CI全绿。
+
 ## 2026-11-27: Persist completed photo links for offline PhotoKit browsing
 
 - 用户指出八万多条备份匹配仍不能离线浏览。设备最近快照里 88,525 existing + 8 completed，而共享浏览关联仅4项：旧完成阶段没有完整保留 remote UUID → Photos localIdentifier / 源版本映射，不能把完成数当成本机关联数。

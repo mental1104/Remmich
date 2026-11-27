@@ -209,8 +209,24 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         guard try canRead(scope) else { return [] }
         let db = try preparedDatabase(scope: scope)
         guard try db.scalarInt64("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='photo_sync_associations'") == 1 else { return [] }
-        return try db.query("SELECT payload FROM main.photo_sync_associations WHERE scope=?", [.text(scope.cacheNamespace)]) {
-            try Self.decode(LocalMediaAssociation.self, from: $0.text(0))
+        let generation = try db.scalarInt64("SELECT accepted_generation FROM main.sync_state WHERE scope=?", [.text(scope.cacheNamespace)]) ?? -1
+        return try db.query("""
+        SELECT m.payload,a.updated_at,a.checksum,a.owner_id,a.is_trashed,a.is_offline,a.kind
+        FROM main.photo_sync_associations m
+        LEFT JOIN main.assets a ON a.scope=m.scope AND a.generation=? AND a.asset_id=lower(m.remote_id)
+        WHERE m.scope=?
+        """, [.int64(generation), .text(scope.cacheNamespace)]) { row in
+            let value = try Self.decode(LocalMediaAssociation.self, from: row.text(0))
+            guard value.displayRevision == nil,
+                  let version = row.optionalDouble(1), version.isFinite,
+                  row.optionalText(2).map({ $0 == value.checksum }) ?? true,
+                  let owner = row.optionalText(3).flatMap(UUID.init(uuidString:)), let expectedOwner = UUID(uuidString: scope.userID), owner == expectedOwner,
+                  row.optionalInt(4) == 0, row.optionalInt(5) == 0,
+                  row.optionalText(6) == (value.localIdentity.mediaKind == .video ? "video" : "image") else { return value }
+            // 旧关联已核实同账号同UUID；轻量索引未必含checksum，若存在则必须相同。
+            // 这里只补当前已接受图库的显示键，保留原远端版本/源证明，不重排备份任务。
+            return LocalMediaAssociation(remoteID: value.remoteID, remoteRevision: value.remoteRevision, localIdentity: value.localIdentity,
+                                         checksum: value.checksum, source: value.source, displayRevision: Date(timeIntervalSince1970: version))
         }
     }
 

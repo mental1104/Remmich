@@ -112,7 +112,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         _ = self.revision
         guard enabled, scope != nil, let manager, managerGeneration == manager.generation,
               let access, inventory.authorization == access, let id = UUID(uuidString: assetID),
-              let association = associations[id], association.remoteRevision == revision else { return nil }
+              let association = associations[id], association.matchesDisplayRevision(revision) else { return nil }
         return association
     }
 
@@ -686,7 +686,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             do {
                 let jobs = try await loader(scope)
                 try validateContext()
-                let saved = Set(associations.values.map(\.localIdentity))
+                let saved = Set(associations.values.filter { $0.displayRevision != nil }.map(\.localIdentity))
                 let pending = await Self.pendingCompletedJobs(jobs, saved: saved)
                 try validateContext()
                 total = pending.count; scanned = 0
@@ -807,7 +807,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             try validateContext()
             let (remote, candidates) = try await client.localPhotoDisplayEvidence(id)
             try validateContext()
-            guard remote.updatedAt == revision else { return nil }
+            guard (remote.displayRevision ?? remote.updatedAt)?.timeIntervalSince1970 == revision.timeIntervalSince1970 else { return nil }
             let mappings = try await LocalPhotoCloudResolver.localIDs(for: Set(candidates.map(\.metadata.cloudId)))
             try validateContext()
             let ids = Array(Set(mappings.values)).sorted()

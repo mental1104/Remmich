@@ -5,6 +5,37 @@ import Testing
 /// 只读本地展示关联，合成Cloud ID/日期/位置覆盖官方元组语义；不读取媒体、不生成备份成功或清理决定。
 @Suite("Local media metadata association")
 struct LocalMediaMatchTests {
+    /// 匹配元数据PUT会改变资产updatedAt，但时间线缩略图版本仍是max(createdAt,fileCreatedAt)。
+    @Test func assetUpdateDoesNotReplaceDisplayVersion() throws {
+        let id = UUID(), owner = UUID()
+        let display = Date(timeIntervalSince1970: 200)
+        let updated = Date(timeIntervalSince1970: 300)
+        let remote = LocalMediaRemoteAsset(id: id, ownerId: owner, type: "IMAGE", isTrashed: false, isOffline: false,
+                                           isEdited: false, checksum: Data(repeating: 1, count: 20).base64EncodedString(), updatedAt: updated,
+                                           createdAt: display, fileCreatedAt: Date(timeIntervalSince1970: 100))
+        let value = try #require(LocalMediaAssociation.verified(remote: remote, requestedID: id, ownerID: owner.uuidString,
+                                                                local: localMediaSnapshot().identity, source: .mobileMetadata))
+        #expect(value.remoteRevision == updated && value.displayRevision == display)
+        #expect(value.matchesDisplayRevision(display) && !value.matchesDisplayRevision(updated))
+        let restored = try JSONDecoder().decode(LocalMediaAssociation.self, from: JSONEncoder().encode(value))
+        #expect(restored == value && restored.matchesDisplayRevision(display))
+    }
+
+    /// wire真实创建/拍摄时间用于显示键；新字段的坏日期不能被吞成nil再猜显示版本。
+    @Test func displayVersionDecodesFromAssetDates() throws {
+        let id = UUID(), owner = UUID()
+        var body: [String: Any] = ["id": id.uuidString, "ownerId": owner.uuidString, "type": "IMAGE",
+                                   "updatedAt": "2026-11-27T10:00:00Z", "createdAt": "2024-01-01T00:00:00Z",
+                                   "fileCreatedAt": "2023-12-31T09:42:00Z"]
+        let value = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: JSONSerialization.data(withJSONObject: body))
+        #expect(value.displayRevision == Date(timeIntervalSince1970: 1_704_067_200))
+        #expect(value.displayRevision != value.updatedAt)
+        body["createdAt"] = "invalid"
+        #expect(throws: (any Error).self) {
+            _ = try JSONDecoder().decode(LocalMediaRemoteAsset.self, from: JSONSerialization.data(withJSONObject: body))
+        }
+    }
+
     /// 本机时间只按官方整数秒规范化；编辑后的current只要调整时间一致也能关联，不被原片备份政策误拒绝。
     @Test(arguments: [false, true])
     func matchesCurrentRepresentationIncludingEdits(_ edited: Bool) throws {
