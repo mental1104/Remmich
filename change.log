@@ -1,3 +1,8 @@
+## 2026-11-28: Thumbnail-only runtime provenance diagnostics
+
+- 用户纠正验收边界：详情原图来源不能证明网格缩略图来源。新增仅Debug的缩略图路由累计：已保存/缺失关联、经过Photos当前权限与源版本验证的本机磁盘缓存、真实PhotoKit成功、Photos miss与Immich回退。所有事件严格限定thumbnail，原图/preview不计入；只落本机会话随机ID和固定计数，不记照片ID、名称、内容或凭据。后台线程原子写入，300ms合并，Release不保存诊断。
+- 单路Debug增量编译与签名校验通过，覆盖安装成功；安装后数据库quick_check通过，88,804条任务ID/阶段/完整payload与安装前一致，浏览关联24,180条。iOS开发者验证阻止启动，已请用户用此前有效的蜂窝网络验证；缩略图PhotoKit、断网重启仍待实际验收，不使用原图来源代替结论。按要求未运行自动测试。
+
 ## 2026-11-28: Separate display revision from remote metadata revision
 
 - 真机在线打开2023年照片已自动加载原图，但信息面板来源仍为 Immich/cache，尚不能判为离线 PhotoKit 通过。排查发现关联使用 asset.updatedAt，而图库使用 max(createdAt,fileCreatedAt) 作为显示版本；抽样2,884条关联全部因这两种版本语义不同而被浏览入口拒绝。

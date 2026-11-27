@@ -41,6 +41,46 @@ final class MediaLibraryController {
     @ObservationIgnored private let localLivePhotoReader: any LocalLivePhotoMediaReading
     @ObservationIgnored private let localLivePhotoRemote: (any LocalMediaMatchingReading)?
     private var mediaReadOrigins: [MediaReadOriginKey: MediaReadOrigin] = [:]
+    #if DEBUG
+        @ObservationIgnored private var thumbnailRouteCounts: [String: Int] = [:]
+        @ObservationIgnored private var thumbnailRouteSave: Task<Void, Never>?
+        private let thumbnailRouteSession = UUID().uuidString
+    #endif
+
+    /// Debug验收只累计缩略图路由，不含照片ID、名称、内容或原图请求。
+    private func recordThumbnailRoute(_ event: String, descriptor: MediaRequestDescriptor) {
+        #if DEBUG
+            guard descriptor.derivative == .thumbnail else { return }
+            thumbnailRouteCounts[event, default: 0] += 1
+            guard thumbnailRouteSave == nil else { return }
+            thumbnailRouteSave = Task { [weak self] in
+                guard let self else { return }
+                while true {
+                    try? await Task.sleep(for: .milliseconds(300))
+                    let snapshot = thumbnailRouteCounts
+                    let data = try? JSONEncoder().encode(ThumbnailRouteSnapshot(session: thumbnailRouteSession, counts: snapshot))
+                    if let data {
+                        await Task.detached(priority: .utility) {
+                            guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+                            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                            try? data.write(to: directory.appendingPathComponent("thumbnail-routing-debug.json"), options: .atomic)
+                        }.value
+                    }
+                    if snapshot == thumbnailRouteCounts {
+                        thumbnailRouteSave = nil; return
+                    }
+                }
+            }
+        #endif
+    }
+
+    #if DEBUG
+        private nonisolated struct ThumbnailRouteSnapshot: Encodable, Sendable {
+            let session: String
+            let counts: [String: Int]
+        }
+    #endif
+
     private var localPhotoFallbackPipeline: ImagePipeline?
     private weak var localPhotoFallbackOwner: ImagePipeline?
     private static let savedPhotosFiles = MediaExportFiles(
@@ -445,6 +485,7 @@ final class MediaLibraryController {
                                          accountGeneration: UUID, fallback: ImageRequest?, pipeline: ImagePipeline) async throws -> ImageContainer
     {
         try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+        recordThumbnailRoute(saved == nil ? "request.noSavedAssociation" : "request.savedAssociation", descriptor: descriptor)
         // 旧记录的可见关联解析可能联网；已有服务器缩略图先从本机缓存显示，不能被解析阻塞。
         if saved == nil, descriptor.derivative == .thumbnail, var cached = fallback,
            pipeline.cache.containsCachedImage(for: cached)
@@ -452,6 +493,7 @@ final class MediaLibraryController {
             cached.options.insert(.returnCacheDataDontLoad)
             if let response = try? await pipeline.imageTask(with: cached).response {
                 try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
+                recordThumbnailRoute("result.immichCacheWithoutAssociation", descriptor: descriptor)
                 recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
                 return response.container
             }
@@ -467,8 +509,10 @@ final class MediaLibraryController {
             return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
                                                  accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
         }
+        recordThumbnailRoute("fallback.noAssociation", descriptor: descriptor)
         guard let fallback else { throw URLError(.resourceUnavailable) }
         let response = try await pipeline.imageTask(with: fallback).response
+        recordThumbnailRoute("result.immichWithoutAssociation", descriptor: descriptor)
         try validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
         recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
         return response.container
@@ -500,10 +544,12 @@ final class MediaLibraryController {
                 if localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
                    try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion
                 {
+                    recordThumbnailRoute("result.validatedPhotoKitDiskCache", descriptor: descriptor)
                     recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
                     return cached
                 }
             }
+            recordThumbnailRoute(sourceVersion == nil ? "photoKit.invalidSource" : "photoKit.request", descriptor: descriptor)
             let image: UIImage? = if descriptor.derivative == .original {
                 try await localPhotoReader.original(for: association.localIdentity, validateContext: validate)
             } else if descriptor.derivative == .thumbnail {
@@ -522,14 +568,17 @@ final class MediaLibraryController {
                     guard localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association,
                           try localPhotoReader.thumbnailSourceVersion(for: association.localIdentity, validateContext: validate) == sourceVersion else { throw CancellationError() }
                 }
+                recordThumbnailRoute("result.freshPhotoKit", descriptor: descriptor)
                 recordMediaOrigin(.devicePhotos, assetID: descriptor.assetID, revision: descriptor.updatedAt)
                 return container
             }
         }
         try validate()
+        recordThumbnailRoute("fallback.localMissOrInvalidated", descriptor: descriptor)
         guard let fallback else { throw URLError(.resourceUnavailable) }
         let response = try await pipeline.imageTask(with: fallback).response
         try validate()
+        recordThumbnailRoute("result.immichAfterLocalMiss", descriptor: descriptor)
         recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
         return response.container
     }
