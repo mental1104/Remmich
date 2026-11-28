@@ -157,13 +157,14 @@ import Testing
         #expect(!fixture.controller.enabled && fixture.controller.association(assetID: matchRemoteID.uuidString, revision: matchRevision) == nil)
     }
 
-    /// 已启用配置在新进程自动刷新，已有授权不再次请求；相同manager代际的多次生命周期通知不反复扫描。
+    /// 明确保留旧独立扫描模式的配置才自动刷新；已有授权不再请求，相同manager代际不反复扫描。
     @Test func enabledColdRestoreRefreshesOnceWithoutPrompt() async throws {
         let directory = temporaryMatchDirectory(); defer { try? FileManager.default.removeItem(at: directory) }
         let fixture = try matchFixture(directory: directory)
-        _ = try await fixture.store.save(.init(scope: fixture.scope, enabled: true, access: nil, associations: []), scope: fixture.scope, permit: LocalMediaSavePermit())
+        _ = try await fixture.store.save(.init(scope: fixture.scope, enabled: true, access: nil, associations: [], followsBackup: false), scope: fixture.scope, permit: LocalMediaSavePermit())
         let restore = try #require(fixture.controller.restoreAndRefresh(using: fixture.manager, scope: fixture.scope)); await restore.value
         #expect(fixture.controller.metadataMatches == 1 && fixture.inventory.authorizationRequests == 0)
+        #expect(!fixture.controller.followsBackup)
         let previous = fixture.metadata.batchCounts
         let repeated = fixture.controller.restoreAndRefresh(using: fixture.manager, scope: fixture.scope)
         #expect(repeated == nil && fixture.metadata.batchCounts == previous)

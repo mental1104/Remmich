@@ -56,8 +56,8 @@ nonisolated struct LocalMediaRemoteAsset: Decodable, Equatable, Sendable {
 
 /// 已确认的本机展示关联；按scope原子保存和恢复，不作为备份回执或删除设备原片的依据。
 nonisolated struct LocalMediaAssociation: Codable, Equatable, Sendable {
-    /// 来源区分官方元数据关系和本机字节SHA1；两者仍必须通过新鲜远端详情检查。
-    enum Source: String, Codable, Sendable { case mobileMetadata, checksum }
+    /// 轻量Cloud ID仅供Photos展示；不授予备份、校验和见证或相簿组织能力。
+    enum Source: String, Codable, Sendable { case mobileMetadata, checksum, exactCloudIdentity }
     let remoteID: UUID
     let remoteRevision: Date
     let displayRevision: Date?
@@ -112,7 +112,8 @@ nonisolated struct LocalMediaAssociation: Codable, Equatable, Sendable {
     static func verified(remote: LocalMediaRemoteAsset, requestedID: UUID, ownerID: String, local: LocalPhotoIdentity,
                          source: Source, expectedChecksum: String? = nil, prefersCurrentPhotos: Bool = false) -> LocalMediaAssociation?
     {
-        guard let owner = UUID(uuidString: ownerID), remote.id == requestedID, remote.ownerId == owner, !local.localIdentifier.isEmpty,
+        guard source != .exactCloudIdentity || (prefersCurrentPhotos && expectedChecksum == nil),
+              let owner = UUID(uuidString: ownerID), remote.id == requestedID, remote.ownerId == owner, !local.localIdentifier.isEmpty,
               let modified = local.modificationDate, modified.timeIntervalSince1970.isFinite,
               remote.isTrashed == false,
               remote.isOffline == false || (prefersCurrentPhotos && remote.isOffline == true),

@@ -43,22 +43,45 @@ final class MediaLibraryController {
     private var mediaReadOrigins: [MediaReadOriginKey: MediaReadOrigin] = [:]
     #if DEBUG
         @ObservationIgnored private var thumbnailRouteCounts: [String: Int] = [:]
+        @ObservationIgnored private var mediaRequestFactoryCounts: [String: Int] = [:]
+        @ObservationIgnored private var actualPhotosReaderCalls: [String: Int] = ["thumbnail": 0, "preview": 0, "fullSize": 0, "original": 0]
         @ObservationIgnored private var thumbnailRouteSave: Task<Void, Never>?
         private let thumbnailRouteSession = UUID().uuidString
     #endif
 
-    /// Debug验收只累计缩略图路由，不含照片ID、名称、内容或原图请求。
+    /// Debug验收只累计缩略图路由；与请求工厂计数分开，不含照片身份或媒体内容。
     private func recordThumbnailRoute(_ event: String, descriptor: MediaRequestDescriptor) {
         #if DEBUG
             guard descriptor.derivative == .thumbnail else { return }
             thumbnailRouteCounts[event, default: 0] += 1
+            scheduleThumbnailRouteSave()
+        #endif
+    }
+
+    /// 仅统计外层ImageRequest工厂调用（含缓存查询、预取和nil结果），不代表执行读取或网络请求。
+    private func recordMediaRequestFactoryCall(for descriptor: MediaRequestDescriptor) {
+        #if DEBUG
+            mediaRequestFactoryCounts[descriptor.derivative.rawValue, default: 0] += 1
+            scheduleThumbnailRouteSave()
+        #endif
+    }
+
+    #if DEBUG
+        /// 由真实PhotoKit requestImage调用点回报；缓存命中、身份检查失败及只创建请求不计入。
+        private func recordActualPhotosReaderCall(for descriptor: MediaRequestDescriptor, isOriginal: Bool) {
+            let key = isOriginal ? "original" : descriptor.derivative == .original ? "currentForOriginalDescriptor" : descriptor.derivative.rawValue
+            actualPhotosReaderCalls[key, default: 0] += 1
+            scheduleThumbnailRouteSave()
+        }
+
+        private func scheduleThumbnailRouteSave() {
             guard thumbnailRouteSave == nil else { return }
             thumbnailRouteSave = Task { [weak self] in
                 guard let self else { return }
                 while true {
                     try? await Task.sleep(for: .milliseconds(300))
-                    let snapshot = thumbnailRouteCounts
-                    let data = try? JSONEncoder().encode(ThumbnailRouteSnapshot(session: thumbnailRouteSession, counts: snapshot, identityLookups: localMediaMatches.displayLookupDiagnostics))
+                    let snapshot = currentThumbnailRouteSnapshot
+                    let data = try? JSONEncoder().encode(snapshot)
                     if let data {
                         await Task.detached(priority: .utility) {
                             guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
@@ -66,19 +89,44 @@ final class MediaLibraryController {
                             try? data.write(to: directory.appendingPathComponent("thumbnail-routing-debug.json"), options: .atomic)
                         }.value
                     }
-                    if snapshot == thumbnailRouteCounts {
+                    if snapshot == currentThumbnailRouteSnapshot {
                         thumbnailRouteSave = nil; return
                     }
                 }
             }
-        #endif
-    }
+        }
 
-    #if DEBUG
-        private nonisolated struct ThumbnailRouteSnapshot: Encodable, Sendable {
+        private var currentThumbnailRouteSnapshot: ThumbnailRouteSnapshot {
+            let authorization = switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+            case .notDetermined: "notDetermined"
+            case .restricted: "restricted"
+            case .denied: "denied"
+            case .authorized: "authorized"
+            case .limited: "limited"
+            @unknown default: "unknown"
+            }
+            return ThumbnailRouteSnapshot(session: thumbnailRouteSession, counts: thumbnailRouteCounts,
+                                          identityLookups: localMediaMatches.displayLookupDiagnostics,
+                                          requestCounts: mediaRequestFactoryCounts,
+                                          actualPhotosReaderCalls: actualPhotosReaderCalls,
+                                          localMatchingEnabled: localMediaMatches.enabled,
+                                          photosAuthorization: authorization,
+                                          associationCount: localMediaMatches.metadataMatches + localMediaMatches.checksumMatches)
+        }
+
+        private nonisolated struct ThumbnailRouteSnapshot: Encodable, Equatable, Sendable {
             let session: String
             let counts: [String: Int]
             let identityLookups: [String: Int]
+            let requestCounts: [String: Int]
+            let requestCountsMeaning = "Outer ImageRequest factory invocations, including cache queries, prefetch and nil results; not executed loads or network requests. Unobserved derivatives are omitted."
+            let requestCountsCoverage = ["imageRequest(useLocalPhotos: true)", "viewerOriginalRequest returning a preferred Photos request"]
+            let actualPhotosReaderCalls: [String: Int]
+            let actualPhotosReaderCallsMeaning = "PHImageManager.requestImage calls actually started by the matched-Photos image reader. The original count uses the actual PhotoKit version option; current calls use the caller's media derivative. Not network transfers."
+            let actualPhotosReaderCallsCoverage = "MediaLibraryController matched-Photos thumbnail/preview/fullSize/original image loads only. Excludes standalone Saved Photos mode, video/Live Photo playback, exports and checksum resource reads."
+            let localMatchingEnabled: Bool
+            let photosAuthorization: String
+            let associationCount: Int
         }
     #endif
 
@@ -353,6 +401,9 @@ final class MediaLibraryController {
         useSavedPhotos: Bool = true,
         useLocalPhotos: Bool = true
     ) -> ImageRequest? {
+        if useLocalPhotos {
+            recordMediaRequestFactoryCall(for: descriptor)
+        }
         if let savedPhotosLibrary {
             guard let item = savedPhotosLibrary.item(timelineID: descriptor.assetID), let scope else { return nil }
             let id = descriptor.cacheKey(in: scope)
@@ -602,13 +653,16 @@ final class MediaLibraryController {
                 }
             }
             recordThumbnailRoute(sourceVersion == nil ? "photoKit.invalidSource" : "photoKit.request", descriptor: descriptor)
-            let image: UIImage? = if descriptor.derivative == .original {
-                try await localPhotoReader.original(for: association.localIdentity, validateContext: validate)
-            } else if descriptor.derivative == .thumbnail {
-                try await localPhotoReader.thumbnail(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
-            } else {
-                try await localPhotoReader.image(for: association.localIdentity, targetPixels: pixels, validateContext: validate)
-            }
+            let image: UIImage?
+            #if DEBUG
+                image = try await LocalPhotoRequestDiagnostics.$imageRequestStarted.withValue({ [weak self] isOriginal in
+                    self?.recordActualPhotosReaderCall(for: descriptor, isOriginal: isOriginal)
+                }) {
+                    try await readMatchedPhotoImage(association.localIdentity, descriptor: descriptor, pixels: pixels, validateContext: validate)
+                }
+            #else
+                image = try await readMatchedPhotoImage(association.localIdentity, descriptor: descriptor, pixels: pixels, validateContext: validate)
+            #endif
             if let image, localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt) == association {
                 try validate()
                 let container = ImageContainer(image: image)
@@ -637,6 +691,18 @@ final class MediaLibraryController {
         recordThumbnailRoute("result.immichAfterLocalMiss", descriptor: descriptor)
         recordMediaOrigin(.immichResource, assetID: descriptor.assetID, revision: descriptor.updatedAt)
         return response.container
+    }
+
+    private func readMatchedPhotoImage(_ identity: LocalPhotoIdentity, descriptor: MediaRequestDescriptor, pixels: MediaPixelSize,
+                                       validateContext: @MainActor () throws -> Void) async throws -> UIImage?
+    {
+        if descriptor.derivative == .original {
+            try await localPhotoReader.original(for: identity, validateContext: validateContext)
+        } else if descriptor.derivative == .thumbnail {
+            try await localPhotoReader.thumbnail(for: identity, targetPixels: pixels, validateContext: validateContext)
+        } else {
+            try await localPhotoReader.image(for: identity, targetPixels: pixels, validateContext: validateContext)
+        }
     }
 
     /// 仅缓存展示缩略图；解码/编码和磁盘读取离开主线程，不进入导出manifest或备份完成记录。
@@ -928,8 +994,11 @@ final class MediaLibraryController {
     /// 仅当前详情图允许Photos/iCloud原图读取；网格、通用导出和备份不经过这个入口。
     func viewerOriginalRequest(for asset: TimelineAssetSummary) -> ImageRequest? {
         let descriptor = Self.viewerOriginalDescriptor(for: asset)
-        return localPhotoImageRequest(for: descriptor, priority: .high, useSavedPhotos: true, viewerOriginal: true)
-            ?? imageRequest(for: descriptor, priority: .high)
+        if let request = localPhotoImageRequest(for: descriptor, priority: .high, useSavedPhotos: true, viewerOriginal: true) {
+            recordMediaRequestFactoryCall(for: descriptor)
+            return request
+        }
+        return imageRequest(for: descriptor, priority: .high)
     }
 
     func beginViewerSession(id: UUID) {

@@ -324,6 +324,232 @@ nonisolated struct PartnerTimelineIndexTests {
         #expect(after.generation == before.generation && !after.assets.contains { $0.id == partnerIndexRemoteAsset })
         #expect(try await cold.loadPartnerTimelineCertificate(scope: fixture.scope)?.generation == before.generation)
     }
+
+    /// 首屏与后续历史批分别提交；冷启动增量也只补下一批，完整UI凭据只能在最后一批发布。
+    @Test func partialPolicyCheckpointContinuesAcrossBatchesAndColdRestoration() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let buckets = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: buckets, enabled: false)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let sync = LibraryIndexSynchronizer(source: source, store: store, batchSize: 2)
+        let first = try await sync.synchronizeRecent(scope: fixture.scope)
+        let firstCertificateValue = try await store.loadPartnerTimelineCertificate(scope: fixture.scope)
+        let firstCertificate = try #require(firstCertificateValue)
+        let policy = try await source.partnerTimelinePolicy(scope: fixture.scope)
+        #expect(first.indexedAssetCount == 2 && first.expectedAssetCount == 8 && first.hasMoreHistory)
+        #expect(first.appliedPartnerPolicy == nil)
+        #expect(firstCertificate.allowsIncrementalReuse(generation: first.generation, policy: policy, scope: fixture.scope))
+        #expect(!firstCertificate.matches(generation: first.generation, policy: policy, scope: fixture.scope))
+
+        await source.clearReads()
+        let second = try await sync.resumeHistorical(scope: fixture.scope)
+        let secondReads = await source.reads()
+        #expect(second.indexedAssetCount == 4 && second.hasMoreHistory)
+        #expect(secondReads.filter { $0.hasPrefix("normal:") }.count == 2)
+        #expect(!secondReads.contains("fresh-factory") && !secondReads.contains("retire"))
+
+        let coldStore = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let coldSource = PartnerIndexSource(scope: fixture.scope, buckets: buckets, enabled: false)
+        let coldSync = LibraryIndexSynchronizer(source: coldSource, store: coldStore, batchSize: 2)
+        let resumed = try await coldSync.synchronizeRecent(scope: fixture.scope)
+        let resumedReads = await coldSource.reads()
+        #expect(resumed.indexedAssetCount == 6 && resumed.hasMoreHistory)
+        #expect(resumedReads.filter { $0.hasPrefix("normal:") }.count == 4)
+        #expect(!resumedReads.contains("normal:\(partnerIndexOldMonth)"))
+        let complete = try await coldSync.resumeHistorical(scope: fixture.scope)
+        let completeCertificateValue = try await coldStore.loadPartnerTimelineCertificate(scope: fixture.scope)
+        let completeCertificate = try #require(completeCertificateValue)
+        #expect(complete.indexedAssetCount == 8 && complete.isComplete)
+        #expect(complete.appliedPartnerPolicy == policy)
+        #expect(completeCertificate.matches(generation: complete.generation, policy: policy, scope: fixture.scope))
+    }
+
+    /// 旧partial无凭据时只重核已有月份并补小批，保留原完成记录及续传游标，不退回首屏或吞掉未知月份。
+    @Test func legacyPartialWithoutCheckpointReverifiesAcceptedMonthsAndKeepsProgress() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let buckets = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: buckets, enabled: false)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let sync = LibraryIndexSynchronizer(source: source, store: store, batchSize: 2)
+        _ = try await sync.synchronizeRecent(scope: fixture.scope)
+        _ = try await sync.resumeHistorical(scope: fixture.scope)
+        let beforeValue = try await store.snapshot(scope: fixture.scope); let before = try #require(beforeValue)
+        let files = await store.databaseFiles(scope: fixture.scope)
+        try FileManager.default.removeItem(at: files.catalog.deletingLastPathComponent().appending(path: "partner-timeline-policy.json"))
+        await source.clearReads()
+
+        let resumed = try await sync.resumeHistorical(scope: fixture.scope)
+        let afterValue = try await store.snapshot(scope: fixture.scope); let after = try #require(afterValue)
+        let reads = await source.reads()
+        let checkpointValue = try await store.loadPartnerTimelineCertificate(scope: fixture.scope)
+        let checkpoint = try #require(checkpointValue)
+        let policy = try await source.partnerTimelinePolicy(scope: fixture.scope)
+        #expect(before.assets.count == 4 && resumed.indexedAssetCount == 6 && resumed.hasMoreHistory)
+        #expect(Set(before.assets.map(\.id)).isSubset(of: Set(after.assets.map(\.id))))
+        #expect(before.syncState.historicalCursor != after.syncState.historicalCursor)
+        #expect(reads.contains("retire") && reads.filter { $0.hasPrefix("fresh:") }.count == 6)
+        #expect(!reads.contains("fresh:\(partnerIndexOldMonth)"))
+        #expect(checkpoint.allowsIncrementalReuse(generation: after.generation, policy: policy, scope: fixture.scope))
+        #expect(!checkpoint.matches(generation: after.generation, policy: policy, scope: fixture.scope))
+    }
+
+    /// partial策略改变必须fresh重核所有复制旧月，撤销的伙伴成员不能带入新accepted；未知历史仍分批读取。
+    @Test func changedPartialPolicyCannotCarryRevokedPartnerRowsIntoTheNextGeneration() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let original = try partnerIndexBatchedBuckets(partnerEnabled: true, recentPartner: true)
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: original, enabled: true)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let sync = LibraryIndexSynchronizer(source: source, store: store, batchSize: 2)
+        _ = try await sync.synchronizeRecent(scope: fixture.scope)
+        let beforeValue = try await store.snapshot(scope: fixture.scope); let before = try #require(beforeValue)
+        #expect(before.assets.contains { $0.id == partnerIndexSecondAsset })
+        let next = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        await source.replace(buckets: next, enabled: false)
+        await source.clearReads()
+
+        let result = try await sync.synchronizeRecent(scope: fixture.scope)
+        let afterValue = try await store.snapshot(scope: fixture.scope); let after = try #require(afterValue)
+        let reads = await source.reads()
+        #expect(result.indexedAssetCount == 4 && result.hasMoreHistory && result.appliedPartnerPolicy == nil)
+        #expect(!after.assets.contains { $0.id == partnerIndexSecondAsset || $0.ownerID == partnerIndexPartner })
+        #expect(reads.contains("retire") && reads.contains("fresh:\(partnerIndexRecentMonth)") && reads.contains("fresh:2026-10-01"))
+        #expect(reads.filter { $0.hasPrefix("fresh:") }.count == 4 && !reads.contains("fresh:\(partnerIndexOldMonth)"))
+    }
+
+    /// checkpoint已写但accept前中断时不能拿building代际授权旧行；冷恢复须重核旧partial后再继续。
+    @Test func partialCheckpointBeforeAcceptCannotAuthorizeAnOlderGeneration() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let original = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: original, enabled: false)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let sync = LibraryIndexSynchronizer(source: source, store: store, batchSize: 2)
+        _ = try await sync.synchronizeRecent(scope: fixture.scope)
+        let beforeValue = try await store.snapshot(scope: fixture.scope); let before = try #require(beforeValue)
+        let changed = try partnerIndexBatchedBuckets(partnerEnabled: true, recentPartner: true)
+        await source.replace(buckets: changed, enabled: true)
+        do {
+            _ = try await sync.synchronizeRecent(scope: fixture.scope, validateContext: {
+                if let checkpoint = try await store.loadPartnerTimelineCertificate(scope: fixture.scope), checkpoint.generation != before.generation {
+                    throw CancellationError()
+                }
+            })
+            Issue.record("A staged partial checkpoint must not accept an interrupted generation.")
+        } catch is CancellationError {}
+        let interruptedValue = try await store.snapshot(scope: fixture.scope); let interrupted = try #require(interruptedValue)
+        let stagedValue = try await store.loadPartnerTimelineCertificate(scope: fixture.scope); let staged = try #require(stagedValue)
+        let policy = try await source.partnerTimelinePolicy(scope: fixture.scope)
+        #expect(interrupted.generation == before.generation)
+        #expect(!staged.allowsIncrementalReuse(generation: interrupted.generation, policy: policy, scope: fixture.scope))
+
+        let coldStore = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let coldSource = PartnerIndexSource(scope: fixture.scope, buckets: changed, enabled: true)
+        let recovered = try await LibraryIndexSynchronizer(source: coldSource, store: coldStore, batchSize: 2).resumeHistorical(scope: fixture.scope)
+        let reads = await coldSource.reads()
+        #expect(recovered.indexedAssetCount == 4 && recovered.hasMoreHistory)
+        #expect(reads.contains("retire") && reads.contains("fresh:\(partnerIndexRecentMonth)"))
+        #expect(!reads.contains("fresh:\(partnerIndexOldMonth)"))
+    }
+
+    /// 分批迁移/作用域变化仍拒绝半桶、重复ID和错月，失败不覆盖已接受代际、游标或其checkpoint。
+    @Test(arguments: ["partial", "duplicate", "wrong-month"])
+    func invalidPartialRepairKeepsTheAcceptedGenerationAndCheckpoint(_ variant: String) async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let original = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: original, enabled: false)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let diagnostics = PartnerIndexDiagnosticRecorder()
+        let sync = LibraryIndexSynchronizer(source: source, store: store, batchSize: 2, failureReporter: { await diagnostics.record($0) })
+        _ = try await sync.synchronizeRecent(scope: fixture.scope)
+        let beforeValue = try await store.snapshot(scope: fixture.scope); let before = try #require(beforeValue)
+        var next = try partnerIndexBatchedBuckets(partnerEnabled: true, recentPartner: true)
+        if variant == "duplicate" {
+            try next[partnerIndexRecentMonth, default: []].append(partnerIndexAsset("ffffffff-ffff-4fff-8fff-ffffffffffff", month: "2026-11"))
+        }
+        let member = try #require(next[partnerIndexRecentMonth]?.first)
+        let broken: [TimelineAssetSummary] = if variant == "partial" {
+            []
+        } else if variant == "duplicate" {
+            [member, member]
+        } else {
+            try [partnerIndexAsset(member.id, month: "2018-04", owner: member.ownerID)]
+        }
+        await source.replace(buckets: next, enabled: true)
+        await source.overrideFreshMonth(partnerIndexRecentMonth, with: broken)
+        do { _ = try await sync.synchronizeRecent(scope: fixture.scope); Issue.record("An invalid partial month must not be accepted.") }
+        catch PartnerTimelinePolicyError.incompleteMonths {}
+        let cold = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let afterValue = try await cold.snapshot(scope: fixture.scope); let after = try #require(afterValue)
+        let checkpointValue = try await cold.loadPartnerTimelineCertificate(scope: fixture.scope); let checkpoint = try #require(checkpointValue)
+        let failures = await diagnostics.events(); let failure = try #require(failures.last)
+        let expectedReason: LibraryIndexFailureDiagnostic.Reason = variant == "partial" ? .countMismatch : variant == "duplicate" ? .duplicateIDs : .wrongMonth
+        #expect(after.generation == before.generation && after.assets.map(\.id) == before.assets.map(\.id))
+        #expect(after.syncState.historicalCursor == before.syncState.historicalCursor && checkpoint.generation == before.generation)
+        #expect(failures.count == 1 && failure.stage == .selectedMonth && failure.reason == expectedReason)
+    }
+
+    /// v1完整证书仍可读；v2只有明确acceptedMonths字段才能作为partial作用域凭据，永远不变成整库成功。
+    @Test func partialCheckpointDoesNotMasqueradeAsACompleteOrLegacyCertificate() throws {
+        let scope = MediaAccountScope(session: partnerIndexSession())
+        let policy = try PartnerTimelinePolicy(scope: scope, incoming: [])
+        let complete = PartnerTimelineCertificate(generation: 7, policy: policy)
+        let decodedComplete = try JSONDecoder().decode(PartnerTimelineCertificate.self, from: JSONEncoder().encode(complete))
+        #expect(decodedComplete.matches(generation: 7, policy: policy, scope: scope))
+        let partial = PartnerTimelineCertificate(partialGeneration: 7, policy: policy)
+        let decodedPartial = try JSONDecoder().decode(PartnerTimelineCertificate.self, from: JSONEncoder().encode(partial))
+        #expect(decodedPartial.allowsIncrementalReuse(generation: 7, policy: policy, scope: scope))
+        #expect(!decodedPartial.matches(generation: 7, policy: policy, scope: scope))
+        #expect(!decodedPartial.allowsIncrementalReuse(generation: 8, policy: policy, scope: scope))
+        let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(complete))
+        var missingCoverage = try #require(value as? [String: Any]); missingCoverage["formatVersion"] = 2
+        let invalid = try JSONDecoder().decode(PartnerTimelineCertificate.self, from: JSONSerialization.data(withJSONObject: missingCoverage))
+        #expect(!invalid.validates(scope: scope))
+    }
+
+    /// 每月分别完整但跨月复用同一ID时，匿名诊断须定位merge门，不能误报网络或某个半桶。
+    @Test func duplicateAcrossCompleteMonthsReportsOnlyAggregateMergeFailure() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        var buckets = try partnerIndexBatchedBuckets(partnerEnabled: false)
+        let latest = try #require(buckets[partnerIndexRecentMonth]?.first)
+        buckets[partnerIndexOldMonth] = try [partnerIndexAsset(latest.id, month: "2019-06")]
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: buckets, enabled: false)
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let diagnostics = PartnerIndexDiagnosticRecorder()
+        let sync = LibraryIndexSynchronizer(source: source, store: store, failureReporter: { await diagnostics.record($0) })
+        do { _ = try await sync.fullSyncAndVerify(scope: fixture.scope); Issue.record("Cross-month duplicate IDs must not be accepted.") }
+        catch PartnerTimelinePolicyError.incompleteMonths {}
+        let failures = await diagnostics.events(); let failure = try #require(failures.last)
+        #expect(failures.count == 1 && failure.stage == .mergedCatalog && failure.reason == .duplicateIDs)
+        #expect(failure.expectedCount == 8 && failure.actualCount == 8 && failure.uniqueIDCount == 7)
+    }
+
+    /// 重复summary会夸大整库预期但每月成员仍完整；最终门诊断必须与月份门分开，不accept伪完整目录。
+    @Test func invalidSummaryTotalReportsOnlyAggregateFinalFailure() async throws {
+        let fixture = try PartnerIndexFixture(); defer { fixture.cleanup() }
+        let member = try partnerIndexAsset(partnerIndexOwnAsset, month: "2026-11")
+        let source = PartnerIndexSource(scope: fixture.scope, buckets: [partnerIndexRecentMonth: [member]], enabled: false)
+        let summary = TimelineBucketSummary(id: .init(rawValue: partnerIndexRecentMonth), assetCount: 1)
+        await source.overrideSummaryResponse([summary, summary])
+        let store = SQLiteLibraryIndexStore(databaseURL: fixture.database)
+        let diagnostics = PartnerIndexDiagnosticRecorder()
+        let sync = LibraryIndexSynchronizer(source: source, store: store, failureReporter: { await diagnostics.record($0) })
+        do { _ = try await sync.fullSyncAndVerify(scope: fixture.scope); Issue.record("An inconsistent final total must not be accepted.") }
+        catch PartnerTimelinePolicyError.incompleteMonths {}
+        let failures = await diagnostics.events(); let failure = try #require(failures.last)
+        #expect(failures.count == 1 && failure.stage == .finalCatalog && failure.reason == .countMismatch)
+        #expect(failure.expectedCount == 2 && failure.actualCount == 1 && failure.mismatchedBucketCount == 0)
+    }
+}
+
+/// 注入回归只存合成的固定分类/整数，不调用生产文件sink或真实Application Support。
+private actor PartnerIndexDiagnosticRecorder {
+    private var captured: [LibraryIndexFailureDiagnostic] = []
+    func record(_ event: LibraryIndexFailureDiagnostic) {
+        captured.append(event)
+    }
+
+    func events() -> [LibraryIndexFailureDiagnostic] {
+        captured
+    }
 }
 
 private nonisolated let partnerIndexOwner = "11111111-1111-4111-8111-111111111111"
@@ -350,6 +576,23 @@ private nonisolated func partnerIndexBuckets(partnerEnabled: Bool) throws -> [St
     try [partnerIndexRecentMonth: [partnerIndexAsset("dddddddd-dddd-4ddd-8ddd-dddddddddddd", month: "2026-11")],
          "2026-10-01": [partnerIndexAsset("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", month: "2026-10")],
          partnerIndexOldMonth: [partnerIndexAsset(partnerEnabled ? partnerIndexRemoteAsset : partnerIndexOwnAsset, month: "2019-06", owner: partnerEnabled ? partnerIndexPartner : partnerIndexOwner)]]
+}
+
+/// 八个月保证首屏、热续批、冷恢复和最后完整accept互不重叠；全部是独立合成单张月份。
+private nonisolated func partnerIndexBatchedBuckets(partnerEnabled: Bool, recentPartner: Bool = false) throws -> [String: [TimelineAssetSummary]] {
+    var values = try partnerIndexBuckets(partnerEnabled: partnerEnabled)
+    for (month, id) in [("2026-09", "10000000-0000-4000-8000-000000000001"),
+                        ("2026-08", "10000000-0000-4000-8000-000000000002"),
+                        ("2026-07", "10000000-0000-4000-8000-000000000003"),
+                        ("2026-06", "10000000-0000-4000-8000-000000000004"),
+                        ("2026-05", "10000000-0000-4000-8000-000000000005")]
+    {
+        values["\(month)-01"] = try [partnerIndexAsset(id, month: month)]
+    }
+    if recentPartner {
+        values[partnerIndexRecentMonth] = try [partnerIndexAsset(partnerIndexSecondAsset, month: "2026-11", owner: partnerIndexPartner)]
+    }
+    return values
 }
 
 /// 固定.invalid账号仅用于scope和原索引Controller，不触达网络/Keychain。
@@ -404,6 +647,7 @@ private actor PartnerIndexSource: TimelineReading, ManagementTimelineProviding, 
     private var cached: [String: [TimelineAssetSummary]]
     private var enabled: Bool?
     private var overrides: [String: [TimelineAssetSummary]] = [:]
+    private var summaryOverride: [TimelineBucketSummary]?
     private var captured: [String] = []
     private var generation = 0
     private var normalGate: PartnerIndexGate?
@@ -417,12 +661,22 @@ private actor PartnerIndexSource: TimelineReading, ManagementTimelineProviding, 
 
     /// 模拟服务端单向偏好/成员改变，保持旧缓存不变，供同计数回归。
     func replace(buckets: [String: [TimelineAssetSummary]], enabled: Bool) {
-        self.buckets = buckets; self.enabled = enabled; overrides = [:]
+        self.buckets = buckets; self.enabled = enabled; overrides = [:]; summaryOverride = nil
     }
 
     /// 只破坏fresh成员响应，summary仍来自正确远端数量，不能让坏输入自己修正预期。
     func overrideOldMonth(_ values: [TimelineAssetSummary]) {
         overrides[partnerIndexOldMonth] = values
+    }
+
+    /// 独立破坏本轮指定fresh月的payload，预期数量仍由真实合成远端字典计算。
+    func overrideFreshMonth(_ month: String, with values: [TimelineAssetSummary]) {
+        overrides[month] = values
+    }
+
+    /// 单独控制错误摘要输入，成员payload仍由独立合成远端字典提供。
+    func overrideSummaryResponse(_ values: [TimelineBucketSummary]) {
+        summaryOverride = values
     }
 
     /// 缺字段必须保持未知，每轮都不可凭证书计数复用。
@@ -475,7 +729,7 @@ private actor PartnerIndexSource: TimelineReading, ManagementTimelineProviding, 
 
     /// 普通端口只返回当前缓存，完整query仍须包含官方withPartners语义。
     func bucketSummaries(query: TimelineQuery) throws -> [TimelineBucketSummary] {
-        try requireQuery(query); captured.append("normal-summary"); return summaries(cached)
+        try requireQuery(query); captured.append("normal-summary"); return summaryOverride ?? summaries(cached)
     }
 
     /// 普通响应在入门之前捕获，之后远端变化不能把它伪装成新policy数据。
@@ -500,7 +754,7 @@ private actor PartnerIndexSource: TimelineReading, ManagementTimelineProviding, 
 
     /// fresh摘要来自当前真实服务端字典，不受错误payload覆盖影响。
     private func freshSummaries(_ query: TimelineQuery, owner: Int) throws -> [TimelineBucketSummary] {
-        try requireQuery(query); guard owner == generation else { throw CancellationError() }; captured.append("fresh-summary"); return summaries(buckets)
+        try requireQuery(query); guard owner == generation else { throw CancellationError() }; captured.append("fresh-summary"); return summaryOverride ?? summaries(buckets)
     }
 
     /// fresh响应也在门前捕获，并在门后检查factory代际；故意不合作Task取消以验证同步器自身门禁。

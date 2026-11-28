@@ -9,13 +9,34 @@ import UIKit
 /// 真实恢复/匹配Controller→MediaLibraryController→Nuke链；仅替换Photos/远端metadata/字节来源，不复制路由算法。
 @Suite("Local media Nuke routing", .serialized)
 @MainActor struct LocalMediaNukeRoutingTests {
-    /// 详情专用原图入口优先Photos/iCloud，miss才交给现有鉴权远端管线。
+    /// 已确认存在的Photos对象只由Photos/iCloud提供原图；暂不可读不能切成Immich字节。
     @Test(arguments: [true, false])
-    func viewerOriginalPrefersPhotosThenFallsBack(_ localOriginal: Bool) async throws {
+    func viewerOriginalUsesExistingPhotosAsOnlySource(_ localOriginal: Bool) async throws {
         let fixture = try await routingFixture()
         defer { fixture.close() }
         fixture.reader.returnsOriginal = localOriginal
-        let asset = TimelineAssetSummary(id: fixture.assetID, ownerID: "synthetic-owner", capturedAt: routingRevision,
+        let asset = TimelineAssetSummary(id: fixture.assetID, ownerID: fixture.session.userID, capturedAt: routingRevision,
+                                         uploadedAt: routingRevision, localOffsetHours: 0, mediaKind: .image,
+                                         durationMilliseconds: nil, aspectRatio: 1.5, isFavorite: false, visibility: .timeline,
+                                         livePhotoVideoID: nil, stack: nil, projectionType: nil, thumbhash: nil,
+                                         thumbnailRevision: routingRevision)
+        let request = try #require(fixture.media.viewerOriginalRequest(for: asset))
+        let pipeline = try #require(fixture.media.pipeline)
+        if localOriginal {
+            let result = try await pipeline.imageTask(with: request).response
+            #expect(result.image.size == CGSize(width: 3, height: 2))
+        } else {
+            await routingExpectUnavailable(request, pipeline: pipeline)
+        }
+        #expect(fixture.reader.originalReads == 1 && fixture.reader.imageReads == 0)
+        #expect(fixture.loader.requests.isEmpty)
+    }
+
+    /// 原图读取只有在当前授权下Photos对象确实缺失时，才能交给既有鉴权Immich原图通道。
+    @Test func viewerOriginalFallsBackOnlyWhenPhotosObjectIsAbsent() async throws {
+        let fixture = try await routingFixture(localImage: false, photosObjectExists: false)
+        defer { fixture.close() }
+        let asset = TimelineAssetSummary(id: fixture.assetID, ownerID: fixture.session.userID, capturedAt: routingRevision,
                                          uploadedAt: routingRevision, localOffsetHours: 0, mediaKind: .image,
                                          durationMilliseconds: nil, aspectRatio: 1.5, isFavorite: false, visibility: .timeline,
                                          livePhotoVideoID: nil, stack: nil, projectionType: nil, thumbhash: nil,
@@ -23,9 +44,9 @@ import UIKit
         let request = try #require(fixture.media.viewerOriginalRequest(for: asset))
         let pipeline = try #require(fixture.media.pipeline)
         let result = try await pipeline.imageTask(with: request).response
-        #expect(result.image.size == (localOriginal ? CGSize(width: 3, height: 2) : CGSize(width: 11, height: 7)))
+        #expect(result.image.size == CGSize(width: 11, height: 7))
         #expect(fixture.reader.originalReads == 1 && fixture.reader.imageReads == 0)
-        #expect(fixture.loader.requests.count == (localOriginal ? 0 : 1))
+        try routingAssertRemote(fixture.loader.requests, fixture: fixture, original: true)
     }
 
     /// 丢弃内存后仍从展示磁盘缓存读；Photos源版本变化后必须重新读取。
@@ -40,14 +61,16 @@ import UIKit
         _ = try await pipeline.imageTask(with: request).response
         #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.isEmpty)
         fixture.reader.thumbnailVersion = "current-v2"
-        _ = try await pipeline.imageTask(with: request).response
+        let updated = try #require(fixture.media.imageRequest(for: fixture.descriptor(.thumbnail)))
+        #expect(updated.imageID != request.imageID)
+        _ = try await pipeline.imageTask(with: updated).response
         #expect(fixture.reader.imageReads == 2 && fixture.loader.requests.isEmpty)
     }
 
-    /// 超过Nuke外层并发槽位的本机miss必须全部回源完成，不能持有槽位等待同一队列。
-    @Test(.timeLimit(.minutes(1)))
-    func concurrentLocalMissesCannotDeadlockRemoteFallback() async throws {
-        let fixture = try await routingFixture(localImage: false)
+    /// 超过Nuke槽位的请求都必须结束：对象存在但不可读全部明确失败；对象缺失才可完成鉴权回源。
+    @Test(.timeLimit(.minutes(1)), arguments: [true, false])
+    func concurrentLocalMissesCannotDeadlockRemoteFallback(_ photosObjectExists: Bool) async throws {
+        let fixture = try await routingFixture(localImage: false, photosObjectExists: photosObjectExists)
         defer { fixture.close() }
         let pipeline = try #require(fixture.media.pipeline)
         var requests: [ImageRequest] = []
@@ -59,8 +82,12 @@ import UIKit
         let count = try await withThrowingTaskGroup(of: Int.self) { group in
             for request in requests {
                 group.addTask {
-                    let response = try await pipeline.imageTask(with: request).response
-                    #expect(response.image.size == CGSize(width: 11, height: 7))
+                    if photosObjectExists {
+                        await routingExpectUnavailable(request, pipeline: pipeline)
+                    } else {
+                        let response = try await pipeline.imageTask(with: request).response
+                        #expect(response.image.size == CGSize(width: 11, height: 7))
+                    }
                     return 1
                 }
             }
@@ -70,7 +97,8 @@ import UIKit
             }
             return count
         }
-        #expect(count == 8 && !fixture.loader.requests.isEmpty)
+        #expect(count == 8)
+        #expect(fixture.loader.requests.isEmpty == photosObjectExists)
     }
 
     /// 三种展示规格都优先当前本机图；已存在的普通远端内存图不能让请求跳过本机关联。
@@ -91,9 +119,21 @@ import UIKit
         #expect(fixture.reader.lastPixels == MediaPixelSize(width: limit, height: min(limit, 3000)))
     }
 
-    /// 真正本机miss进入既有edited展示GET，完整DataLoader请求/鉴权/结果尺寸可观测；不会导出或上传。
-    @Test func localMissUsesAuthenticatedRemotePipeline() async throws {
+    /// Photos对象存在而展示读取暂不可用时，三种规格均不能悄悄回源或发布远端缓存。
+    @Test(arguments: [MediaDerivative.thumbnail, .preview, .fullSize])
+    func existingPhotosObjectWithUnavailablePixelsNeverFallsBack(_ derivative: MediaDerivative) async throws {
         let fixture = try await routingFixture(localImage: false)
+        defer { fixture.close() }
+        let request = try #require(fixture.media.imageRequest(for: fixture.descriptor(derivative)))
+        let pipeline = try #require(fixture.media.pipeline)
+        await routingExpectUnavailable(request, pipeline: pipeline)
+        #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.isEmpty)
+        #expect(fixture.media.mediaReadOrigin(assetID: fixture.assetID, revision: routingRevision) == nil)
+    }
+
+    /// 当前Photos对象确实缺失才进入edited展示GET；完整请求/鉴权/结果尺寸仍须可观测。
+    @Test func localMissUsesAuthenticatedRemotePipeline() async throws {
+        let fixture = try await routingFixture(localImage: false, photosObjectExists: false)
         defer { fixture.close() }
         let request = try #require(fixture.media.imageRequest(for: fixture.descriptor()))
         let pipeline = try #require(fixture.media.pipeline)
@@ -106,7 +146,7 @@ import UIKit
 
     /// wrapper每次仍验证本机，正常远端fallback可以复用已有缓存，不因修复旧local缓存绕过而重复加载远端。
     @Test func repeatedLocalMissKeepsNormalRemoteCache() async throws {
-        let fixture = try await routingFixture(localImage: false)
+        let fixture = try await routingFixture(localImage: false, photosObjectExists: false)
         defer { fixture.close() }
         let request = try #require(fixture.media.imageRequest(for: fixture.descriptor()))
         let pipeline = try #require(fixture.media.pipeline)
@@ -161,27 +201,40 @@ import UIKit
             fixture.inventory.authorization = .denied
         }
         #expect(fixture.matches.association(assetID: fixture.assetID, revision: routingRevision) == nil)
-        let second = try await pipeline.imageTask(with: request).response
+        if mode == "disabled" {
+            await routingExpectUnavailable(request, pipeline: pipeline)
+            #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.isEmpty)
+        }
+        // UI重建的请求使用当前选择；旧wrapper不能返回已关闭的Photos图，授权撤销也不能复活旧像素。
+        let current: ImageRequest = if mode == "disabled" {
+            try #require(fixture.media.imageRequest(for: fixture.descriptor()))
+        } else {
+            request
+        }
+        let second = try await pipeline.imageTask(with: current).response
         #expect(second.image.size == CGSize(width: 11, height: 7))
         #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.count == 1)
         try routingAssertRemote(fixture.loader.requests, fixture: fixture)
     }
 
-    /// 原先构造但尚未执行的request，关联已关闭时不访问旧Photos对象，直接进入当前合法远端通道。
+    /// 关闭关联后旧wrapper不能读Photos像素或发布旧缓存；新构造请求才使用显式选择的远端通道。
     @Test func deferredRequestChecksAssociationBeforeTouchingPhotos() async throws {
         let fixture = try await routingFixture()
         defer { fixture.close() }
         let request = try #require(fixture.media.imageRequest(for: fixture.descriptor()))
         let operation = try #require(fixture.matches.setEnabled(false, using: fixture.media.management)); await operation.value
         let pipeline = try #require(fixture.media.pipeline)
-        let value = try await pipeline.imageTask(with: request).response
+        await routingExpectUnavailable(request, pipeline: pipeline)
+        #expect(fixture.reader.imageReads == 0 && fixture.loader.requests.isEmpty)
+        let current = try #require(fixture.media.imageRequest(for: fixture.descriptor()))
+        let value = try await pipeline.imageTask(with: current).response
         #expect(value.image.size == CGSize(width: 11, height: 7))
         #expect(fixture.reader.imageReads == 0 && fixture.loader.requests.count == 1)
     }
 
-    /// 不匹配远端精确revision的展示请求不能用旧本机关联替代，原片下载同样不进入Photos current路由。
+    /// 服务端展示revision变化不否定当前Photos对象；显式通用原片下载仍保持独立远端字节边界。
     @Test(arguments: ["revision", "original"])
-    func otherVersionsAndOriginalsDoNotUseLocalDisplay(_ mode: String) async throws {
+    func serverDisplayRevisionsKeepPhotosWhileExplicitOriginalRemainsRemote(_ mode: String) async throws {
         let fixture = try await routingFixture()
         defer { fixture.close() }
         let descriptor = MediaRequestDescriptor(assetID: fixture.assetID, updatedAt: mode == "revision" ? routingRevision.addingTimeInterval(0.001) : routingRevision,
@@ -189,8 +242,13 @@ import UIKit
         let request = try #require(fixture.media.imageRequest(for: descriptor, useSavedPhotos: false))
         let pipeline = try #require(fixture.media.pipeline)
         _ = try await pipeline.imageTask(with: request).response
-        #expect(fixture.reader.imageReads == 0 && fixture.loader.requests.count == 1)
-        #expect(request.url != nil)
+        if mode == "revision" {
+            #expect(fixture.reader.imageReads == 1 && fixture.loader.requests.isEmpty && request.url == nil)
+            #expect(fixture.media.mediaReadOrigin(assetID: fixture.assetID, revision: descriptor.updatedAt) == .devicePhotos)
+        } else {
+            #expect(fixture.reader.imageReads == 0 && request.url != nil)
+            try routingAssertRemote(fixture.loader.requests, fixture: fixture, original: true)
+        }
     }
 
     /// 普通视频helper返回实际Photos item并记录设备来源，不创建远端视频/图片字节请求。
@@ -271,6 +329,7 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     let loader: RoutingDataLoader
     let session: AccountSession
     let profileSession: URLSession
+    let exportStore: SQLiteLibraryIndexStore
     var assetID: String {
         routingAssetID
     }
@@ -282,12 +341,19 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
     /// 关闭实际账号/会话，移除本例恢复目录；绝不使用普通用户的export store或全局URLProtocol注册。
     func close() {
-        reader.gate.release(); media.clearAll(); profileSession.invalidateAndCancel(); try? FileManager.default.removeItem(at: root)
+        reader.gate.release(); media.clearAll(); profileSession.invalidateAndCancel()
+        let store = exportStore, directory = root, namespace = MediaAccountScope(session: session).cacheNamespace
+        Task {
+            // Retire this private SQLite connection before unlinking its files; pending old loads
+            // are then rejected rather than recreating the directory after teardown.
+            try? await store.removeAccount(namespace: namespace)
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 }
 
-/// localImage/video选择本例系统结果；先真实原子保存并冷恢复，再经过真实Controller fresh验证，而非直接设置私有map。
-@MainActor private func routingFixture(localImage: Bool = true, video: Bool = false) async throws -> RoutingFixture {
+/// 真实原子保存后按共享匹配协议冷恢复；Reader运行时核对当前Photos身份，不直接设置私有map或强制独立扫描。
+@MainActor private func routingFixture(localImage: Bool = true, photosObjectExists: Bool = true, video: Bool = false) async throws -> RoutingFixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalRouting-\(UUID())", isDirectory: true)
     let endpoint = URL(string: "https://routing-\(UUID().uuidString.lowercased()).invalid/prefix/api")!
     let session = routingSession(owner: UUID().uuidString, endpoint: endpoint)
@@ -304,17 +370,19 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
                                       isTrashed: false, isOffline: false, isEdited: false, checksum: Data(repeating: 0xAA, count: 20).base64EncodedString(), updatedAt: routingRevision)
     let association = try #require(LocalMediaAssociation.verified(remote: asset, requestedID: asset.id, ownerID: session.userID, local: identity, source: .mobileMetadata))
     let store = LocalMediaAssociationStore(directory: root.appendingPathComponent("matches"))
-    let saved = try await store.save(.init(scope: scope, enabled: true, access: .full, associations: [association]), scope: scope, permit: LocalMediaSavePermit())
+    let saved = try await store.save(.init(scope: scope, enabled: true, access: .full, associations: [association], followsBackup: true), scope: scope, permit: LocalMediaSavePermit())
     #expect(saved)
     let inventory = RoutingInventory(id: identity.localIdentifier)
     let remote = RoutingRemote(asset: asset)
     let matches = LocalMediaMatchController(inventory: inventory, metadata: RoutingMetadata(snapshot: snapshot), checksum: RoutingChecksum(),
-                                            remote: remote, persistence: store, observeChanges: false)
-    let reader = RoutingPhotoReader(localImage: localImage)
+                                            remote: remote, persistence: store,
+                                            displayPersistence: LocalPhotoDisplayAssociationStore(directory: root.appendingPathComponent("display-matches")), observeChanges: false)
+    let reader = RoutingPhotoReader(localImage: localImage, objectExists: photosObjectExists, inventory: inventory)
     let remotePNG = try #require(reader.remoteSizedImage.pngData())
     let loader = RoutingDataLoader(image: remotePNG)
     let transfers = LibraryTransferQueue(rootURL: root.appendingPathComponent("transfers"), nativeTasksProvider: { [] }, sessionIdentifier: "io.github.espeonblue.routing-unused-\(UUID())")
-    let exports = MediaExportController(store: .init(databaseURL: root.appendingPathComponent("unused.sqlite")), photos: RoutingNoExports(), transfers: transfers)
+    let exportStore = SQLiteLibraryIndexStore(databaseURL: root.appendingPathComponent("unused.sqlite"))
+    let exports = MediaExportController(store: exportStore, photos: RoutingNoExports(), transfers: transfers)
     let profileConfiguration = URLSessionConfiguration.ephemeral
     profileConfiguration.protocolClasses = [RoutingProfileProtocol.self]
     let profileSession = URLSession(configuration: profileConfiguration)
@@ -322,8 +390,9 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     media.configure(session: session, activeEndpoint: endpoint)
     let restore = try #require(matches.restoreAndRefresh(using: media.management, scope: scope)); await restore.value
     #expect(matches.association(assetID: routingAssetID, revision: routingRevision) == association)
-    #expect(await remote.calls == ["metadata", "asset"])
-    return .init(root: root, media: media, matches: matches, inventory: inventory, reader: reader, loader: loader, session: session, profileSession: profileSession)
+    let restoredCalls = await remote.calls
+    #expect(matches.enabled && matches.followsBackup && restoredCalls.isEmpty)
+    return .init(root: root, media: media, matches: matches, inventory: inventory, reader: reader, loader: loader, session: session, profileSession: profileSession, exportStore: exportStore)
 }
 
 /// owner/endpoint全部合成，namespace独占；版本与正常根路由保持真实账号形状。
@@ -332,14 +401,29 @@ private nonisolated func routingSession(owner: String, endpoint: URL) -> Account
           isAdmin: false, serverVersion: .init(major: 3, minor: 4, patch: 2, prerelease: nil))
 }
 
-/// 真正远端fallback请求必须仍是编辑展示路径；检查实际DataLoader收到的请求而非再次调用产品URL构造器。
-@MainActor private func routingAssertRemote(_ requests: [URLRequest], fixture: RoutingFixture) throws {
+/// 展示GET必须edited=true，显式原图GET不得附加edited；检查DataLoader实际收到的请求。
+@MainActor private func routingAssertRemote(_ requests: [URLRequest], fixture: RoutingFixture, original: Bool = false) throws {
     let request = try #require(requests.first)
     let url = try #require(request.url)
     #expect(requests.count == 1 && request.httpMethod == "GET")
     #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer synthetic-routing")
-    #expect(url.host == fixture.session.apiURL.host && url.path == "/prefix/api/assets/\(routingAssetID)/thumbnail")
-    #expect(url.query == "size=preview&edited=true")
+    #expect(url.host == fixture.session.apiURL.host && url.path == "/prefix/api/assets/\(routingAssetID)/\(original ? "original" : "thumbnail")")
+    #expect(url.query == (original ? nil : "size=preview&edited=true"))
+}
+
+/// A strict Photos miss must be the actual resourceUnavailable boundary, never an arbitrary
+/// cancellation, decoder, URL, fixture or authentication error hidden by a generic catch.
+@MainActor private func routingExpectUnavailable(_ request: ImageRequest, pipeline: ImagePipeline) async {
+    do {
+        _ = try await pipeline.imageTask(with: request).response
+        Issue.record("An existing but unreadable Photos object must not publish pixels or fall back to Immich.")
+    } catch {
+        guard let failure = error as? ImagePipeline.Error, let underlying = failure.dataLoadingError else {
+            Issue.record("Expected Nuke dataLoadingFailed wrapping resourceUnavailable."); return
+        }
+        let urlError = underlying as NSError
+        #expect(urlError.domain == NSURLErrorDomain && urlError.code == URLError.resourceUnavailable.rawValue)
+    }
 }
 
 /// 当前授权清单完全合成；只允许既有full访问，不在测试触碰系统权限。
@@ -411,6 +495,8 @@ private actor RoutingRemote: LocalMediaMatchingReading {
     let remoteSizedImage: UIImage
     let video = AVPlayerItem(asset: AVMutableComposition())
     let returnsImage: Bool
+    let objectExists: Bool
+    let inventory: RoutingInventory
     let gate = RoutingGate()
     var holdImage = false
     var thumbnailVersion: String?
@@ -420,20 +506,30 @@ private actor RoutingRemote: LocalMediaMatchingReading {
     private(set) var imageReads = 0
     private(set) var videoReads = 0
     private(set) var lastPixels: MediaPixelSize?
+    func currentIdentity(for expected: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> LocalPhotoIdentity? {
+        try Task.checkCancellation(); try validateContext()
+        return canReadCurrentObject ? expected : nil
+    }
+
+    private var canReadCurrentObject: Bool {
+        objectExists && (inventory.authorization == .full || inventory.authorization == .limited)
+    }
+
     func original(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) async throws -> UIImage? {
         try Task.checkCancellation(); try validateContext()
         originalReads += 1
-        return returnsOriginal ? local : nil
+        return canReadCurrentObject && returnsOriginal ? local : nil
     }
 
     func thumbnailSourceVersion(for _: LocalPhotoIdentity, validateContext: @MainActor () throws -> Void) throws -> String? {
         try Task.checkCancellation(); try validateContext()
-        return thumbnailVersion
+        return canReadCurrentObject ? thumbnailVersion : nil
     }
 
     /// localImage决定当前本机是否miss，像素颜色/尺寸完全合成，不使用PhotoKit。
-    init(localImage: Bool) {
-        returnsImage = localImage; local = Self.image(width: 3, height: 2); remoteSizedImage = Self.image(width: 11, height: 7)
+    init(localImage: Bool, objectExists: Bool, inventory: RoutingInventory) {
+        returnsImage = localImage; self.objectExists = objectExists; self.inventory = inventory
+        local = Self.image(width: 3, height: 2); remoteSizedImage = Self.image(width: 11, height: 7)
     }
 
     /// 先检查实际调用方context，再有意允许迟到结果，避免fixture替Media提前吞掉旧值。
@@ -444,7 +540,7 @@ private actor RoutingRemote: LocalMediaMatchingReading {
             await gate.hold()
         }
         try Task.checkCancellation()
-        return returnsImage ? local : nil
+        return canReadCurrentObject && returnsImage ? local : nil
     }
 
     /// 返回Photos current形状的空组合item；不会播放文件，迟到值由真实Media helper再次检查。
@@ -453,7 +549,7 @@ private actor RoutingRemote: LocalMediaMatchingReading {
         if holdVideo {
             await gate.hold()
         }
-        return video
+        return canReadCurrentObject ? video : nil
     }
 
     /// 以scale1生成独立可观测尺寸，避免屏幕scale造成期待值与产品实现耦合。

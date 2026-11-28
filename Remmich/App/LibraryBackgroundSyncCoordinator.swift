@@ -13,7 +13,17 @@ extension BGTask: LibraryBackgroundTask {}
 /// The scene and OS background launches use the same session and sync owner.
 @MainActor
 final class LibraryBackgroundSyncCoordinator {
-    static let shared = LibraryBackgroundSyncCoordinator()
+    #if DEBUG
+        static let shared = makeDebugShared()
+
+        @MainActor private static func makeDebugShared() -> LibraryBackgroundSyncCoordinator {
+            let reporter: LibraryIndexFailureReporter = LibraryIndexFailureFileSink.makeReporter()
+            let session = AppSessionController(libraryIndexFailureReporter: reporter)
+            return LibraryBackgroundSyncCoordinator(controller: session)
+        }
+    #else
+        static let shared = LibraryBackgroundSyncCoordinator()
+    #endif
     static let taskIdentifier = "io.github.ender-wang.Remmich.library-sync"
     static let refreshTaskIdentifier = "io.github.ender-wang.Remmich.library-refresh"
     private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "BackgroundLibrarySync")

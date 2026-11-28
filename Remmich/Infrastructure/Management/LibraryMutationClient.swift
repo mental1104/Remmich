@@ -243,6 +243,12 @@ final nonisolated class LibraryMutationClient: Sendable {
 
     /// 旧版仅保存备份匹配时，按当前可见资产只读补回浏览证据；不遍历整库、不更改备份任务。
     @concurrent func localPhotoDisplayEvidence(_ id: UUID) async throws -> (LocalMediaRemoteAsset, [LocalMediaRemoteCandidate]) {
+        let evidence = try await localPhotoDisplayEvidenceRecord(id)
+        return (evidence.remote, evidence.fullMetadataCandidates)
+    }
+
+    /// 保持轻量Cloud ID与完整元数据分离，只为Photos展示补回身份，不提供备份或字节证明。
+    @concurrent func localPhotoDisplayEvidenceRecord(_ id: UUID) async throws -> LocalPhotoDisplayEvidenceRecord {
         let canonical = try validID(id.uuidString)
         var assetRequest = try request("GET", ["assets", canonical])
         assetRequest.timeoutInterval = 5
@@ -260,22 +266,48 @@ final nonisolated class LibraryMutationClient: Sendable {
         guard (response as? HTTPURLResponse)?.statusCode == 200, bytes.count <= 262_144,
               let rows = try JSONSerialization.jsonObject(with: bytes) as? [[String: Any]], rows.count <= 256 else { throw LibraryWriteError.malformedResponse }
         var keys = Set<String>(), values = Set<LocalMediaMobileMetadata>()
+        var identities = Set<LocalMediaDisplayCloudIdentity>(), diagnostics = Set<String>()
+        if rows.isEmpty {
+            diagnostics.insert("rowsEmpty")
+        }
         for row in rows {
             guard let key = row["key"] as? String, keys.insert(key).inserted else { throw LibraryWriteError.malformedResponse }
+            if key == LocalMediaDisplayCloudIdentity.metadataKey {
+                diagnostics.insert("markerPresent")
+                if let value = row["value"] as? [String: Any],
+                   let encoded = try? JSONSerialization.data(withJSONObject: value),
+                   let identity = try? JSONDecoder().decode(LocalMediaDisplayCloudIdentity.self, from: encoded)
+                {
+                    identities.insert(identity)
+                } else {
+                    // 可选旧marker损坏不遮蔽同响应中仍有效的官方/原片来源元数据。
+                    diagnostics.insert("markerRejected")
+                }
+                continue
+            }
             guard key == "mobile-app" || key.hasPrefix(PhotoBackupOrigin.keyPrefix) else { continue }
             guard let value = row["value"] as? [String: Any] else { throw LibraryWriteError.malformedResponse }
             let encoded = try JSONSerialization.data(withJSONObject: value)
             if key == "mobile-app" {
+                diagnostics.insert("mobileAppPresent")
                 try values.insert(JSONDecoder().decode(LocalMediaMobileMetadata.self, from: encoded))
             } else {
+                diagnostics.insert("backupOriginPresent")
                 let origin = try JSONDecoder().decode(PhotoBackupOrigin.self, from: encoded)
                 try origin.validate()
                 guard key == PhotoBackupOrigin.metadataKey(for: origin.metadata.cloudId) else { throw LibraryWriteError.malformedResponse }
                 values.insert(origin.metadata)
             }
         }
+        if !identities.isEmpty, values.isEmpty {
+            diagnostics.insert("markerOnly")
+        }
+        if identities.isEmpty, values.isEmpty, !rows.isEmpty {
+            diagnostics.insert("noUsableIdentity")
+        }
         try Task.checkCancellation()
-        return (remote, values.map { .init(assetID: id, metadata: $0) })
+        return .init(remote: remote, fullMetadataCandidates: values.map { .init(assetID: id, metadata: $0) },
+                     cloudIdentityCandidates: identities, metadataDiagnostics: diagnostics)
     }
 
     /// queries为最多64个不重复nonce的本机完整字节摘要；官方precheck只查现有资源，accept仅返回未命中，绝不上传。

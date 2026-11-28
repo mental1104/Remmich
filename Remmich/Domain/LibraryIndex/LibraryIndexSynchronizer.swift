@@ -38,11 +38,13 @@ actor LibraryIndexSynchronizer {
     private let source: any TimelineReading
     private let store: any LibraryIndexStoring
     private let batchSize: Int
+    private let failureReporter: LibraryIndexFailureReporter?
 
-    init(source: any TimelineReading, store: any LibraryIndexStoring, batchSize: Int = 2) {
+    init(source: any TimelineReading, store: any LibraryIndexStoring, batchSize: Int = 2, failureReporter: LibraryIndexFailureReporter? = nil) {
         self.source = source
         self.store = store
         self.batchSize = max(1, batchSize)
+        self.failureReporter = failureReporter
     }
 
     /// scope为隔离账号；recentOnly保留原短同步范围，dateProjections额外强制已验证日期的旧/新月。
@@ -136,6 +138,7 @@ actor LibraryIndexSynchronizer {
             let certificateStore = store as? any PartnerTimelineCertificateStoring
             let partnerPolicy: PartnerTimelinePolicy?
             var forceFreshAllMonths = false
+            var forceFreshAcceptedMonths = false
             var needsFreshPartnerRead = false
             if let policyReader {
                 guard let certificateStore else { throw PartnerTimelinePolicyError.unavailableStore }
@@ -143,9 +146,12 @@ actor LibraryIndexSynchronizer {
                 try current.validate(scope: scope); try await validateContext?()
                 let certificate = try await certificateStore.loadPartnerTimelineCertificate(scope: scope)
                 try await validateContext?()
-                needsFreshPartnerRead = certificate?.matches(generation: previous?.generation, policy: current, scope: scope) != true
-                // 首次空索引可保留原开屏短批；任何已有目录却无同代际作用域证明必须完整重读，不能靠月计数猜一致。
-                forceFreshAllMonths = !current.isKnown || (previous != nil && needsFreshPartnerRead)
+                needsFreshPartnerRead = certificate?.allowsIncrementalReuse(generation: previous?.generation, policy: current, scope: scope) != true
+                let hasPartialHistory = previous?.syncState.historicalCursor != nil
+                // 旧partial无凭据或策略改变时，fresh重核所有已接受月份再续小批；未读月份并无旧行可复用。
+                // 完整旧目录或未知策略仍保留原全量校验，不能凭同计数猜作用域一致。
+                forceFreshAllMonths = !current.isKnown || (previous != nil && needsFreshPartnerRead && !hasPartialHistory)
+                forceFreshAcceptedMonths = current.isKnown && needsFreshPartnerRead && hasPartialHistory
                 if needsFreshPartnerRead {
                     // 证书准备前先清退旧作用域的元数据GET；否则accept后崩溃可让旧队列在下次普通增量中重播。
                     try await policyReader.retirePartnerTimelineIndexReads(scope: scope)
@@ -181,8 +187,10 @@ actor LibraryIndexSynchronizer {
             // 旧桶只来自真正accepted记录，新桶只匹配fresh详情的服务器墙上年月。
             let dateAssetIDs = Set(dateProjections.map { $0.assetID.lowercased() })
             let oldDateBuckets = Set(previous?.assets.filter { dateAssetIDs.contains($0.id.lowercased()) }.map(\.bucketKey) ?? [])
+            let acceptedBucketKeys = Set(previous?.assets.map(\.bucketKey) ?? [])
             let forced = summaries.filter { summary in
-                forceFreshAllMonths || oldDateBuckets.contains(summary.id.rawValue) || dateProjections.contains { $0.occupiesMonth(summary.id) }
+                forceFreshAllMonths || (forceFreshAcceptedMonths && acceptedBucketKeys.contains(summary.id.rawValue))
+                    || oldDateBuckets.contains(summary.id.rawValue) || dateProjections.contains { $0.occupiesMonth(summary.id) }
             }
             let forcedKeys = Set(forced.map(\.id.rawValue))
             let selected = Self.deduplicate(ordinary + forced)
@@ -203,11 +211,17 @@ actor LibraryIndexSynchronizer {
                 let assets = try await reader.assets(in: summary.id, query: .init())
                 try await validateContext?()
                 if forcedKeys.contains(summary.id.rawValue) || partnerPolicy != nil {
+                    let uniqueIDCount = Set(assets.map { $0.id.lowercased() }).count
+                    let wrongMonthCount = assets.count { !Self.belongsToMonth($0.captureLocalDate, bucket: summary.id) }
                     guard assets.count == summary.assetCount,
-                          Set(assets.map { $0.id.lowercased() }).count == assets.count,
-                          assets.allSatisfy({ Self.belongsToMonth($0.captureLocalDate, bucket: summary.id) })
+                          uniqueIDCount == assets.count,
+                          wrongMonthCount == 0
                     else {
                         if partnerPolicy != nil {
+                            let reason: LibraryIndexFailureDiagnostic.Reason = assets.count != summary.assetCount ? .countMismatch
+                                : uniqueIDCount != assets.count ? .duplicateIDs : .wrongMonth
+                            await failureReporter?(.init(stage: .selectedMonth, reason: reason, expectedCount: summary.assetCount,
+                                                         actualCount: assets.count, uniqueIDCount: uniqueIDCount, wrongMonthCount: wrongMonthCount))
                             throw PartnerTimelinePolicyError.incompleteMonths
                         }
                         throw AssetMetadataError.dateProjectionChanged
@@ -235,8 +249,11 @@ actor LibraryIndexSynchronizer {
                 replacing: replacements
             )
             if let verifiedDateAssets {
-                guard Set(verifiedDateAssets.map { $0.id.lowercased() }).count == verifiedDateAssets.count else {
+                let uniqueIDCount = Set(verifiedDateAssets.map { $0.id.lowercased() }).count
+                guard uniqueIDCount == verifiedDateAssets.count else {
                     if partnerPolicy != nil {
+                        await failureReporter?(.init(stage: .mergedCatalog, reason: .duplicateIDs, expectedCount: verifiedDateAssets.count,
+                                                     actualCount: verifiedDateAssets.count, uniqueIDCount: uniqueIDCount))
                         throw PartnerTimelinePolicyError.incompleteMonths
                     }
                     throw AssetMetadataError.dateProjectionChanged
@@ -284,12 +301,21 @@ actor LibraryIndexSynchronizer {
                 try after.validate(scope: scope); try await validateContext?()
                 guard after == partnerPolicy else { throw PartnerTimelinePolicyError.changedPolicy }
                 if nextCursor == nil, !hasPendingBucketChanges {
+                    let mismatchedBucketCount = summaries.count { stagedCounts[$0.id.rawValue, default: 0] != $0.assetCount }
                     guard stagedAssets.count == expectedCount,
-                          summaries.allSatisfy({ stagedCounts[$0.id.rawValue, default: 0] == $0.assetCount }) else { throw PartnerTimelinePolicyError.incompleteMonths }
+                          mismatchedBucketCount == 0
+                    else {
+                        await failureReporter?(.init(stage: .finalCatalog, reason: stagedAssets.count != expectedCount ? .countMismatch : .bucketCountMismatch,
+                                                     expectedCount: expectedCount, actualCount: stagedAssets.count, mismatchedBucketCount: mismatchedBucketCount))
+                        throw PartnerTimelinePolicyError.incompleteMonths
+                    }
                     try await certificateStore.stagePartnerTimelineCertificate(.init(generation: generation, policy: partnerPolicy), scope: scope)
                     if partnerPolicy.isKnown {
                         appliedPartnerPolicy = partnerPolicy
                     }
+                } else if partnerPolicy.isKnown {
+                    // partial只证明已接受行的查询作用域；下批可续读，但matches()/appliedPartnerPolicy仍不能报整库完成。
+                    try await certificateStore.stagePartnerTimelineCertificate(.init(partialGeneration: generation, policy: partnerPolicy), scope: scope)
                 }
             }
             try Task.checkCancellation()
@@ -353,6 +379,12 @@ actor LibraryIndexSynchronizer {
         case .incremental:
             let indexedCounts = Dictionary(grouping: previous?.assets ?? [], by: \.bucketKey)
                 .mapValues(\.count)
+            if previous?.syncState.historicalCursor != nil {
+                // 冷恢复的partial不能把每个尚未读取的月份都算作suspect，恢复后仍逐批持久提交。
+                let changed = summaries.filter { indexedCounts[$0.id.rawValue] != nil && indexedCounts[$0.id.rawValue] != $0.assetCount }
+                let missing = summaries.filter { indexedCounts[$0.id.rawValue] == nil }
+                return Self.deduplicate(Array(summaries.prefix(batchSize)) + changed + Array(missing.prefix(batchSize)))
+            }
             let suspect = summaries.filter { indexedCounts[$0.id.rawValue] != $0.assetCount }
             return Self.deduplicate(Array(summaries.prefix(batchSize)) + suspect)
         case .fullReconciliation:

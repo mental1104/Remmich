@@ -96,7 +96,8 @@ final class AppSessionController {
         endpointNormalizer: any EndpointNormalizing = ImmichEndpointNormalizer(),
         networkMonitoringEnabled: Bool = true,
         pathChangeDebounce: Duration = .milliseconds(400),
-        timeline: ImmichTimelineRepository = .init()
+        timeline: ImmichTimelineRepository = .init(),
+        libraryIndexFailureReporter: LibraryIndexFailureReporter? = nil
     ) {
         self.timeline = timeline
         locations = AssetLocationStore(defaults: libraryIndexPreferences, client: PhotonPlaceClient(transfers: transfers), store: libraryIndexStore)
@@ -112,7 +113,8 @@ final class AppSessionController {
             assetDetails: syncSource,
             locations: locations,
             transfers: transfers,
-            preferences: libraryIndexPreferences
+            preferences: libraryIndexPreferences,
+            failureReporter: libraryIndexFailureReporter
         )
         let persistentAssetDetails = CachedAssetDetailReader(
             source: timeline,

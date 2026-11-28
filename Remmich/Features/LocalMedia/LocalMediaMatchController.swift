@@ -70,6 +70,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     @ObservationIgnored private var scope: MediaAccountScope?
     @ObservationIgnored private var access: LocalPhotoLibraryAccess?
     @ObservationIgnored private var associations: [UUID: LocalMediaAssociation] = [:]
+    @ObservationIgnored private var displayAssociations: [UUID: LocalMediaAssociation] = [:]
+    @ObservationIgnored private var displayAssociationsAccess: LocalPhotoLibraryAccess?
+    @ObservationIgnored private var rejectedDisplayAssociationIDs = Set<UUID>()
+    @ObservationIgnored private var displayMutations: [UUID: (id: UUID, task: Task<Bool, Error>)] = [:]
     @ObservationIgnored private var restoredNamespace: String?
     @ObservationIgnored private var automaticGeneration: UUID?
     @ObservationIgnored private var permit = LocalMediaSavePermit()
@@ -80,6 +84,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     @ObservationIgnored private let checksum: any LocalPhotoChecksumReading
     @ObservationIgnored private let remoteOverride: (any LocalMediaMatchingReading)?
     @ObservationIgnored private let persistence: any LocalMediaAssociationPersisting
+    @ObservationIgnored private let displayPersistence: any LocalPhotoDisplayAssociationPersisting
     @ObservationIgnored private let observeChanges: Bool
 
     /// 注入仅替换系统/网络来源；nil remote使用当前manager真实client，全部验证、统计与发布门禁仍执行。
@@ -87,10 +92,11 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
          metadata: any LocalPhotoMetadataReading = PhotoKitLocalPhotoMetadataReader(),
          checksum: any LocalPhotoChecksumReading = PhotoKitCurrentResourceChecksumReader(),
          remote: (any LocalMediaMatchingReading)? = nil,
-         persistence: any LocalMediaAssociationPersisting = LocalMediaAssociationStore(), observeChanges: Bool = true)
+         persistence: any LocalMediaAssociationPersisting = LocalMediaAssociationStore(),
+         displayPersistence: any LocalPhotoDisplayAssociationPersisting = LocalPhotoDisplayAssociationStore(), observeChanges: Bool = true)
     {
         self.inventory = inventory; self.metadata = metadata; self.checksum = checksum; remoteOverride = remote
-        self.persistence = persistence; self.observeChanges = observeChanges
+        self.persistence = persistence; self.displayPersistence = displayPersistence; self.observeChanges = observeChanges
     }
 
     /// 兼容在线管理宿主；需要离线恢复的media宿主使用显式scope重载，避免client缺失被当成退出登录。
@@ -108,7 +114,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         self.manager = manager; managerGeneration = manager.generation; scope = nextScope
         if changedScope {
             followsBackup = false
-            associations = [:]; checksumAssociationIDs = [:]; revision += 1; enabled = false; access = nil; restoredNamespace = nil
+            associations = [:]; displayAssociations = [:]; displayAssociationsAccess = nil; rejectedDisplayAssociationIDs = []; checksumAssociationIDs = [:]; revision += 1; enabled = false; access = nil; restoredNamespace = nil
             total = 0; scanned = 0; metadataMatches = 0; checksumMatches = 0; unmatched = 0; metadataFailures = 0
             automaticGeneration = nil; monitor?.stop(); monitor = nil
         }
@@ -120,9 +126,12 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     func association(assetID: String, revision _: Date) -> LocalMediaAssociation? {
         _ = revision
         guard enabled, scope != nil, let manager, managerGeneration == manager.generation,
-              let access, inventory.authorization == access, let id = UUID(uuidString: assetID),
-              let association = associations[id] else { return nil }
-        return association
+              let id = UUID(uuidString: assetID), !rejectedDisplayAssociationIDs.contains(id) else { return nil }
+        if let access, inventory.authorization == access, let stronger = associations[id] {
+            return stronger
+        }
+        guard let displayAssociationsAccess, inventory.authorization == displayAssociationsAccess, !rejectedDisplayAssociationIDs.contains(id) else { return nil }
+        return displayAssociations[id]
     }
 
     /// 只暴露不透明证明epoch；新扫描/关闭/权限或账号退役都撤销尚未完成的明确组织操作。
@@ -148,7 +157,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         } else {
             throw LibraryWriteError.unavailable
         }
-        let selected = associations.values.filter { localIDs.contains($0.localIdentity.localIdentifier) }
+        let selected = associations.values.filter { $0.source != .exactCloudIdentity && localIDs.contains($0.localIdentity.localIdentifier) }
         let ids = Array(Set(selected.map(\.localIdentity.localIdentifier))).sorted()
         var snapshots: [String: LocalPhotoSnapshot] = [:]
         for start in stride(from: 0, to: ids.count, by: 64) {
@@ -242,6 +251,13 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                         accept(value)
                     }
                 }
+                let displayAccess = inventory.authorization
+                if enabled, displayAccess == .full || displayAccess == .limited {
+                    let display = try await displayPersistence.load(scope: scope, access: displayAccess)
+                    try validate(manager, owner: owner, scope: scope, run: run, expectedAccess: displayAccess, requireOnline: false)
+                    displayAssociations = Dictionary(uniqueKeysWithValues: display.filter { !rejectedDisplayAssociationIDs.contains($0.remoteID) }.map { ($0.remoteID, $0) })
+                    displayAssociationsAccess = displayAccess; publishCounts(); revision += 1
+                }
                 permission = inventory.authorization
                 startMonitoringIfNeeded()
                 restored = true
@@ -281,7 +297,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     /// 仅用户操作改变启用配置；关闭立即失效关联并保存，启用后显式扫描可请求初次Photos授权。
     @discardableResult func setEnabled(_ value: Bool, using manager: LibraryManagementController, followBackup: Bool = false) -> Task<Void, Never>? {
         guard self.manager === manager, let scope else { return nil }
-        invalidateRun(); enabled = value; followsBackup = followBackup; associations = [:]; revision += 1; publishCounts()
+        invalidateRun(); enabled = value; followsBackup = followBackup; associations = [:]; displayAssociations = [:]; displayAssociationsAccess = nil; revision += 1; publishCounts()
         metadataFailures = 0
         access = nil; automaticGeneration = manager.generation
         if value {
@@ -306,6 +322,13 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                     for association in shared {
                         accept(association)
                     }
+                }
+                let displayAccess = inventory.authorization
+                if value, displayAccess == .full || displayAccess == .limited {
+                    let display = try await displayPersistence.load(scope: scope, access: displayAccess)
+                    try validate(manager, owner: owner, scope: scope, run: run, expectedAccess: displayAccess, requireOnline: false)
+                    displayAssociations = Dictionary(uniqueKeysWithValues: display.filter { !rejectedDisplayAssociationIDs.contains($0.remoteID) }.map { ($0.remoteID, $0) })
+                    displayAssociationsAccess = displayAccess; publishCounts(); revision += 1
                 }
                 statusMessage = value ? (followBackup ? "使用照片同步的匹配结果，无需单独扫描。" : "已保存启用配置；连接服务器后自动匹配。") : "已关闭本机优先，不修改或删除任何照片。"
             } catch {
@@ -422,13 +445,14 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                         if case let .resolved(cloudID) = snapshot.cloudIdentity,
                            case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: candidates[cloudID] ?? [])
                         {
-                            if let fresh = try await freshCandidate(candidate.assetID, using: remote, validateContext: validateContext),
+                            let fresh = try await freshCandidate(candidate.assetID, using: remote, validateContext: validateContext)
+                            if let fresh,
                                let value = LocalMediaAssociation.verified(remote: fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity, source: .mobileMetadata)
                             {
                                 accept(value); confirmedRemoteIDs.insert(value.remoteID); confirmed = true
                             } else {
                                 // 明确不可读只撤销此候选；独立本机字节仍可能找到另一个当前可读副本。
-                                removeAssociation(candidate.assetID)
+                                try await removeAssociation(candidate.assetID, invalidatingDisplay: rejectsDisplayIdentity(fresh, requestedID: candidate.assetID, ownerID: scope.userID, local: snapshot.identity))
                             }
                         }
                         if !confirmed {
@@ -452,13 +476,14 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                         for item in hashes {
                             guard let lookup = byID[item.query.id] else { throw LocalMediaMetadataError.invalidMetadata }
                             if case let .existing(id) = lookup.outcome {
-                                if let fresh = try await freshCandidate(id, using: remote, validateContext: validateContext),
+                                let fresh = try await freshCandidate(id, using: remote, validateContext: validateContext)
+                                if let fresh,
                                    let value = LocalMediaAssociation.verified(remote: fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity,
                                                                               source: .checksum, expectedChecksum: item.proof.digest.sha1Base64)
                                 {
                                     accept(value); confirmedRemoteIDs.insert(value.remoteID)
                                 } else {
-                                    removeAssociation(id); unmatched += 1
+                                    try await removeAssociation(id, invalidatingDisplay: rejectsDisplayIdentity(fresh, requestedID: id, ownerID: scope.userID, local: item.proof.source.identity)); unmatched += 1
                                 }
                             } else {
                                 unmatched += 1
@@ -563,6 +588,11 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
     /// 同远端对象保留最新确认版本；按变化增减来源计数，避免每确认一项都全库重算。
     private func accept(_ association: LocalMediaAssociation) {
+        guard association.source != .exactCloudIdentity,
+              !rejectedDisplayAssociationIDs.contains(association.remoteID) else { return }
+        if displayAssociations.removeValue(forKey: association.remoteID) != nil, associations[association.remoteID] == nil {
+            metadataMatches -= 1
+        }
         let previous = associations[association.remoteID]
         guard previous != association else { return }
         if let previous {
@@ -589,20 +619,65 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         for value in associations.values {
             checksumAssociationIDs[value.checksum, default: []].insert(value.remoteID)
         }
-        metadataMatches = associations.values.filter { $0.source == .mobileMetadata }.count
+        metadataMatches = associations.values.filter { $0.source == .mobileMetadata }.count + displayAssociations.keys.filter { associations[$0] == nil }.count
         checksumMatches = associations.values.filter { $0.source == .checksum }.count
     }
 
-    /// 新鲜详情明确不可用时撤销旧同ID关联，不能在已知trash/offline/编辑变化后继续沿用恢复记录。
-    private func removeAssociation(_ id: UUID) {
-        guard let removed = associations.removeValue(forKey: id) else { return }
-        unindexChecksum(removed)
-        if removed.source == .mobileMetadata {
+    /// 强proof不足只撤销强层；明确身份拒绝还撤销同ID展示层，不把它解释为Photos对象不存在。
+    private func removeAssociation(_ id: UUID, invalidatingDisplay: Bool) async throws {
+        let removed = associations.removeValue(forKey: id)
+        let display = invalidatingDisplay ? displayAssociations.removeValue(forKey: id) : displayAssociations[id]
+        if let removed {
+            unindexChecksum(removed)
+            if removed.source == .mobileMetadata {
+                metadataMatches -= 1
+            } else {
+                checksumMatches -= 1
+            }
+            if !invalidatingDisplay, display != nil {
+                metadataMatches += 1
+            }
+        } else if invalidatingDisplay, display != nil {
             metadataMatches -= 1
-        } else {
-            checksumMatches -= 1
         }
         revision += 1
+        if invalidatingDisplay {
+            rejectedDisplayAssociationIDs.insert(id)
+            if let scope {
+                let writePermit = permit
+                guard try await mutateDisplayAssociation(id, operation: {
+                    try await self.displayPersistence.remove(id, scope: scope, permit: writePermit)
+                }) else { throw CancellationError() }
+            }
+        }
+    }
+
+    /// 同ID删除/新证明按主Actor发起顺序提交；旧删除不能晚到并抹掉随后确认的新关系。
+    private func mutateDisplayAssociation(_ id: UUID, operation: @escaping @MainActor @Sendable () async throws -> Bool) async throws -> Bool {
+        let previous = displayMutations[id]?.task, run = generation, mutationID = UUID()
+        let pending = Task {
+            _ = try? await previous?.value
+            try Task.checkCancellation()
+            guard generation == run else { throw CancellationError() }
+            let saved = try await operation()
+            try Task.checkCancellation()
+            guard generation == run else { throw CancellationError() }
+            return saved
+        }
+        displayMutations[id] = (mutationID, pending)
+        defer {
+            if displayMutations[id]?.id == mutationID {
+                displayMutations.removeValue(forKey: id)
+            }
+        }
+        return try await pending.value
+    }
+
+    /// nil只来自fresh GET明确不可访问；编辑/离线或校验和不足不等于展示身份被拒绝。
+    private func rejectsDisplayIdentity(_ fresh: LocalMediaRemoteAsset?, requestedID: UUID, ownerID: String, local: LocalPhotoIdentity) -> Bool {
+        guard let fresh else { return true }
+        return fresh.id != requestedID || UUID(uuidString: ownerID) != fresh.ownerId || fresh.isTrashed == true
+            || fresh.type != (local.mediaKind == .video ? "VIDEO" : "IMAGE")
     }
 
     private func unindexChecksum(_ association: LocalMediaAssociation) {
@@ -620,7 +695,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             traceDisplayLookup("noStoredChecksumWitness"); return nil
         }
         guard ids.count <= 64 else { traceDisplayLookup("ambiguousChecksumWitness"); return nil }
-        let witnesses = ids.compactMap { associations[$0] }.filter { $0.checksum == checksum }
+        let witnesses = ids.compactMap { associations[$0] }.filter { $0.source != .exactCloudIdentity && $0.checksum == checksum }
         let localIDs = Array(Set(witnesses.map(\.localIdentity.localIdentifier))).sorted()
         let snapshots = try await metadata.snapshots(for: localIDs, validateContext: validateContext)
         try validateContext(); try validateSnapshots(snapshots, requested: localIDs)
@@ -641,6 +716,10 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
 
     /// 每次取消/路由变化撤销原子写许可；同namespace已确认关联独立保留，新的任务拿新的代际。
     private func invalidateRun() {
+        for mutation in displayMutations.values {
+            mutation.task.cancel()
+        }
+        displayMutations.removeAll()
         for lookup in sharedDisplayLookups.values {
             lookup.cancel()
         }
@@ -665,10 +744,14 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             // 共享映射是持久事实。撤销在途组织/匹配许可，但不因无关新增或iCloud变化清空整库。
             // 展示reader仍逐项核对当前Photos授权、修改时间和对象观察，失效源不能命中本机缓存。
             invalidateRun(); revision += 1
+            let previousAccess = access
             permission = inventory.authorization
             access = permission == .full || permission == .limited ? permission : nil
+            if previousAccess != access {
+                displayAssociations = [:]; displayAssociationsAccess = nil; publishCounts()
+            }
             if access == nil {
-                associations = [:]; publishCounts()
+                associations = [:]; displayAssociations = [:]; displayAssociationsAccess = nil; publishCounts()
             }
             let run = generation, owner = manager.generation
             changeTask = Task {
@@ -684,6 +767,14 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                             accept(value)
                         }
                     }
+                    if displayAssociations.isEmpty {
+                        let displayAccess = inventory.authorization
+                        let display = try await displayPersistence.load(scope: scope, access: displayAccess)
+                        try validate(manager, owner: owner, scope: scope, run: run, expectedAccess: displayAccess, requireOnline: false)
+                        displayAssociations = Dictionary(uniqueKeysWithValues: display.filter { !rejectedDisplayAssociationIDs.contains($0.remoteID) }.map { ($0.remoteID, $0) })
+                        displayAssociationsAccess = displayAccess
+                        publishCounts(); revision += 1
+                    }
                     changeTask = nil
                     statusMessage = "已保留离线浏览映射；每张照片由PhotoKit核对当前权限和版本，不依赖服务器重新匹配。"
                     _ = startCompletedAssociationRecovery(using: manager)
@@ -694,7 +785,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             }
             return
         }
-        invalidateRun(); associations = [:]; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
+        invalidateRun(); associations = [:]; displayAssociations = [:]; displayAssociationsAccess = nil; access = nil; revision += 1; publishCounts(); automaticGeneration = nil
         metadataFailures = 0
         permission = inventory.authorization
         statusMessage = "本机照片库或权限已变化，旧关联已失效；等待重新匹配。"
@@ -857,6 +948,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         guard enabled, self.manager === manager, let scope, scope == manager.backupScope,
               let id = UUID(uuidString: assetID), let client = manager.client,
               inventory.authorization == .full || inventory.authorization == .limited else { traceDisplayLookup("contextUnavailable"); return nil }
+        guard !rejectedDisplayAssociationIDs.contains(id) else { throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity }
         let run = generation, owner = manager.generation, permission = inventory.authorization
         let key = "\(generation)|\(scope.cacheNamespace)|\(id)|\(revision.timeIntervalSinceReferenceDate)"
         if let missed = missedDisplayLookups[key], missed.duration(to: ContinuousClock.now) < .seconds(60) {
@@ -884,13 +976,25 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         do {
             try validateContext()
             traceDisplayLookup("evidenceRequest")
-            let (remote, candidates) = try await client.localPhotoDisplayEvidence(id)
+            let evidence = try await client.localPhotoDisplayEvidenceRecord(id)
+            let remote = evidence.remote
             try validateContext()
+            for category in evidence.metadataDiagnostics {
+                traceDisplayLookup("rawMetadataKey." + category)
+            }
             // Photos已获确认时，服务器显示时间戳不决定本机对象是否存在；缓存仍绑定Photos当前观察。
             if (remote.displayRevision ?? remote.updatedAt)?.timeIntervalSince1970 != revision.timeIntervalSince1970 {
                 traceDisplayLookup("serverDisplayRevisionChanged")
             }
-            if candidates.isEmpty {
+            if evidence.hasConflictingIdentitySources {
+                traceDisplayLookup("conflictingCloudIdentitySources")
+                throw LocalPhotoDisplayEvidencePending.conflictingCloudIdentitySources
+            }
+            if evidence.cloudIDs.isEmpty, evidence.metadataDiagnostics.contains("markerRejected") {
+                traceDisplayLookup("rejectedIdentityMarker")
+                throw LocalPhotoDisplayEvidencePending.rejectedIdentityMarker
+            }
+            if evidence.cloudIDs.isEmpty {
                 traceDisplayLookup("missingCloudMetadata")
                 if let restored = try await restoreDisplayFromKnownChecksum(remote, scope: scope, validateContext: validateContext) {
                     return restored
@@ -898,7 +1002,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 missedDisplayLookups[key] = ContinuousClock.now
                 return nil
             }
-            let mappings = try await LocalPhotoCloudResolver.localIDs(for: Set(candidates.map(\.metadata.cloudId)))
+            let mappings = try await LocalPhotoCloudResolver.localIDs(for: evidence.cloudIDs)
             try validateContext()
             guard !mappings.isEmpty else { traceDisplayLookup("cloudIDNotAccessibleInPhotos"); missedDisplayLookups[key] = ContinuousClock.now; return nil }
             let ids = Array(Set(mappings.values)).sorted()
@@ -911,24 +1015,69 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
             var matches: [LocalMediaAssociation] = []
             for snapshot in snapshots {
                 guard case let .resolved(cloud) = snapshot.cloudIdentity, mappings[cloud] == snapshot.identity.localIdentifier,
-                      candidates.contains(where: { $0.assetID == id && $0.metadata.cloudId == cloud }),
+                      let source = evidence.displaySource(for: cloud),
                       let value = LocalMediaAssociation.verified(remote: remote, requestedID: id, ownerID: scope.userID,
-                                                                 local: snapshot.identity, source: .mobileMetadata, prefersCurrentPhotos: true) else { continue }
+                                                                 local: snapshot.identity, source: source, prefersCurrentPhotos: true) else { continue }
                 matches.append(value)
             }
             guard matches.count == 1, let value = matches.first else {
                 traceDisplayLookup(matches.isEmpty ? "identityProofRejected" : "ambiguousPhotosIdentity")
+                if matches.isEmpty, let snapshot = snapshots.first,
+                   rejectsDisplayIdentity(remote, requestedID: id, ownerID: scope.userID, local: snapshot.identity)
+                {
+                    throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity
+                }
                 missedDisplayLookups[key] = ContinuousClock.now
                 return nil
             }
-            try await backupAssociationSaver?([value], scope)
+            guard !rejectedDisplayAssociationIDs.contains(id) else { throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity }
+            if value.source == .exactCloudIdentity {
+                let writePermit = permit
+                do {
+                    guard try await mutateDisplayAssociation(id, operation: {
+                        guard !self.rejectedDisplayAssociationIDs.contains(id) else { throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity }
+                        return try await self.displayPersistence.merge(value, scope: scope, access: permission, permit: writePermit)
+                    }) else {
+                        throw LocalPhotoDisplayEvidencePending.displayAssociationPersistenceUnavailable
+                    }
+                } catch {
+                    try validateContext()
+                    if error is LocalPhotoDisplayEvidencePending {
+                        throw error
+                    }
+                    traceDisplayLookup("markerPersistenceUnavailable")
+                    throw LocalPhotoDisplayEvidencePending.displayAssociationPersistenceUnavailable
+                }
+                try validateContext()
+                guard !rejectedDisplayAssociationIDs.contains(id) else { throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity }
+                if access == permission, let stronger = associations[value.remoteID] {
+                    traceDisplayLookup("markerSupersededByStrongAssociation")
+                    return stronger
+                }
+                if displayAssociations.updateValue(value, forKey: value.remoteID) == nil, associations[value.remoteID] == nil {
+                    metadataMatches += 1
+                }
+                displayAssociationsAccess = permission
+                self.revision += 1
+            } else {
+                try await backupAssociationSaver?([value], scope)
+            }
             try validateContext()
+            guard !rejectedDisplayAssociationIDs.contains(id) else { throw LocalPhotoDisplayEvidencePending.rejectedDisplayIdentity }
             traceDisplayLookup("resolved")
-            access = permission; accept(value)
+            if value.source == .exactCloudIdentity {
+                traceDisplayLookup("markerUsed")
+            }
+            if value.source != .exactCloudIdentity {
+                access = permission; accept(value)
+            }
             return value
         } catch {
             traceDisplayLookup(error is CancellationError ? "cancelled" : "requestOrDecodeFailed")
             try validateContext()
+            if error is LocalPhotoDisplayEvidencePending {
+                throw error
+            }
             if missedDisplayLookups.count >= 512 {
                 missedDisplayLookups.removeAll()
             }

@@ -83,7 +83,8 @@ actor LocalMediaAssociationStore: LocalMediaAssociationPersisting {
         guard document.formatVersion == 1, document.namespace == scope.cacheNamespace,
               Set(document.associations.map(\.remoteID)).count == document.associations.count else { throw LocalMediaMetadataError.invalidMetadata }
         for association in document.associations {
-            guard association.remoteRevision.timeIntervalSince1970.isFinite, !association.localIdentity.localIdentifier.isEmpty,
+            guard association.source != .exactCloudIdentity,
+                  association.remoteRevision.timeIntervalSince1970.isFinite, !association.localIdentity.localIdentifier.isEmpty,
                   let modified = association.localIdentity.modificationDate, modified.timeIntervalSince1970.isFinite,
                   let digest = Data(base64Encoded: association.checksum), digest.count == 20, digest.base64EncodedString() == association.checksum,
                   document.access == .full || document.access == .limited else { throw LocalMediaMetadataError.invalidMetadata }

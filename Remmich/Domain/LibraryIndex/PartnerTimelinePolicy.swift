@@ -27,24 +27,39 @@ nonisolated struct PartnerTimelinePolicy: Codable, Equatable, Sendable {
     }
 }
 
-/// 持久证明只针对默认timeline查询；generation必须与accepted目录完全一致才可复用旧月计数。
+/// 默认timeline的持久作用域证明；完整证书和分批checkpoint都必须绑定实际accepted代际。
 nonisolated struct PartnerTimelineCertificate: Codable, Sendable {
+    enum Coverage: String, Codable, Sendable { case acceptedMonths }
     let formatVersion: Int
     let generation: Int64
     let policy: PartnerTimelinePolicy
+    /// v1缺少此字段，仍只代表旧版完整证书；v2明确只证明已接受月份，不代表整库完成。
+    let coverage: Coverage?
 
     /// generation是原SQLite已暂存、即将accept的正代际；只在完整月份及bookend已核对后构造。
     init(generation: Int64, policy: PartnerTimelinePolicy) {
-        formatVersion = 1; self.generation = generation; self.policy = policy
+        formatVersion = 1; self.generation = generation; self.policy = policy; coverage = nil
+    }
+
+    /// 只在本批所有新增/替换月份及策略bookend通过后构造，随后仍须原子accept此代际。
+    init(partialGeneration: Int64, policy: PartnerTimelinePolicy) {
+        formatVersion = 2; generation = partialGeneration; self.policy = policy; coverage = .acceptedMonths
     }
 
     /// scope为实际目录拥有者；未知版本/非正代际拒绝，nil偏好即使文件有效也不能命中复用。
     func validates(scope: MediaAccountScope) -> Bool {
-        formatVersion == 1 && generation > 0 && (try? policy.validate(scope: scope)) != nil
+        let supported = (formatVersion == 1 && coverage == nil)
+            || (formatVersion == 2 && coverage == .acceptedMonths && policy.isKnown)
+        return supported && generation > 0 && (try? policy.validate(scope: scope)) != nil
     }
 
     /// 只有完整匹配当前accepted generation和已知fresh策略，旧月计数才具有同一查询作用域。
     func matches(generation: Int64?, policy: PartnerTimelinePolicy, scope: MediaAccountScope) -> Bool {
+        formatVersion == 1 && allowsIncrementalReuse(generation: generation, policy: policy, scope: scope)
+    }
+
+    /// 分批接续只复用同策略、同accepted代际的已核月份；不对缺失月份或UI发布完整成功。
+    func allowsIncrementalReuse(generation: Int64?, policy: PartnerTimelinePolicy, scope: MediaAccountScope) -> Bool {
         validates(scope: scope) && self.generation == generation && self.policy == policy && policy.isKnown
     }
 }

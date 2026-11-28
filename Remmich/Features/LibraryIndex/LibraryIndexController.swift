@@ -186,7 +186,8 @@ final class LibraryIndexController {
         transfers: LibraryTransferQueue? = nil,
         cacheRootURL: URL? = nil,
         resourceConditions: @escaping () -> LibraryCacheResourceConditions = { .current },
-        preferences: UserDefaults = .standard
+        preferences: UserDefaults = .standard,
+        failureReporter: LibraryIndexFailureReporter? = nil
     ) {
         self.store = store
         self.transfers = transfers
@@ -198,7 +199,7 @@ final class LibraryIndexController {
         albumIndex = AlbumIndexController(source: source as? any AlbumReading & TimelineReading,
                                           store: store, transfers: transfers, preferences: preferences)
         collections = LibraryCollectionIndexController(source: collectionSource, store: store, defaults: preferences)
-        synchronizer = LibraryIndexSynchronizer(source: source, store: store)
+        synchronizer = LibraryIndexSynchronizer(source: source, store: store, failureReporter: failureReporter)
         thumbnailCache = LibraryThumbnailCache(store: store, rootURL: cacheRootURL, assetDetails: assetDetails, transfers: transfers)
         thumbnailWarmingStatus = if thumbnailWarmingEnabled {
             thumbnailWarmingPaused ? .paused : .waiting

@@ -25,13 +25,18 @@ import Testing
             let result = try await fixture.client.localMediaAssets([id])
             #expect(result.map(\.id) == [id])
         } else {
-            await #expect(throws: LibraryWriteError.malformedResponse) { _ = try await fixture.client.localMediaAssets([id]) }
+            do {
+                _ = try await fixture.client.localMediaAssets([id])
+                Issue.record("Expected the malformed-response error")
+            } catch LibraryWriteError.malformedResponse {}
         }
         let requests = await fixture.script.requests
         let request = try #require(requests.first)
         #expect(requests.count == 1 && request.method == "POST" && request.url.path == "/prefix/api/search/metadata")
         #expect(request.authorization == "Bearer synthetic-local-read")
-        let body = try #require(JSONSerialization.jsonObject(with: #require(request.body)) as? [String: Any])
+        let requestData = try #require(request.body)
+        let requestObject = try JSONSerialization.jsonObject(with: requestData)
+        let body = try #require(requestObject as? [String: Any])
         let filter = try #require(body["filter"] as? [String: Any])
         let branches = try #require(filter["or"] as? [[String: [String: String]]])
         #expect(branches == [["id": ["eq": id.uuidString]]])

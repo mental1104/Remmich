@@ -1,3 +1,18 @@
+## 2026-11-28: Resume partial partner timeline indexes in bounded batches
+
+- Partial indexes now persist a separate v2 accepted-month policy checkpoint. It authorizes incremental reuse only for the same accepted generation and fresh known partner policy; it never masquerades as the v1 complete-index certificate.
+- Cold restoration without a usable checkpoint revalidates accepted months and only the next bounded historical batch. Count, unique ID, month membership and policy-bookend checks still guard atomic acceptance. Invalid batches and cancellation retain the old accepted generation.
+- Added optional anonymous validation diagnostics with stage, reason and aggregate counts only. Production DEBUG wiring uses the existing shared session owner; fixtures use isolated reporters. No schema, upload or server API changes.
+- The six focused identity, metadata, routing and partner-index suites passed on iPad: 68 tests, zero failures. The real library advanced from 16,843 to 44,067 accepted assets, then stopped safely on a 14-entry summary/detail deficit (11,002 versus 10,988); Retry preserved progress and repeated the deficit. Full historical completion is not accepted.
+
+## 2026-11-28: Read display-only iCloud identity markers without upgrading backup proof
+
+- 可见身份读取补认本客户端此前写入的 `remmich-icloud-match` v1 标记；严格要求 `method=icloud-id`、完整Cloud ID、`byteVerified=false`。轻量标记保持独立exactCloudIdentity来源，不用本机字段补造服务器五元组，不授予字节校验、备份去重或相簿组织权限。旧tuple读取API保留完整元数据合同。
+- marker关系只进入独立展示内存层及独立sidecar；legacy匹配文档拒绝该来源，备份任务/共享备份关联保存器不接收该来源。当前授权可用的强关系优先。sidecar按账号/版本/授权隔离，actor内单条合并；同ID删除/合并按代际及permit串行提交。
+- 来源冲突、无合法完整元数据的坏marker、sidecar持久化失败保持明确pending，不能变成nil后换到Immich。明确owner/type/trash/不可访问身份拒绝撤销两层旧关系并保留当前namespace拒绝栅栏；HTTP/解析/临时失败、编辑/离线或仅字节证明不足不据此宣称Photos对象不存在。拒绝栅栏不被旧/在途GET清除；同会话undo-trash等恢复需重建客户端上下文后再核验。其他历史nil分支尚未全部改成三态，不能宣称严格来源策略已覆盖整库。
+- 新增匿名rawMetadataKey.markerOnly/rowsEmpty/markerRejected与markerUsed分类；剩余缺口是否marker-only仍待新版少量可见项实测。focused HTTP/domain/隔离sidecar回归已通过。Xcode 27.2签名Debug App与重点测试包已编译并覆盖安装iPad；网格两次滑动已通过，47次Photos校验缓存命中、原图请求0次。本次7次可见身份查询为5次空metadata、2次无可用身份，markerPresent为0；这批样本未证明marker实机命中，也不能代表整库。索引/备份状态与70条既有关联逐行保留；不宣称整库来源或完整CI全绿。
+- 当前sidecar每项merge会读取/解码并重写该账号整份JSON，N项累计O(N²)字节处理/写放大。此次只验收少量可见marker，不启动8万项marker回填；大图库性能未验收，整库运行前须先实现受代际/permit保护的缓存批量落盘或逐行存储。
+
 ## 2026-11-28: Fix confirmed display identity rejection and reuse unique persisted witnesses
 
 - 已读取一次494字节手机诊断，120次实际身份查询分为：41次显示版本门禁拒绝、55次缺少Cloud元数据、24次解析成功；另6次排队超时。为累计查询事件，非独立照片数。无新增真机扫描/备份/原片操作。

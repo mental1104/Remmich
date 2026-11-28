@@ -3,6 +3,13 @@ import Foundation
 import Photos
 import UIKit
 
+#if DEBUG
+    /// 任务局部诊断只通知当前媒体读取者；不共享照片身份，不改变请求选项或正式版行为。
+    nonisolated enum LocalPhotoRequestDiagnostics {
+        @TaskLocal static var imageRequestStarted: (@MainActor @Sendable (_ isOriginal: Bool) -> Void)? = nil
+    }
+#endif
+
 /// 本机current媒体展示边界；nil仅表示当前本机不可读，取消或调用方代际错误必须抛出，不能触发旧账户回源。
 @MainActor protocol LocalPhotoMediaReading: Sendable {
     /// 仅由当前选中图片的详情页触发，可从iCloud取原图；不供网格预取或备份匹配使用。
@@ -247,6 +254,9 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
               options.version == .current || options.version == .original else { return nil }
         let manager = PHImageManager.default()
         let size = options.version == .original ? PHImageManagerMaximumSize : CGSize(width: targetPixels.width, height: targetPixels.height)
+        #if DEBUG
+            LocalPhotoRequestDiagnostics.imageRequestStarted?(options.version == .original)
+        #endif
         let id = manager.requestImage(for: asset, targetSize: size,
                                       contentMode: .aspectFit, options: options)
         { @Sendable image, info in
