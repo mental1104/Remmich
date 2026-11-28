@@ -1733,3 +1733,23 @@
 "The full Photos library is ready. No original backup starts automatically." = "系统照片全库已就绪，不会自动开始原片备份。";
 "Native-library backup tasks restored. Start backup manually to continue." = "已恢复原生全库备份任务。请手动开始备份以继续。";
 "Unavailable organization albums removed from the draft. Save organization settings; backup scope is unchanged." = "已从草稿移除不可用的组织相簿。保存组织设置即可；备份范围保持不变。";
+
+"Enable Backup" = "开启备份";
+"Continue Backup" = "继续备份";
+"Enable Backup?" = "开启备份？";
+"Continue Backup?" = "继续备份？";
+"Foreground Backup" = "前台备份";
+"Backup State" = "备份状态";
+"Enabled" = "已开启";
+"Not Enabled" = "未开启";
+"Turn Off Backup" = "关闭备份";
+"Scanning reads Photos metadata only. Enable backup to keep new items backed up to Immich while Remmich is in the foreground; saved progress and receipts are retained." = "扫描只读取 Photos 元数据。开启备份后，Remmich 在前台持续将新增项目备份到 Immich；已保存的进度与回执保留。";
+"Enable one-way backup from Photos and iCloud to Immich while Remmich is in the foreground. New items are checked for duplicates before upload using your saved iCloud download option. Pausing disables automatic resuming; saved progress and receipts are kept. This does not enable background backup." = "开启后，Remmich 在前台检测 Photos／iCloud 中的新增照片与视频，先查重，再单向备份到 Immich；是否下载 iCloud 原片遵循已保存的选项。暂停会关闭自动继续，已保存的进度与回执保留；不会同时开启后台备份。";
+"The saved iCloud option also applies to new items backed up in the foreground. Changing it requires another library scan; matching does not download originals." = "已保存的 iCloud 选项也适用于前台备份的新增项目。更改后需重新扫描资料库；匹配不会下载原片。";
+"When enabled, new Photos and iCloud items are backed up one way to Immich in the foreground. Pausing turns this off; failed or uncertain items need an explicit retry." = "开启后，Photos／iCloud 中的新增项目会在前台单向备份到 Immich。暂停会关闭此功能；失败或结果未确认的项目需要明确重试。";
+"Matching only controls local Photos browsing. It does not enable original backup or authorize uploads." = "此匹配开关仅控制本机 Photos 浏览，不会开启原片备份，也不授予上传权限。";
+
+"Native library backup is enabled. New Photos items will be checked and backed up while the app is in the foreground." = "已开启原生资料库备份。App 在前台时会检查新增 Photos 项目并备份。";
+"Native library backup is paused. Saved progress is retained and new Photos items will wait until you enable backup again." = "原生资料库备份已暂停。已保存的进度保留，新增 Photos 项目会等待你再次开启备份。";
+"The library backup setting could not be saved. No new automatic backup will start. Reload and confirm the setting again." = "资料库备份设置未能保存，不会启动新的自动备份。请重新读取并确认设置。";
+"Native library backup is waiting for Photos access, a connection, or a confirmed queue. Saved progress is retained." = "原生资料库备份正在等待 Photos 权限、网络连接或已确认的队列；已保存的进度保留。";

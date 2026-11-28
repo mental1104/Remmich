@@ -6,6 +6,78 @@ import Testing
 
 @Suite("Native full-library backup source")
 @MainActor struct PhotoBackupNativeLibraryTests {
+    @Test func nativeForegroundConsentIsExplicitAndSurvivesScansWithoutChangingHistory() throws {
+        var legacy = try nativeHistory(namespace: "synthetic")
+        try legacy.setForegroundAutomaticEnabled(true)
+        try legacy.setBackgroundAutomaticEnabled(true)
+        try legacy.setForegroundNetworkRecoveryEnabled(true)
+        #expect(throws: PhotoBackupStateError.invalidTransition) { try legacy.setNativeForegroundBackupEnabled(true) }
+        let history = try nativeCanonicalJobs(legacy.jobs)
+        let scan = try PhotoBackupLibraryScan.plan(legacy.jobs.map { .init(source: $0.source, capturedAt: .distantPast) })
+        try legacy.applyLibraryScan(scan, allowCloud: true)
+        #expect(legacy.version == 4 && legacy.nativeForegroundBackupEnabled == nil)
+        #expect(legacy.foregroundAutomaticEnabled == false && legacy.backgroundAutomaticEnabled == false && legacy.foregroundNetworkRecoveryEnabled == false)
+        #expect(throws: PhotoBackupStateError.invalidTransition) { try legacy.applyNativeAutomaticLibraryScan(scan) }
+        try legacy.setNativeForegroundBackupEnabled(true)
+        #expect(legacy.version == 5 && legacy.nativeForegroundBackupEnabled == true && legacy.allowCloud)
+        #expect(try nativeCanonicalJobs(legacy.jobs) == history)
+        let restored = try PhotoBackupJournal(header: JSONDecoder().decode(PhotoBackupJournal.Header.self, from: JSONEncoder().encode(legacy.header)), jobs: legacy.jobs)
+        #expect(restored.nativeForegroundBackupEnabled == true)
+        try legacy.applyLibraryScan(scan, allowCloud: true)
+        #expect(legacy.version == 5 && legacy.nativeForegroundBackupEnabled == true)
+        try legacy.setNativeForegroundBackupEnabled(false)
+        try legacy.applyLibraryScan(scan, allowCloud: true)
+        #expect(legacy.version == 5 && legacy.nativeForegroundBackupEnabled == false && legacy.allowCloud)
+        #expect(try nativeCanonicalJobs(legacy.jobs) == history)
+        #expect(throws: PhotoBackupStateError.invalidTransition) { try legacy.applyNativeAutomaticLibraryScan(scan) }
+    }
+
+    @Test func nativeVersionFiveRequiresItsOwnConsentFieldAndRejectsOlderTrueFlags() throws {
+        for version in 1 ... 4 {
+            let invalid = PhotoBackupJournal.Header(version: version, namespace: "synthetic", selectedAlbumIDs: ["legacy"], allowCloud: false,
+                                                    excludedAlbumIDs: version == 1 ? nil : [], rawJPEGVersion: version >= 3 ? 1 : nil,
+                                                    scanSource: version == 4 ? .nativeLibrary : nil, nativeForegroundBackupEnabled: true)
+            #expect(throws: PhotoBackupStateError.invalidJournal) { try invalid.validate(namespace: "synthetic") }
+        }
+        let missing = PhotoBackupJournal.Header(version: 5, namespace: "synthetic", selectedAlbumIDs: [], allowCloud: false,
+                                                excludedAlbumIDs: [], rawJPEGVersion: 1, scanSource: .nativeLibrary)
+        #expect(throws: PhotoBackupStateError.invalidJournal) { try missing.validate(namespace: "synthetic") }
+        let legacyAuto = PhotoBackupJournal.Header(version: 5, namespace: "synthetic", selectedAlbumIDs: ["legacy"], allowCloud: false,
+                                                   excludedAlbumIDs: [], rawJPEGVersion: 1, foregroundAutomaticEnabled: true,
+                                                   scanSource: .nativeLibrary, nativeForegroundBackupEnabled: true)
+        #expect(throws: PhotoBackupStateError.invalidJournal) { try legacyAuto.validate(namespace: "synthetic") }
+    }
+
+    @Test func nativeAutomaticDeltaNeverRevivesTerminalOrUnknownHistory() throws {
+        var journal = try nativeHistory(namespace: "synthetic")
+        let safe = nativeScanned("safe-paused", at: 10), removed = nativeScanned("removed-queued", at: 11)
+        let original = try PhotoBackupLibraryScan.plan(journal.jobs.map { .init(source: $0.source, capturedAt: .distantPast) } + [safe, removed])
+        try journal.applyLibraryScan(original, allowCloud: false)
+        let safeID = try #require(journal.jobs.first { $0.source == safe.source }?.id)
+        try journal.update(safeID) { $0.pause() }
+        try journal.setNativeForegroundBackupEnabled(true)
+        let historical = try nativeCanonicalJobs(Array(journal.jobs.prefix(5)))
+        let new = nativeScanned("new-photo", at: 20), deferred = nativeScanned("known-display", at: 21)
+        let blockedNewVersion = nativeScanned("failed", at: 30)
+        let current = try PhotoBackupLibraryScan.plan(original.sources.filter { $0 != removed.source }.map { .init(source: $0, capturedAt: .distantPast) }
+            .filter { $0.source.localID != "failed" } + [blockedNewVersion, new, deferred])
+        #expect(try journal.applyNativeAutomaticLibraryScan(current, deferredSources: [deferred.source]) == 1)
+        #expect(try nativeCanonicalJobs(Array(journal.jobs.prefix(5))) == historical)
+        #expect(journal.jobs.first { $0.source == safe.source }?.stage == .queued)
+        #expect(journal.jobs.first { $0.source == removed.source }?.stage == .paused)
+        #expect(!journal.jobs.contains { $0.source == deferred.source || $0.source == blockedNewVersion.source })
+        #expect(journal.jobs.last?.source == new.source && journal.jobs.last?.attempts == 0)
+        let once = try nativeCanonicalJobs(journal.jobs)
+        #expect(try journal.applyNativeAutomaticLibraryScan(current, deferredSources: [deferred.source]) == 0)
+        #expect(try nativeCanonicalJobs(journal.jobs) == once)
+        let afterDeletion = try PhotoBackupLibraryScan.plan(current.sources.filter { $0 != new.source && $0 != safe.source }.map { .init(source: $0, capturedAt: .distantPast) })
+        #expect(try journal.applyNativeAutomaticLibraryScan(afterDeletion, deferredSources: [deferred.source]) == 0)
+        #expect(journal.jobs.first { $0.source == new.source }?.stage == .paused)
+        #expect(journal.jobs.first { $0.source == safe.source }?.stage == .paused)
+        #expect(try nativeCanonicalJobs(Array(journal.jobs.prefix(5))) == historical)
+        #expect(journal.nativeForegroundBackupEnabled == true && !journal.allowCloud)
+    }
+
     @Test func controllerScanQueuesOnlyUnknownOrChangedVersionsWithoutNetworkOrOriginalReads() async throws {
         try await withNativeBackupFixture { fixture in
             let stable = nativeScanned("stable", at: 10), changed = nativeScanned("changed", at: 20)
@@ -246,7 +318,7 @@ import Testing
     @Test func legacyAutomaticConsentCannotExpandIntoNativeOriginalBackup() async throws {
         try await withNativeBackupFixture(history: true, automatic: true) { fixture in
             #expect(!fixture.controller.foregroundAutomaticEnabled && !fixture.controller.backgroundAutomaticEnabled)
-            #expect(fixture.controller.automaticConditionsChanged(using: fixture.manager, scope: fixture.scope, active: true) == nil)
+            await fixture.controller.automaticConditionsChanged(using: fixture.manager, scope: fixture.scope, active: true)?.value
             #expect(fixture.controller.runSystemBackground(using: fixture.manager) == nil)
             #expect(try await fixture.controller.refreshBackgroundConsent(using: fixture.manager) == false)
             await fixture.controller.setForegroundAutomaticEnabled(true, using: fixture.manager)

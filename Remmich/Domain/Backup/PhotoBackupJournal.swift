@@ -256,13 +256,15 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let backgroundAutomaticEnabled: Bool?
         let foregroundNetworkRecoveryEnabled: Bool?
         let scanSource: PhotoBackupScanSource?
+        let nativeForegroundBackupEnabled: Bool?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
-        /// rawJPEGVersion在格式3/4必须为1；格式4还要求显式原生全库范围，旧读取器安全拒绝。
+        /// rawJPEGVersion在格式3及以后必须为1；格式4/5要求显式原生全库范围，旧读取器安全拒绝。
         /// foregroundAutomaticEnabled缺省nil表示默认关闭；旧读取器忽略后只会失去自动启用，不会扩大上传范围。
         /// backgroundAutomaticEnabled为独立系统后台同意；foregroundNetworkRecoveryEnabled为独立前台连接失败重核同意，缺省nil均关闭。
         init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil,
-             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil, foregroundNetworkRecoveryEnabled: Bool? = nil, scanSource: PhotoBackupScanSource? = nil)
+             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil, foregroundNetworkRecoveryEnabled: Bool? = nil,
+             scanSource: PhotoBackupScanSource? = nil, nativeForegroundBackupEnabled: Bool? = nil)
         {
             self.version = version
             self.namespace = namespace
@@ -274,6 +276,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             self.backgroundAutomaticEnabled = backgroundAutomaticEnabled
             self.foregroundNetworkRecoveryEnabled = foregroundNetworkRecoveryEnabled
             self.scanSource = scanSource
+            self.nativeForegroundBackupEnabled = nativeForegroundBackupEnabled
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -281,9 +284,10 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             let exclusions = excludedAlbumIDs ?? []
             let validIncludes = !selectedAlbumIDs.isEmpty && selectedAlbumIDs.allSatisfy { !$0.isEmpty }
                 && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
-            let nativeLibrary = version == 4 && scanSource == .nativeLibrary
-            guard [1, 2, 3, 4].contains(version), namespace == expected,
-                  version == 4 ? nativeLibrary : scanSource == nil,
+            let nativeLibrary = [4, 5].contains(version) && scanSource == .nativeLibrary
+            guard [1, 2, 3, 4, 5].contains(version), namespace == expected,
+                  version >= 4 ? nativeLibrary : scanSource == nil,
+                  version == 5 ? nativeForegroundBackupEnabled != nil : nativeForegroundBackupEnabled != true,
                   !nativeLibrary || (foregroundAutomaticEnabled != true && backgroundAutomaticEnabled != true && foregroundNetworkRecoveryEnabled != true),
                   foregroundAutomaticEnabled != true || validIncludes,
                   backgroundAutomaticEnabled != true || validIncludes,
@@ -307,6 +311,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 独立前台网络恢复同意；旧日志缺省关闭，不借原自动开关扩大对失败项的操作范围。
     private(set) var foregroundNetworkRecoveryEnabled: Bool?
     private(set) var scanSource: PhotoBackupScanSource?
+    /// v5 explicit foreground consent; legacy album consent and v4 manual scans never enable it.
+    private(set) var nativeForegroundBackupEnabled: Bool?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -321,6 +327,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         backgroundAutomaticEnabled = nil
         foregroundNetworkRecoveryEnabled = nil
         scanSource = nil
+        nativeForegroundBackupEnabled = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -336,13 +343,25 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         backgroundAutomaticEnabled = header.backgroundAutomaticEnabled
         foregroundNetworkRecoveryEnabled = header.foregroundNetworkRecoveryEnabled
         scanSource = header.scanSource
+        nativeForegroundBackupEnabled = header.nativeForegroundBackupEnabled
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
         .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs,
               rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled,
-              backgroundAutomaticEnabled: backgroundAutomaticEnabled, foregroundNetworkRecoveryEnabled: foregroundNetworkRecoveryEnabled, scanSource: scanSource)
+              backgroundAutomaticEnabled: backgroundAutomaticEnabled, foregroundNetworkRecoveryEnabled: foregroundNetworkRecoveryEnabled,
+              scanSource: scanSource, nativeForegroundBackupEnabled: nativeForegroundBackupEnabled)
+    }
+
+    /// Only explicit native-library consent upgrades to v5. It changes no source, task, receipt or iCloud option.
+    mutating func setNativeForegroundBackupEnabled(_ enabled: Bool) throws {
+        try validate(namespace: namespace)
+        guard scanSource == .nativeLibrary else { throw PhotoBackupStateError.invalidTransition }
+        version = 5
+        nativeForegroundBackupEnabled = enabled
+        foregroundAutomaticEnabled = false; backgroundAutomaticEnabled = false; foregroundNetworkRecoveryEnabled = false
+        try validate(namespace: namespace)
     }
 
     /// enabled是用户对当前已保存选择的明确自动化同意；不修改相簿/iCloud草稿，也不恢复任何任务。
@@ -459,12 +478,41 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         try validate(namespace: namespace)
         guard !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
         let existing = Set(jobs.map(\.source))
-        version = 4; rawJPEGVersion = 1; scanSource = .nativeLibrary
+        let preservesNativeConsent = version == 5 && scanSource == .nativeLibrary
+        version = preservesNativeConsent ? 5 : 4; rawJPEGVersion = 1; scanSource = .nativeLibrary
+        if !preservesNativeConsent {
+            nativeForegroundBackupEnabled = nil
+        }
         excludedAlbumIDs = excludedAlbumIDs ?? []
         self.allowCloud = allowCloud
         foregroundAutomaticEnabled = false; backgroundAutomaticEnabled = false; foregroundNetworkRecoveryEnabled = false
         // Display identity only defers new original work; it never changes historical tasks or receipts.
         let additions = scan.sources.filter { !existing.contains($0) && !deferredSources.contains($0) }
+        jobs.append(contentsOf: additions.map { PhotoBackupJob(source: $0) })
+        try validate(namespace: namespace)
+        return additions.count
+    }
+
+    /// Foreground-only native scheduling never revives failed/cancelled/unknown work or changes cloud consent.
+    /// New current candidates are appended once; only never-attempted paused work may return to queued.
+    @discardableResult mutating func applyNativeAutomaticLibraryScan(_ scan: PhotoBackupLibraryScan,
+                                                                     deferredSources: Set<PhotoBackupSource> = []) throws -> Int
+    {
+        try validate(namespace: namespace)
+        guard version == 5, scanSource == .nativeLibrary, nativeForegroundBackupEnabled == true,
+              !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        let summary = PhotoBackupUnattemptedSummary(jobs: jobs)
+        let candidates = Set(scan.sources.filter { !deferredSources.contains($0) && !summary.blockedLocalIDs.contains($0.localID) })
+        let existing = Set(jobs.map(\.source))
+        for index in jobs.indices {
+            let job = jobs[index]
+            if candidates.contains(job.source), summary.eligibleJobIDs.contains(job.id) {
+                jobs[index].queueForVerification()
+            } else if job.stage == .queued {
+                jobs[index].pause()
+            }
+        }
+        let additions = scan.sources.filter { candidates.contains($0) && !existing.contains($0) }
         jobs.append(contentsOf: additions.map { PhotoBackupJob(source: $0) })
         try validate(namespace: namespace)
         return additions.count

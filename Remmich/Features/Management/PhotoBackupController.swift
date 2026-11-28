@@ -85,6 +85,8 @@ import Photos
 
     private var statusMessage: String.LocalizationValue = "备份队列保存在当前账户；读取后由你明确扫描或继续。"
     private(set) var foregroundAutomaticEnabled = false
+    /// Separate native-library consent; legacy album automation and display matching never grant it.
+    private(set) var nativeForegroundBackupEnabled = false
     private(set) var foregroundNetworkRecoveryEnabled = false
     private(set) var backgroundAutomaticEnabled = false
     private(set) var backgroundLastResult: Bool?
@@ -196,7 +198,11 @@ import Photos
             } else if requiresSelectionScan {
                 statusMessage = usesNativeLibrarySource ? "Scan the full Photos library before starting backup. Existing tasks are preserved." : "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
             } else if usesNativeLibrarySource {
-                statusMessage = jobs.isEmpty ? "The full Photos library is ready. No original backup starts automatically." : "Native-library backup tasks restored. Start backup manually to continue."
+                if nativeForegroundBackupEnabled {
+                    statusMessage = "Native library backup is enabled. New Photos items will be checked and backed up while the app is in the foreground."
+                } else {
+                    statusMessage = jobs.isEmpty ? "The full Photos library is ready. No original backup starts automatically." : "Native-library backup tasks restored. Start backup manually to continue."
+                }
             } else {
                 statusMessage = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
             }
@@ -328,7 +334,12 @@ import Photos
         statusMessage = "Scanning the authorized Photos library. No originals or uploads."
         writeDiagnostics(phase: "scanning", force: true)
         task = Task {
-            defer { running = false; task = nil; writeDiagnostics(phase: "scanFinished", force: true) }
+            defer {
+                running = false; task = nil; writeDiagnostics(phase: "scanFinished", force: true)
+                if nativeForegroundBackupEnabled, automaticTask == nil, !Task.isCancelled {
+                    requestAutomaticWork()
+                }
+            }
             do {
                 let assets = try await libraryScanner(validateContext)
                 let scan = try await Self.planLibraryScan(assets)
@@ -501,6 +512,84 @@ import Photos
         runSavedQueue(using: manager, mode: .unattempted)
     }
 
+    /// The main native backup confirmation enables ongoing one-way foreground backup, then
+    /// explicitly verifies the current candidate batch. Later Photos events use only safe new work.
+    @discardableResult
+    func startNativeForegroundBackup(using manager: LibraryManagementController) async -> Task<Void, Never>? {
+        let owner = manager.generation, scope = manager.backupScope
+        guard automaticActive, automaticManager === manager, automaticManagerGeneration == owner, automaticScope == scope, await updateNativeBackupConsent(true, using: manager, schedule: false) else { return nil }
+        // The confirmation's settings save may suspend across a real scene/account transition.
+        // Retain saved consent, but leave original work for a later active lifecycle in that case.
+        guard automaticActive, automaticManager === manager, automaticManagerGeneration == owner,
+              manager.generation == owner, manager.backupScope == scope, automaticScope == scope else { return nil }
+        let operation = runSavedQueue(using: manager, mode: .verification(nil))
+        if operation == nil {
+            requestAutomaticWork()
+        }
+        return operation
+    }
+
+    func setNativeForegroundBackupEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        _ = await updateNativeBackupConsent(enabled, using: manager, schedule: true)
+    }
+
+    private func updateNativeBackupConsent(_ enabled: Bool, using manager: LibraryManagementController, schedule: Bool) async -> Bool {
+        let consentScope = enabled ? manager.backupScope : manager.savedAccountScope
+        guard usesNativeLibrarySource, !configuringAutomatic, let scope = consentScope, configurationScope == scope,
+              !enabled || (!running && !manager.busy && !requiresSelectionScan) else { return false }
+        let owner = manager.generation, previous = automaticTask, manual = task
+        let validateConsent: @MainActor @Sendable () throws -> Void = {
+            try Task.checkCancellation()
+            guard manager.generation == owner,
+                  (enabled ? manager.backupScope : manager.savedAccountScope) == scope else { throw LibraryWriteError.changedAccount }
+        }
+        configuringAutomatic = true
+        automaticEpoch = UUID(); automaticRequested = false; automaticNetworkRecoveryRequested = false
+        automaticTask = nil
+        previous?.cancel(); automaticMonitor?.stop(); automaticMonitor = nil
+        if !enabled {
+            nativeForegroundBackupEnabled = false
+            automaticSuppressedScopes.insert(scope.cacheNamespace)
+            manual?.cancel()
+        }
+        await previous?.value
+        if !enabled {
+            await manual?.value
+        }
+        defer { configuringAutomatic = false }
+        do {
+            try validateConsent()
+            let saved = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                try validateConsent()
+                var journal = try await store.loadPhotoBackups(scope: scope)
+                try validateConsent()
+                try journal.setNativeForegroundBackupEnabled(enabled)
+                try await store.updatePhotoBackupAutomationSettings(scope: scope, nativeForeground: enabled)
+                try validateConsent()
+                return journal
+            }
+            try validateConsent()
+            apply(saved, scope: scope, restoreConfiguration: false)
+            if enabled {
+                automaticSuppressedScopes.remove(scope.cacheNamespace)
+                statusMessage = "Native library backup is enabled. New Photos items will be checked and backed up while the app is in the foreground."
+            } else {
+                statusMessage = "Native library backup is paused. Saved progress is retained and new Photos items will wait until you enable backup again."
+            }
+            writeDiagnostics(phase: enabled ? "nativeBackupEnabled" : "nativeBackupPaused", force: true)
+            configuringAutomatic = false
+            if enabled, schedule {
+                requestAutomaticWork()
+            }
+            return true
+        } catch {
+            guard manager.generation == owner else { return false }
+            nativeForegroundBackupEnabled = false
+            statusMessage = "The library backup setting could not be saved. No new automatic backup will start. Reload and confirm the setting again."
+            return false
+        }
+    }
+
     /// 仅供现有系统processing授权调用；后台同意/已存规则/已有权限和原唯一Coordinator均须满足。
     /// 返回实际运行任务，nil表示门禁拒绝；调用者必须传递取消并等待退役，不伪装前台active。
     @discardableResult
@@ -533,11 +622,11 @@ import Photos
 
     /// verification保留现有明确重试语义；unattempted只计划安全尾队列，二者共用同一执行与持久化路径。
     private nonisolated enum ResumeMode: Sendable {
-        case verification(UUID?), unattempted, background
+        case verification(UUID?), unattempted, background, nativeAutomatic
         /// 只选择新恢复语义；已有全部/单项明确核查路径保持原权限与计划行为。
         var onlyUnattempted: Bool {
             switch self {
-            case .unattempted, .background: true
+            case .unattempted, .background, .nativeAutomatic: true
             case .verification: false
             }
         }
@@ -545,6 +634,14 @@ import Photos
         /// 系统授权入口可扫描新源；手动安全尾队列仍不扩大原已排任务。
         var isBackground: Bool {
             if case .background = self {
+                true
+            } else {
+                false
+            }
+        }
+
+        var isNativeAutomatic: Bool {
+            if case .nativeAutomatic = self {
                 true
             } else {
                 false
@@ -563,7 +660,7 @@ import Photos
         }
         if mode.onlyUnattempted {
             guard usesNativeLibrarySource || !selected.isEmpty else { statusMessage = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
-            guard mode.isBackground || !unattemptedSummary.eligibleJobIDs.isEmpty else { statusMessage = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
+            guard mode.isBackground || mode.isNativeAutomatic || !unattemptedSummary.eligibleJobIDs.isEmpty else { statusMessage = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
             guard !mode.isBackground || (backgroundAutomaticEnabled && !backgroundSuppressedScopes.contains(scope.cacheNamespace)) else { return nil }
             guard authorization == .authorized || authorization == .limited else { statusMessage = "请先确认照片授权，再继续未尝试项目；未启动上传。"; return nil }
         }
@@ -584,6 +681,9 @@ import Photos
                     localMatches?.originalBackupEvidenceDidChange(using: manager)
                 }
                 manager.publishChanges(ifGeneration: owner)
+                if usesNativeLibrarySource, nativeForegroundBackupEnabled, automaticTask == nil, !Task.isCancelled {
+                    requestAutomaticWork()
+                }
             }
             do {
                 let result = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store, exporter] in
@@ -594,6 +694,9 @@ import Photos
                     journal.recoverInterrupted()
                     if self.usesNativeLibrarySource {
                         guard journal.scanSource == .nativeLibrary else { throw PhotoBackupStateError.invalidTransition }
+                        if mode.isNativeAutomatic {
+                            guard journal.nativeForegroundBackupEnabled == true else { throw CancellationError() }
+                        }
                         let validateNative: @MainActor @Sendable () throws -> Void = {
                             try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
                             guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
@@ -603,7 +706,9 @@ import Photos
                         try validateNative()
                         let deferred = try await self.deferredNativeSources(scan, manager: manager, owner: owner, scope: scope, validateContext: validateNative)
                         try validateNative()
-                        if case .verification = mode {
+                        if mode.isNativeAutomatic {
+                            try journal.applyNativeAutomaticLibraryScan(scan, deferredSources: deferred)
+                        } else if case .verification = mode {
                             try journal.applyLibraryScan(scan, allowCloud: journal.allowCloud, deferredSources: deferred)
                         }
                         let onlyID: UUID? = if case let .verification(id) = mode {
@@ -616,7 +721,9 @@ import Photos
                         } else {
                             nil // Explicit single-item verification is never silently deferred by display identity.
                         }
-                        try journal.resumeLibraryForVerification(scan, only: onlyID, unattemptedOnly: mode.onlyUnattempted, candidateLocalIDs: candidateIDs)
+                        if !mode.isNativeAutomatic {
+                            try journal.resumeLibraryForVerification(scan, only: onlyID, unattemptedOnly: mode.onlyUnattempted, candidateLocalIDs: candidateIDs)
+                        }
                     } else {
                         switch mode {
                         case let .verification(id): try journal.resumeForVerification(only: id)
@@ -634,6 +741,7 @@ import Photos
                             } else {
                                 try journal.resumeUnattempted(scan)
                             }
+                        case .nativeAutomatic: throw PhotoBackupStateError.invalidTransition
                         }
                     }
                     try await store.savePhotoBackups(journal, scope: scope)
@@ -649,7 +757,8 @@ import Photos
                         } else {
                             []
                         }
-                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs, keepWaiting: !mode.isBackground)
+                        let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs,
+                                                                    keepWaiting: !mode.isBackground, explicitlyVerifyOriginals: self.usesNativeLibrarySource && !mode.isNativeAutomatic)
                         return try await PhotoBackupWorker(store: store, exporter: self.retryingExporter(exporter, manager: manager, owner: owner, scope: scope,
                                                                                                          keepWaiting: !mode.isBackground)).run(
                             scope: scope, userID: client.userID, allowCloud: cloud, client: self.retryingUploader(client, manager: manager, owner: owner, scope: scope, keepWaiting: !mode.isBackground),
@@ -676,7 +785,7 @@ import Photos
                 try Self.validate(manager, owner: owner, scope: scope)
                 let current = try await store.loadPhotoBackups(scope: scope)
                 try Self.validate(manager, owner: owner, scope: scope)
-                apply(current, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
+                apply(current, scope: scope, restoreConfiguration: !mode.isNativeAutomatic && (!mode.onlyUnattempted || !requiresSelectionScan))
                 statusMessage = result.stopped ? "已暂停；先处理连接、权限或未确认结果，再明确继续。" : "本轮新备份 \(result.completed) 项（重复 \(result.duplicates)），已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed) 项。"
                 if mode.isBackground {
                     backgroundLastResult = !result.stopped && result.failed == 0 && result.review == 0
@@ -688,7 +797,7 @@ import Photos
                 showFailure(error, manager: manager, owner: owner)
                 if manager.generation == owner, let journal = try? await store.loadPhotoBackups(scope: scope) {
                     if manager.generation == owner {
-                        apply(journal, scope: scope, restoreConfiguration: !mode.onlyUnattempted || !requiresSelectionScan)
+                        apply(journal, scope: scope, restoreConfiguration: !mode.isNativeAutomatic && (!mode.onlyUnattempted || !requiresSelectionScan))
                     }
                 }
             }
@@ -747,6 +856,9 @@ import Photos
         automaticRequested = false
         automaticNetworkRecoveryRequested = false
         automaticTask?.cancel()
+        if usesNativeLibrarySource {
+            task?.cancel()
+        }
     }
 
     /// journal/scope为刚验证的当前账号快照；restoreConfiguration为false时仅保留同scope未扫描草稿。
@@ -762,6 +874,7 @@ import Photos
             applyingConfiguration = false
         }
         foregroundAutomaticEnabled = !usesNativeLibrarySource && journal.foregroundAutomaticEnabled == true
+        nativeForegroundBackupEnabled = usesNativeLibrarySource && journal.nativeForegroundBackupEnabled == true
         foregroundNetworkRecoveryEnabled = !usesNativeLibrarySource && journal.foregroundNetworkRecoveryEnabled == true
         backgroundAutomaticEnabled = !usesNativeLibrarySource && journal.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
         configurationScope = scope
@@ -787,7 +900,8 @@ import Photos
 
     /// journal是Coordinator内固定的实际待执行队列；完整在线核查通过才发放Worker许可，每个await后继续核原账号。
     private func prepareContinuity(_ journal: PhotoBackupJournal, manager: LibraryManagementController, owner: UUID,
-                                   scope: MediaAccountScope, client: LibraryMutationClient, verificationIDs: Set<UUID>, keepWaiting: Bool = true) async throws -> PhotoBackupPreflightPlan
+                                   scope: MediaAccountScope, client: LibraryMutationClient, verificationIDs: Set<UUID>, keepWaiting: Bool = true,
+                                   explicitlyVerifyOriginals: Bool = false) async throws -> PhotoBackupPreflightPlan
     {
         let queued = journal.jobs.filter { $0.stage == .queued }
         preflighting = true; phaseDone = 0; phaseTotal = queued.count
@@ -822,7 +936,7 @@ import Photos
             processed += jobs.count
             localMatches?.acceptBackupMatches(associations, using: manager)
             statusMessage = "已保存匹配进度 \(processed) 项；中断后可继续剩余项目。"
-        }, displayAliases: displayAliases, originalVerificationIDs: usesNativeLibrarySource ? Set(queued.map(\.id)) : [])
+        }, displayAliases: displayAliases, originalVerificationIDs: explicitlyVerifyOriginals ? Set(queued.map(\.id)) : [])
         let plan = try await checker.plan(jobs: queued, scope: scope, client: reader, verificationIDs: verificationIDs, progress: { [self] done, total in
             phaseDone = done; phaseTotal = total
             continuityMessage = "正在核查 \(done) / \(total) 项，可随时暂停。"
@@ -846,6 +960,7 @@ import Photos
             diagnosticPhase = phase; lastDiagnosticWrite = now
             let values: [String: Any] = ["version": 1, "recordedAt": now.timeIntervalSince1970,
                                          "running": running, "phase": phase, "allowCloud": allowCloud,
+                                         "nativeForegroundBackupEnabled": nativeForegroundBackupEnabled,
                                          "nativeTotal": scannedNativeCount, "deferredMatched": deferredNativeCount,
                                          "total": total, "processed": processed, "completed": completed,
                                          "duplicates": duplicates, "skipped": skipped, "review": review, "failed": failed,
@@ -926,7 +1041,6 @@ extension PhotoBackupController {
     /// 返回本轮退役/自动任务以便测试等待；同条件重复通知复用任务，不并发重扫。
     @discardableResult
     func automaticConditionsChanged(using manager: LibraryManagementController, scope: MediaAccountScope?, active: Bool? = nil) -> Task<Void, Never>? {
-        guard !usesNativeLibrarySource else { return nil }
         let nextActive = active ?? automaticActive
         guard automaticManager !== manager || automaticManagerGeneration != manager.generation || automaticScope != scope || automaticActive != nextActive else {
             return automaticTask
@@ -942,6 +1056,7 @@ extension PhotoBackupController {
         automaticManager = manager; automaticManagerGeneration = manager.generation
         if automaticScope != scope {
             foregroundAutomaticEnabled = false
+            nativeForegroundBackupEnabled = false
             foregroundNetworkRecoveryEnabled = false
             automaticWaitingForNetwork = false
             lastValidatedNetworkRecoveryEvent = nil
@@ -951,7 +1066,8 @@ extension PhotoBackupController {
         automaticNetworkRecoveryRequested = retainedNetworkEvent
         automaticScope = scope; automaticActive = nextActive; automaticRequested = nextActive
         automaticTask = nil
-        return launchAutomaticWork(after: previous, manual: previousManual)
+        return usesNativeLibrarySource ? launchNativeAutomaticWork(after: previous, manual: previousManual)
+            : launchAutomaticWork(after: previous, manual: previousManual)
     }
 
     /// 公开Photos观察事件只合并一个待处理请求；测试也可调用同入口，不替代实际扫描/Worker。
@@ -964,12 +1080,15 @@ extension PhotoBackupController {
     /// 只有当前前台/账号接受事件，SQL保存同意仍在原周期内重新核对；同token合并，默认不恢复任何失败。
     @discardableResult
     func networkRouteValidated(using manager: LibraryManagementController, scope: MediaAccountScope?, eventID: UUID) -> Task<Void, Never>? {
-        guard !usesNativeLibrarySource,
-              automaticManager === manager, automaticManagerGeneration == manager.generation,
+        guard automaticManager === manager, automaticManagerGeneration == manager.generation,
               let scope, automaticScope == scope, manager.backupScope == scope,
               !automaticSuppressedScopes.contains(scope.cacheNamespace), !requiresSelectionScan, !configuringAutomatic else { return nil }
         guard lastValidatedNetworkRecoveryEvent != eventID else { return automaticTask }
         lastValidatedNetworkRecoveryEvent = eventID
+        if usesNativeLibrarySource {
+            // A verified route can wake safe native work; it does not grant legacy failed-job replay.
+            return requestAutomaticWork()
+        }
         automaticNetworkRecoveryRequested = true; automaticWaitingForNetwork = false; automaticRequested = true
         // App已在前台而scene尚未active时只暂存本代际事件；相同上下文转active才由原生命周期启动。
         guard automaticActive else { return nil }
@@ -1108,6 +1227,10 @@ extension PhotoBackupController {
 
     /// 明确停止关闭并持久保存前台和系统后台规则；生命周期/到期取消不更改用户开关。
     func stopManually(using manager: LibraryManagementController) async {
+        if usesNativeLibrarySource {
+            await setNativeForegroundBackupEnabled(false, using: manager)
+            return
+        }
         let owner = manager.generation
         let scope = manager.backupScope
         cancel()
@@ -1129,7 +1252,7 @@ extension PhotoBackupController {
 
     /// 关闭备份页仅停止页面发起的手动操作；已明确开启的自动周期由整个App前台生命周期持有。
     func cancelPageWork() {
-        if !automaticRunning {
+        if !automaticRunning, !(usesNativeLibrarySource && nativeForegroundBackupEnabled) {
             task?.cancel()
         }
     }
@@ -1137,7 +1260,19 @@ extension PhotoBackupController {
     /// 合并Photos/扫描后的请求；默认关闭、离线、未授权或有当前账号草稿时不进入上传。
     @discardableResult
     private func requestAutomaticWork() -> Task<Void, Never>? {
-        guard !usesNativeLibrarySource, foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
+        if usesNativeLibrarySource {
+            guard nativeForegroundBackupEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
+                  automaticManagerGeneration == manager.generation, manager.backupScope == scope,
+                  !automaticSuppressedScopes.contains(scope.cacheNamespace),
+                  !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic else { return nil }
+            automaticRequested = true
+            if let automaticTask {
+                return automaticTask
+            }
+            guard !running else { return nil }
+            return launchNativeAutomaticWork(after: nil, manual: nil)
+        }
+        guard foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
               manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
               !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic,
               !automaticWaitingForNetwork else { return nil }
@@ -1147,6 +1282,77 @@ extension PhotoBackupController {
         }
         guard !running else { return nil }
         return launchAutomaticWork(after: nil, manual: nil)
+    }
+
+    /// Native foreground scheduling uses the same persistent queue, Coordinator, preflight and
+    /// Worker as manual backup. Photos/route events only request a scan; they never grant consent.
+    private func launchNativeAutomaticWork(after previous: Task<Void, Never>?, manual: Task<Void, Never>?) -> Task<Void, Never> {
+        let epoch = automaticEpoch
+        let operation = Task { [weak self] in
+            await previous?.value; await manual?.value
+            guard let self, !Task.isCancelled, automaticEpoch == epoch else { return }
+            defer {
+                if automaticEpoch == epoch {
+                    automaticTask = nil
+                    automaticRunning = false
+                }
+            }
+            while automaticRequested {
+                guard !Task.isCancelled, automaticEpoch == epoch, automaticActive,
+                      let manager = automaticManager, let scope = automaticScope,
+                      automaticManagerGeneration == manager.generation, manager.backupScope == scope,
+                      !automaticSuppressedScopes.contains(scope.cacheNamespace) else { return }
+                let owner = manager.generation, authorization = authorizationStatus()
+                guard authorization == .authorized || authorization == .limited else {
+                    statusMessage = "Native library backup is waiting for Photos access, a connection, or a confirmed queue. Saved progress is retained."
+                    writeDiagnostics(phase: "nativeBackupWaiting", force: true)
+                    return
+                }
+                do {
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    let saved = try await store.loadPhotoBackups(scope: scope)
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    guard !running, !configuringAutomatic else { return }
+                    guard saved.scanSource == .nativeLibrary, saved.nativeForegroundBackupEnabled == true else {
+                        nativeForegroundBackupEnabled = false
+                        automaticMonitor?.stop(); automaticMonitor = nil
+                        return
+                    }
+                    apply(saved, scope: scope, restoreConfiguration: false)
+                    if observeAutomaticPhotos, automaticMonitor == nil {
+                        automaticMonitor = LocalPhotoChangeMonitor { [weak self] in self?.automaticLibraryChanged() }
+                    }
+                    // Keep one pending event while another management operation owns the write lane.
+                    // This wait is cancellable and never exports or uploads anything by itself.
+                    while manager.busy {
+                        try await Task.sleep(for: .milliseconds(250))
+                        try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    }
+                    guard !running, !configuringAutomatic else { return }
+                    automaticRequested = false
+                    automaticRunning = true
+                    guard let current = runSavedQueue(using: manager, mode: .nativeAutomatic) else {
+                        automaticRunning = false
+                        return
+                    }
+                    await current.value
+                    automaticRunning = false
+                    try validateAutomatic(manager, owner: owner, scope: scope, epoch: epoch, authorization: authorization)
+                    // Late source events are consumed by the next iteration. With no event this task
+                    // ends, leaving only the Photos observer; it does not repeatedly rescan an idle library.
+                } catch {
+                    guard automaticEpoch == epoch, manager.generation == owner else { return }
+                    if Task.isCancelled || error is CancellationError {
+                        return
+                    }
+                    statusMessage = "Native library backup is waiting for Photos access, a connection, or a confirmed queue. Saved progress is retained."
+                    writeDiagnostics(phase: "nativeBackupWaiting", force: true)
+                    return
+                }
+            }
+        }
+        automaticTask = operation
+        return operation
     }
 
     /// previous/manual为已取消的前台任务；先等其退役，避免旧defer或检查点覆盖新账号运行状态。

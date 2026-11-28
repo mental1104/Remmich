@@ -6,6 +6,70 @@ import Testing
 /// 用真实账号SQLite文件验证冷恢复、部分Live Photo回执、账号隔离和删除后晚写，不访问PhotoKit或网络。
 @Suite("Durable photo backup journal")
 struct PhotoBackupJournalTests {
+    @Test @MainActor func nativeForegroundConsentPersistsInTheHeaderWithoutRewritingJobs() async throws {
+        let root = backupTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = backupTestScope("native-consent"), url = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: url)
+        try await store.prepare(scope: scope)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        let source = PhotoBackupSource(localID: "native-original", modifiedAt: .distantPast, kind: .photo)
+        try journal.applyLibraryScan(PhotoBackupLibraryScan.plan([.init(source: source, capturedAt: .distantPast)]), allowCloud: true)
+        try await store.savePhotoBackups(journal, scope: scope)
+        #expect(try await store.photoBackupNativeForegroundEnabled(scope: scope) == false)
+        let probe = try await BackupJournalSQLProbe(url: store.databaseFiles(scope: scope).catalog)
+        let before = try probe.rows("SELECT job_id,position,stage,payload FROM photo_backup_jobs ORDER BY position")
+        for event in ["INSERT", "UPDATE", "DELETE"] {
+            try probe.execute("CREATE TRIGGER reject_native_job_\(event) BEFORE \(event) ON photo_backup_jobs BEGIN SELECT RAISE(ABORT,'native consent rewrote jobs'); END")
+        }
+        try await store.updatePhotoBackupAutomationSettings(scope: scope, nativeForeground: true)
+        // Unrelated legacy setting saves must retain the explicit native flag and version.
+        try await store.updatePhotoBackupAutomationSettings(scope: scope, foreground: false, background: false, networkRecovery: false)
+        let cold = SQLiteLibraryIndexStore(databaseURL: url)
+        let enabled = try await cold.loadPhotoBackups(scope: scope)
+        #expect(enabled.version == 5 && enabled.nativeForegroundBackupEnabled == true && enabled.allowCloud)
+        #expect(try await cold.photoBackupNativeForegroundEnabled(scope: scope))
+        #expect(try await cold.photoBackupNativeForegroundEnabled(scope: backupTestScope("other-native-account")) == false)
+        try await store.updatePhotoBackupAutomationSettings(scope: scope, nativeForeground: false)
+        let stopped = try await cold.loadPhotoBackups(scope: scope)
+        #expect(stopped.version == 5 && stopped.nativeForegroundBackupEnabled == false && stopped.allowCloud)
+        #expect(try await cold.photoBackupNativeForegroundEnabled(scope: scope) == false)
+        #expect(try probe.rows("SELECT job_id,position,stage,payload FROM photo_backup_jobs ORDER BY position") == before)
+        var stoppedPlan = stopped
+        #expect(throws: PhotoBackupStateError.invalidTransition) {
+            try stoppedPlan.applyNativeAutomaticLibraryScan(PhotoBackupLibraryScan.plan([.init(source: source, capturedAt: .distantPast)]))
+        }
+    }
+
+    @Test @MainActor func versionFiveRawJPEGKeepsItsHotWriteAndMatchingCheckpointPaths() async throws {
+        let root = backupTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = backupTestScope("native-v5-raw"), url = root.appending(path: "index.sqlite")
+        let store = SQLiteLibraryIndexStore(databaseURL: url)
+        try await store.prepare(scope: scope)
+        let pair = try PhotoBackupRawJPEGSource(originals: [
+            .init(kind: .photo, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 100, pixelHeight: 100),
+            .init(kind: .alternatePhoto, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 100, pixelHeight: 100),
+        ], hasAdjustments: false, adjustmentTime: nil)
+        let sources = ["raw-hot", "raw-matched"].map { PhotoBackupSource(localID: $0, modifiedAt: .distantPast, kind: .rawJPEG, rawJPEG: pair) }
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.applyLibraryScan(PhotoBackupLibraryScan.plan(sources.map { .init(source: $0, capturedAt: .distantPast) }), allowCloud: false)
+        try journal.setNativeForegroundBackupEnabled(true)
+        try await store.savePhotoBackups(journal, scope: scope)
+        var raw = journal.jobs[0]
+        try raw.begin(); try raw.exported()
+        let receipt = try PhotoBackupImageReceipt(assetID: UUID(), checksum: Data(repeating: 1, count: 20).base64EncodedString(), duplicate: true)
+        try raw.recordImage(receipt, role: .raw)
+        try await store.savePhotoBackupJob(raw, scope: scope)
+        try await store.checkpointPhotoBackupMatches([journal.jobs[1]], scope: scope)
+        let cold = SQLiteLibraryIndexStore(databaseURL: url)
+        let saved = try await cold.loadPhotoBackups(scope: scope)
+        #expect(saved.version == 5 && saved.nativeForegroundBackupEnabled == true)
+        #expect(saved.jobs[0].stage == .uploadingPrimary && saved.jobs[0].rawReceipt == receipt && saved.jobs[0].jpegReceipt == nil)
+        #expect(saved.jobs[1].stage == .existing && saved.jobs[1].rawReceipt == nil && saved.jobs[1].jpegReceipt == nil)
+        #expect(saved.jobs.allSatisfy { $0.stage != .completed })
+    }
+
     /// 第二行失去queued资格时必须回滚第一行；成功批次只改变选中任务，冷连接看到相同边界。
     @Test func matchingCheckpointIsAtomicAndKeepsOtherJobs() async throws {
         let root = backupTestRoot()

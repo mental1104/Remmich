@@ -1733,3 +1733,23 @@
 "The full Photos library is ready. No original backup starts automatically." = "The full Photos library is ready. No original backup starts automatically.";
 "Native-library backup tasks restored. Start backup manually to continue." = "Native-library backup tasks restored. Start backup manually to continue.";
 "Unavailable organization albums removed from the draft. Save organization settings; backup scope is unchanged." = "Unavailable organization albums removed from the draft. Save organization settings; backup scope is unchanged.";
+
+"Enable Backup" = "Enable Backup";
+"Continue Backup" = "Continue Backup";
+"Enable Backup?" = "Enable Backup?";
+"Continue Backup?" = "Continue Backup?";
+"Foreground Backup" = "Foreground Backup";
+"Backup State" = "Backup State";
+"Enabled" = "Enabled";
+"Not Enabled" = "Not Enabled";
+"Turn Off Backup" = "Turn Off Backup";
+"Scanning reads Photos metadata only. Enable backup to keep new items backed up to Immich while Remmich is in the foreground; saved progress and receipts are retained." = "Scanning reads Photos metadata only. Enable backup to keep new items backed up to Immich while Remmich is in the foreground; saved progress and receipts are retained.";
+"Enable one-way backup from Photos and iCloud to Immich while Remmich is in the foreground. New items are checked for duplicates before upload using your saved iCloud download option. Pausing disables automatic resuming; saved progress and receipts are kept. This does not enable background backup." = "Enable one-way backup from Photos and iCloud to Immich while Remmich is in the foreground. New items are checked for duplicates before upload using your saved iCloud download option. Pausing disables automatic resuming; saved progress and receipts are kept. This does not enable background backup.";
+"The saved iCloud option also applies to new items backed up in the foreground. Changing it requires another library scan; matching does not download originals." = "The saved iCloud option also applies to new items backed up in the foreground. Changing it requires another library scan; matching does not download originals.";
+"When enabled, new Photos and iCloud items are backed up one way to Immich in the foreground. Pausing turns this off; failed or uncertain items need an explicit retry." = "When enabled, new Photos and iCloud items are backed up one way to Immich in the foreground. Pausing turns this off; failed or uncertain items need an explicit retry.";
+"Matching only controls local Photos browsing. It does not enable original backup or authorize uploads." = "Matching only controls local Photos browsing. It does not enable original backup or authorize uploads.";
+
+"Native library backup is enabled. New Photos items will be checked and backed up while the app is in the foreground." = "Native library backup is enabled. New Photos items will be checked and backed up while the app is in the foreground.";
+"Native library backup is paused. Saved progress is retained and new Photos items will wait until you enable backup again." = "Native library backup is paused. Saved progress is retained and new Photos items will wait until you enable backup again.";
+"The library backup setting could not be saved. No new automatic backup will start. Reload and confirm the setting again." = "The library backup setting could not be saved. No new automatic backup will start. Reload and confirm the setting again.";
+"Native library backup is waiting for Photos access, a connection, or a confirmed queue. Saved progress is retained." = "Native library backup is waiting for Photos access, a connection, or a confirmed queue. Saved progress is retained.";

@@ -45,6 +45,12 @@ struct PhotoBackupView: View {
                     Text(backup.status)
                         .accessibilityIdentifier("backup-original-status")
                     Text(backup.continuityStatus).font(.footnote).foregroundStyle(.secondary)
+                    if backup.usesNativeLibrarySource {
+                        LabeledContent("Foreground Backup") {
+                            Text(L10n.string(backup.nativeForegroundBackupEnabled ? "Enabled" : "Not Enabled"))
+                        }
+                        .accessibilityIdentifier("backup-native-foreground-status")
+                    }
                     if backup.running {
                         if let fraction = backup.progressFraction {
                             ProgressView(value: fraction, total: 1)
@@ -64,7 +70,7 @@ struct PhotoBackupView: View {
                 }
                 Section {
                     if backup.running {
-                        Button(L10n.string(backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled ? "Stop & Disable Automatic Backup" : "Pause Backup"), role: .destructive) {
+                        Button(L10n.string(!backup.usesNativeLibrarySource && (backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled) ? "Stop & Disable Automatic Backup" : "Pause Backup"), role: .destructive) {
                             Task { await backup.stopManually(using: controller) }
                         }
                         .accessibilityIdentifier("backup-pause-originals")
@@ -79,11 +85,11 @@ struct PhotoBackupView: View {
                         Button("Scan Library") { backup.scan(using: controller) }
                             .accessibilityIdentifier("backup-scan-library")
                             .disabled(loadingQueue || backup.configuringAutomatic || controller.client == nil || controller.busy)
-                        Button("Back Up Originals") {
+                        Button(originalBackupActionTitle) {
                             resumesUnattempted = false; retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
                         }
                         .accessibilityIdentifier("backup-start-originals")
-                        .disabled(loadingQueue || backup.configuringAutomatic || backup.requiresSelectionScan || !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) } || controller.client == nil || controller.busy)
+                        .disabled(loadingQueue || backup.configuringAutomatic || backup.requiresSelectionScan || (!backup.usesNativeLibrarySource && !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) }) || controller.client == nil || controller.busy)
                         DisclosureGroup("Recovery Options") {
                             Button("Continue Unattempted Items") {
                                 resumesUnattempted = true; retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
@@ -94,7 +100,11 @@ struct PhotoBackupView: View {
                         }
                     }
                 } footer: {
-                    Text("Scan the entire authorized Photos library without uploading originals. Original backup starts only after your confirmation; saved progress and receipts are retained.")
+                    if backup.usesNativeLibrarySource {
+                        Text("Scanning reads Photos metadata only. Enable backup to keep new items backed up to Immich while Remmich is in the foreground; saved progress and receipts are retained.")
+                    } else {
+                        Text("Scan the entire authorized Photos library without uploading originals. Original backup starts only after your confirmation; saved progress and receipts are retained.")
+                    }
                 }
                 if let localMatches, localMatches.fullLibraryReconciler == nil {
                     Section("本机照片优先") {
@@ -102,7 +112,7 @@ struct PhotoBackupView: View {
                             localMatches.setEnabled($0, using: controller, followBackup: true)
                         }))
                         .disabled(backup.running)
-                        Text("照片同步的已验证匹配同时用于本机浏览，无需单独扫描；未匹配的新照片继续查重后备份。")
+                        Text("Matching only controls local Photos browsing. It does not enable original backup or authorize uploads.")
                             .font(.footnote).foregroundStyle(.secondary)
                         if localMatches.enabled {
                             Text(localMatches.status).font(.footnote).foregroundStyle(.secondary)
@@ -148,11 +158,13 @@ struct PhotoBackupView: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { backup.cancelPageWork(); dismiss() } }
             }
             .sheet(isPresented: $showsConfiguration) { configurationView }
-            .confirmationDialog(L10n.string(resumesUnattempted ? "Continue Unattempted Backups?" : retryID == nil ? "Start Original Backup?" : "Retry This Backup Item?"), isPresented: $confirmsResume, titleVisibility: .visible) {
-                Button("Continue Original Backup") {
+            .confirmationDialog(originalBackupConfirmationTitle, isPresented: $confirmsResume, titleVisibility: .visible) {
+                Button(originalBackupConfirmationActionTitle) {
                     guard !loadingQueue, confirmationOwner == controller.generation else { return }
                     if resumesUnattempted {
                         backup.resumeUnattempted(using: controller)
+                    } else if backup.usesNativeLibrarySource, retryID == nil {
+                        Task { await backup.startNativeForegroundBackup(using: controller) }
                     } else {
                         backup.resume(using: controller, jobID: retryID)
                     }
@@ -161,6 +173,8 @@ struct PhotoBackupView: View {
             } message: {
                 if resumesUnattempted {
                     Text("Recheck Photos access and the saved library scan before continuing up to \(backup.unattemptedSummary.eligibleJobIDs.count) unattempted items. The saved iCloud option is used. Failed, uncertain, cancelled, and completed items are retained.")
+                } else if backup.usesNativeLibrarySource, retryID == nil {
+                    Text("Enable one-way backup from Photos and iCloud to Immich while Remmich is in the foreground. New items are checked for duplicates before upload using your saved iCloud download option. Pausing disables automatic resuming; saved progress and receipts are kept. This does not enable background backup.")
                 } else {
                     Text("Use the latest library scan and saved iCloud option. Existing receipts are rechecked; uncertain results are not retried automatically.")
                 }
@@ -304,6 +318,29 @@ struct PhotoBackupView: View {
         }
     }
 
+    private var originalBackupActionTitle: String {
+        guard backup.usesNativeLibrarySource else { return L10n.string("Back Up Originals") }
+        return L10n.string(backup.nativeForegroundBackupEnabled ? "Continue Backup" : "Enable Backup")
+    }
+
+    private var originalBackupConfirmationTitle: String {
+        if resumesUnattempted {
+            return L10n.string("Continue Unattempted Backups?")
+        }
+        if retryID != nil {
+            return L10n.string("Retry This Backup Item?")
+        }
+        guard backup.usesNativeLibrarySource else { return L10n.string("Start Original Backup?") }
+        return L10n.string(backup.nativeForegroundBackupEnabled ? "Continue Backup?" : "Enable Backup?")
+    }
+
+    private var originalBackupConfirmationActionTitle: String {
+        if backup.usesNativeLibrarySource, retryID == nil, !resumesUnattempted {
+            return originalBackupActionTitle
+        }
+        return L10n.string("Continue Original Backup")
+    }
+
     /// 只根据已有队列摘要解释当前界面状态，不计算或改变任何上传许可。
     private var statusTitle: String {
         if backup.running {
@@ -334,9 +371,30 @@ struct PhotoBackupView: View {
                 } header: {
                     Text(verbatim: "iCloud")
                 } footer: {
-                    Text("This option applies only when you manually start original backup. Changing it requires another library scan; matching does not download originals.")
+                    if backup.usesNativeLibrarySource {
+                        Text("The saved iCloud option also applies to new items backed up in the foreground. Changing it requires another library scan; matching does not download originals.")
+                    } else {
+                        Text("This option applies only when you manually start original backup. Changing it requires another library scan; matching does not download originals.")
+                    }
                 }
-                if backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled {
+                if backup.usesNativeLibrarySource {
+                    Section("Foreground Backup") {
+                        LabeledContent("Backup State") {
+                            Text(L10n.string(backup.nativeForegroundBackupEnabled ? "Enabled" : "Not Enabled"))
+                        }
+                        .accessibilityIdentifier("backup-native-foreground-setting")
+                        if backup.nativeForegroundBackupEnabled {
+                            Button("Turn Off Backup", role: .destructive) {
+                                Task { await backup.setNativeForegroundBackupEnabled(false, using: controller) }
+                            }
+                            .accessibilityIdentifier("backup-disable-native-foreground")
+                            .disabled(loadingQueue || backup.configuringAutomatic)
+                        }
+                        Text("When enabled, new Photos and iCloud items are backed up one way to Immich in the foreground. Pausing turns this off; failed or uncertain items need an explicit retry.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                if !backup.usesNativeLibrarySource, backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled {
                     Section("Saved Automatic Backup Rule") {
                         Text("Library backup is manual. Stop any previously saved automatic backup rule before continuing.")
                             .font(.footnote).foregroundStyle(.secondary)

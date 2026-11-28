@@ -113,6 +113,13 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         return try photoBackupHeader(scope: scope, database: database)?.backgroundAutomaticEnabled == true
     }
 
+    /// Reads only explicit v5 native foreground consent; no task restoration, scan or original read.
+    func photoBackupNativeForegroundEnabled(scope: MediaAccountScope) throws -> Bool {
+        guard try canRead(scope) else { return false }
+        let database = try photoBackupDatabase(scope: scope)
+        return try photoBackupHeader(scope: scope, database: database)?.nativeForegroundBackupEnabled == true
+    }
+
     /// journal为冷快照/明确扫描结果，scope为同一账号；批量事务创建任务并保存扫描顺序，热转换使用savePhotoBackupJob。
     /// 已有未知版本或损坏旧日志不能覆盖；账号删除后不能重建其日志。
     func savePhotoBackups(_ journal: PhotoBackupJournal, scope: MediaAccountScope) throws {
@@ -135,19 +142,25 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
 
     /// 自动化开关只更新当前账号的已验证日志头；不读取、删除或重写整份任务队列。
     func updatePhotoBackupAutomationSettings(scope: MediaAccountScope, foreground: Bool? = nil,
-                                             background: Bool? = nil, networkRecovery: Bool? = nil) throws
+                                             background: Bool? = nil, networkRecovery: Bool? = nil, nativeForeground: Bool? = nil) throws
     {
         try Task.checkCancellation()
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             guard let previous = try photoBackupHeader(scope: scope, database: db) else { throw PhotoBackupStateError.invalidJournal }
-            let header = PhotoBackupJournal.Header(
+            var header = PhotoBackupJournal.Header(
                 version: previous.version, namespace: previous.namespace, selectedAlbumIDs: previous.selectedAlbumIDs,
                 allowCloud: previous.allowCloud, excludedAlbumIDs: previous.excludedAlbumIDs, rawJPEGVersion: previous.rawJPEGVersion,
                 foregroundAutomaticEnabled: foreground ?? previous.foregroundAutomaticEnabled,
                 backgroundAutomaticEnabled: background ?? previous.backgroundAutomaticEnabled,
-                foregroundNetworkRecoveryEnabled: networkRecovery ?? previous.foregroundNetworkRecoveryEnabled, scanSource: previous.scanSource
+                foregroundNetworkRecoveryEnabled: networkRecovery ?? previous.foregroundNetworkRecoveryEnabled,
+                scanSource: previous.scanSource, nativeForegroundBackupEnabled: previous.nativeForegroundBackupEnabled
             )
+            if let nativeForeground {
+                var native = PhotoBackupJournal(header: header, jobs: [])
+                try native.setNativeForegroundBackupEnabled(nativeForeground)
+                header = native.header
+            }
             try header.validate(namespace: scope.cacheNamespace)
             let json = try String(decoding: JSONEncoder().encode(header), as: UTF8.self)
             try db.execute("UPDATE main.photo_backup_headers SET payload=? WHERE scope=?", [.text(json), .text(scope.cacheNamespace)])
@@ -163,7 +176,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             guard let header = try photoBackupHeader(scope: scope, database: db),
-                  job.source.kind != .rawJPEG || [3, 4].contains(header.version),
+                  job.source.kind != .rawJPEG || [3, 4, 5].contains(header.version),
                   let saved = try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND job_id=?",
                                               [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
                   saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }
@@ -185,7 +198,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
                 guard let saved = try db.queryOne("SELECT job_id,stage,payload FROM photo_backup_jobs WHERE scope=? AND job_id=?",
                                                   [.text(scope.cacheNamespace), .text(expected.id.uuidString)], map: Self.decodePhotoBackupJob),
                     saved.source == expected.source, saved.stage == .queued,
-                    saved.source.kind != .rawJPEG || [3, 4].contains(header.version) else { throw PhotoBackupStateError.invalidTransition }
+                    saved.source.kind != .rawJPEG || [3, 4, 5].contains(header.version) else { throw PhotoBackupStateError.invalidTransition }
                 var matched = saved
                 try matched.confirmExistingMatch()
                 try matched.validate()
