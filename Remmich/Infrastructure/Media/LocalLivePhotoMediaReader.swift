@@ -131,7 +131,7 @@ nonisolated struct LocalLivePhotoDelivery: Sendable {
 @MainActor struct PhotoKitLocalLivePhotoDriver: LocalLivePhotoRequesting {
     /// 读已有授权与当前完整资源观察；playbackStyle可排除Loop/Bounce/Live关闭等非标准展示，不猜current资源。
     func source(for identifier: String) -> LocalLivePhotoSource? {
-        guard let access = access(), let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
+        guard let access = access(), let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject,
               asset.mediaType == .image, asset.mediaSubtypes.contains(.photoLive) else { return nil }
         let resources = PHAssetResource.assetResources(for: asset).map(Self.describe).sorted(by: Self.precedes)
         let snapshot = LocalPhotoSnapshot(identity: .init(localIdentifier: asset.localIdentifier, modificationDate: asset.modificationDate, mediaKind: .livePhoto),
@@ -147,7 +147,7 @@ nonisolated struct LocalLivePhotoDelivery: Sendable {
     func motionDigest(for source: LocalLivePhotoSource, resource: LocalPhotoChecksumResource) async throws -> LocalPhotoByteDigest? {
         try Task.checkCancellation()
         guard source.motionResource() == resource, self.source(for: source.snapshot.identity.localIdentifier) == source,
-              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.snapshot.identity.localIdentifier], options: nil).firstObject else { return nil }
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.snapshot.identity.localIdentifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject else { return nil }
         let resources = PHAssetResource.assetResources(for: asset).filter { $0.type == .pairedVideo && Self.describe($0) == resource }
         guard resources.count == 1, let selected = resources.first else { return nil }
         return try await PhotoKitLocalResourceRequests().read(selected)
@@ -159,7 +159,7 @@ nonisolated struct LocalLivePhotoDelivery: Sendable {
     {
         guard source.motionResource() != nil, self.source(for: source.snapshot.identity.localIdentifier) == source,
               options.version == .current, !options.isNetworkAccessAllowed,
-              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.snapshot.identity.localIdentifier], options: nil).firstObject else { return nil }
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.snapshot.identity.localIdentifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject else { return nil }
         let manager = PHImageManager.default()
         let id = manager.requestLivePhoto(for: asset, targetSize: CGSize(width: targetPixels.width, height: targetPixels.height), contentMode: .aspectFit, options: options) { @Sendable value, info in
             let failed = info?[PHImageCancelledKey] as? Bool == true || info?[PHImageErrorKey] != nil

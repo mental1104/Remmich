@@ -146,7 +146,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
                 allowCloud: previous.allowCloud, excludedAlbumIDs: previous.excludedAlbumIDs, rawJPEGVersion: previous.rawJPEGVersion,
                 foregroundAutomaticEnabled: foreground ?? previous.foregroundAutomaticEnabled,
                 backgroundAutomaticEnabled: background ?? previous.backgroundAutomaticEnabled,
-                foregroundNetworkRecoveryEnabled: networkRecovery ?? previous.foregroundNetworkRecoveryEnabled
+                foregroundNetworkRecoveryEnabled: networkRecovery ?? previous.foregroundNetworkRecoveryEnabled, scanSource: previous.scanSource
             )
             try header.validate(namespace: scope.cacheNamespace)
             let json = try String(decoding: JSONEncoder().encode(header), as: UTF8.self)
@@ -163,7 +163,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
         let db = try photoBackupDatabase(scope: scope)
         try db.transaction {
             guard let header = try photoBackupHeader(scope: scope, database: db),
-                  job.source.kind != .rawJPEG || header.version == 3,
+                  job.source.kind != .rawJPEG || [3, 4].contains(header.version),
                   let saved = try db.queryOne("SELECT job_id,stage,payload FROM main.photo_backup_jobs WHERE scope=? AND job_id=?",
                                               [.text(scope.cacheNamespace), .text(job.id.uuidString)], map: Self.decodePhotoBackupJob),
                   saved.source == job.source else { throw PhotoBackupStateError.invalidTransition }
@@ -185,7 +185,7 @@ actor SQLiteLibraryIndexStore: LibraryIndexStoring, AlbumCatalogStoring, Partner
                 guard let saved = try db.queryOne("SELECT job_id,stage,payload FROM photo_backup_jobs WHERE scope=? AND job_id=?",
                                                   [.text(scope.cacheNamespace), .text(expected.id.uuidString)], map: Self.decodePhotoBackupJob),
                     saved.source == expected.source, saved.stage == .queued,
-                    saved.source.kind != .rawJPEG || header.version == 3 else { throw PhotoBackupStateError.invalidTransition }
+                    saved.source.kind != .rawJPEG || [3, 4].contains(header.version) else { throw PhotoBackupStateError.invalidTransition }
                 var matched = saved
                 try matched.confirmExistingMatch()
                 try matched.validate()

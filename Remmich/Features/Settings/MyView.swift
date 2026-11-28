@@ -30,7 +30,7 @@ struct MyView: View {
             if let sessionController {
                 Section("Backup & Sync") {
                     Button { showsBackup = true } label: {
-                        Label("Photo Sync", systemImage: "arrow.triangle.2.circlepath.icloud")
+                        Label("Library Sync", systemImage: "arrow.triangle.2.circlepath.icloud")
                     }
                     .accessibilityIdentifier("my-photo-backup")
                     NavigationLink {

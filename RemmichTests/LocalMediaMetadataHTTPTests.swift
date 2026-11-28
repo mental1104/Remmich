@@ -435,3 +435,148 @@ private final nonisolated class MetadataHTTPProtocol: URLProtocol, @unchecked Se
         task?.cancel()
     }
 }
+
+/// 独立展示身份流使用同一真实HTTP夹具，旧backup decoder及其测试合同保持不变。
+@Suite("Display identity streaming HTTP")
+@MainActor struct LocalPhotoDisplayIdentityHTTPTests {
+    @Test func reportsRawProgressEvenWhenAllMetadataKeysAreUnrelated() async throws {
+        let rows = (0 ..< 130).map { displayIdentityHTTPRow($0).replacingOccurrences(of: "mobile-app", with: "unrelated-key") }.joined()
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(rows + metadataHTTPComplete)])
+        defer { fixture.close() }
+        let sink = DisplayIdentityHTTPBatchSink()
+        let receipt = try await fixture.client.streamPhotoDisplayIdentities(onBatch: { _ in Issue.record("Unrelated keys cannot become identity events") },
+                                                                            onProgress: { await sink.progress(raw: $0, recognized: $1) })
+        #expect(await sink.rawProgress == [64, 128, 131])
+        #expect(await sink.recognizedProgress == [0, 0, 0])
+        #expect(receipt.rawRowCount == 131 && receipt.recognizedEventCount == 0 && receipt.ignoredMetadataEventCount == 130 && receipt.batchCount == 0)
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    @Test func deliversAtMost64EventsPerBatchAndOnlyCompletesAfterEOF() async throws {
+        let rows = (0 ..< 129).map { displayIdentityHTTPRow($0) }.joined()
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(rows + metadataHTTPComplete)])
+        defer { fixture.close() }
+        let sink = DisplayIdentityHTTPBatchSink()
+        let receipt = try await fixture.client.streamPhotoDisplayIdentities { await sink.append($0) }
+        let batches = await sink.batches
+        #expect(batches.map(\.count) == [64, 64, 1])
+        #expect(receipt.rawRowCount == 130 && receipt.recognizedEventCount == 129 && receipt.batchCount == 3)
+        #expect(receipt.ignoredMetadataEventCount == 0)
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    /// 已落盘64项前缀不等于完整快照；最后不足64项在截断时不得伪造complete receipt。
+    @Test func incompletePrefixCanBeStagedButCannotBeAccepted() async throws {
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream((0 ..< 65).map { displayIdentityHTTPRow($0) }.joined())])
+        defer { fixture.close() }
+        let sink = DisplayIdentityHTTPBatchSink()
+        await #expect(throws: LocalPhotoDisplayIdentityStreamError.incomplete) {
+            _ = try await fixture.client.streamPhotoDisplayIdentities { await sink.append($0) }
+        }
+        #expect(await sink.batches.map(\.count) == [64])
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    @Test(arguments: ["AssetMetadataV1", "AssetMetadataDeleteV1"])
+    func checkpointFailureStopsAtReadOnlyAck(_ type: String) async throws {
+        let fixture = LocalMetadataHTTPFixture([.ack("[{\"type\":\"\(type)\",\"ack\":\"opaque\"}]")])
+        defer { fixture.close() }
+        await #expect(throws: LocalPhotoDisplayIdentityStreamError.metadataCheckpointExists) {
+            _ = try await fixture.client.streamPhotoDisplayIdentities { _ in Issue.record("No stream batch is allowed") }
+        }
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 1)
+    }
+
+    @Test(arguments: [500, 501, 502, 503, 504, 507, 599])
+    func preservesHTTP5xxForWorkerRetryClassification(_ status: Int) async throws {
+        let fixture = LocalMetadataHTTPFixture([.ack(), .init(status: status, mime: "application/jsonlines+json")])
+        defer { fixture.close() }
+        do {
+            _ = try await fixture.client.streamPhotoDisplayIdentities { _ in Issue.record("No batch is allowed on HTTP failure") }
+            Issue.record("Expected HTTP failure")
+        } catch let LibraryWriteError.http(actual) { #expect(actual == status) }
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    @Test func consumerFailureCannotReturnCompleteReceiptOrContinuePublishing() async throws {
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream((0 ..< 129).map { displayIdentityHTTPRow($0) }.joined() + metadataHTTPComplete)])
+        defer { fixture.close() }
+        let sink = DisplayIdentityHTTPBatchSink()
+        await #expect(throws: DisplayIdentityHTTPFailure.rejected) {
+            _ = try await fixture.client.streamPhotoDisplayIdentities { events in
+                await sink.append(events)
+                throw DisplayIdentityHTTPFailure.rejected
+            }
+        }
+        #expect(await sink.batches.map(\.count) == [64])
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    /// 同client重放仍发GET+POST，不读旧payload、不ACK；新一次receipt和计数独立。
+    @Test func replayDoesNotWriteAcknowledgmentsOrReusePreviousReceipt() async throws {
+        let fixture = LocalMetadataHTTPFixture([.ack(), .stream(displayIdentityHTTPRow(0) + metadataHTTPComplete), .ack(), .stream(metadataHTTPComplete)])
+        defer { fixture.close() }
+        let first = try await fixture.client.streamPhotoDisplayIdentities { _ in }
+        let second = try await fixture.client.streamPhotoDisplayIdentities { _ in Issue.record("Empty replay has no batch") }
+        #expect(first.recognizedEventCount == 1 && second.recognizedEventCount == 0 && second.batchCount == 0)
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 4)
+    }
+
+    @Test(arguments: ["no-complete", "partial-complete", "disconnect", "reset", "mime"])
+    func protocolAndTransportFailuresNeverReturnCompleteReceipt(_ mode: String) async throws {
+        var text = displayIdentityHTTPRow(0)
+        if mode == "partial-complete" {
+            text += String(metadataHTTPComplete.dropLast())
+        }
+        if mode == "reset" {
+            text += #"{"type":"SyncResetV1","data":{},"ack":"SyncResetV1|reset"}"# + "\n"
+        }
+        var exchange = MetadataHTTPExchange.stream(text, mime: mode == "mime" ? "application/json" : "application/jsonlines+json")
+        if mode == "disconnect" {
+            exchange.error = .networkConnectionLost
+        }
+        let fixture = LocalMetadataHTTPFixture([.ack(), exchange])
+        defer { fixture.close() }
+        await #expect(throws: (any Error).self) { _ = try await fixture.client.streamPhotoDisplayIdentities { _ in } }
+        try await metadataHTTPAssertSequence(fixture.script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+
+    /// 完整终止行已到达但HTTP尚未EOF时取消，仍不得返回receipt。
+    @Test func cancellationBeforeEOFDoesNotAcceptStagedSnapshot() async throws {
+        var stream = MetadataHTTPExchange.stream(metadataHTTPComplete); stream.held = true
+        let fixture = LocalMetadataHTTPFixture([.ack(), stream])
+        defer { fixture.close() }
+        let client = fixture.client, script = fixture.script
+        let pending = Task { try await client.streamPhotoDisplayIdentities { _ in } }
+        let watcher = Task { _ = await pending.result; await script.operationFinished() }
+        guard await script.waitForHeldRequest() else {
+            await watcher.value; Issue.record("Actual HTTP EOF gate was not reached"); return
+        }
+        pending.cancel()
+        await script.release(); await watcher.value
+        do { _ = try await pending.value; Issue.record("Cancelled stream must not return a receipt") }
+        catch { #expect(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+        try await metadataHTTPAssertSequence(script.requests, endpoint: fixture.endpoint, count: 2)
+    }
+}
+
+private actor DisplayIdentityHTTPBatchSink {
+    private(set) var batches: [[LocalPhotoDisplayIdentityEvent]] = []
+    private(set) var rawProgress: [Int] = []
+    private(set) var recognizedProgress: [Int] = []
+    func append(_ events: [LocalPhotoDisplayIdentityEvent]) {
+        batches.append(events)
+    }
+
+    func progress(raw: Int, recognized: Int) {
+        rawProgress.append(raw); recognizedProgress.append(recognized)
+    }
+}
+
+private nonisolated enum DisplayIdentityHTTPFailure: Error, Equatable, Sendable { case rejected }
+
+private nonisolated func displayIdentityHTTPRow(_ index: Int) -> String {
+    let suffix = String(index, radix: 16)
+    let id = "aaaaaaaa-aaaa-4aaa-8aaa-" + String(repeating: "0", count: 12 - suffix.count) + suffix
+    return #"{"type":"AssetMetadataV1","data":{"assetId":"\#(id)","key":"mobile-app","value":{"iCloudId":"synthetic-\#(index)"}},"ack":"AssetMetadataV1|opaque-update"}"# + "\n"
+}

@@ -72,7 +72,7 @@ import UniformTypeIdentifiers
 
     /// id为已扫描本机标识；读取全部公开资源描述，不访问Cloud ID、私有可用性、文件路径或媒体字节。
     private static func readSource(_ id: String) throws -> LocalPhotoChecksumAsset? {
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject, asset.mediaType == .image else { return nil }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: LocalPhotoExplicitAssetQuery.options()).firstObject, asset.mediaType == .image else { return nil }
         let resources = PHAssetResource.assetResources(for: asset).map(describe).sorted { $0.descriptor.type < $1.descriptor.type }
         let snapshot = LocalPhotoSnapshot(identity: .init(localIdentifier: asset.localIdentifier, modificationDate: asset.modificationDate,
                                                           mediaKind: asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .image),
@@ -87,7 +87,7 @@ import UniformTypeIdentifiers
     private static func readBytes(_ before: LocalPhotoChecksumAsset, _ resource: LocalPhotoChecksumResource) async throws -> LocalPhotoByteDigest {
         try Task.checkCancellation()
         let id = before.snapshot.identity.localIdentifier
-        guard try readSource(id) == before, let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { throw LocalPhotoChecksumError.sourceChanged }
+        guard try readSource(id) == before, let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: LocalPhotoExplicitAssetQuery.options()).firstObject else { throw LocalPhotoChecksumError.sourceChanged }
         let matches = PHAssetResource.assetResources(for: asset).filter { describe($0) == resource }
         guard matches.count == 1, let selected = matches.first else { throw LocalPhotoChecksumError.sourceChanged }
         return try await PhotoKitLocalResourceRequests().read(selected)

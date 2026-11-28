@@ -21,11 +21,19 @@ import Photos
     /// 仅标识相簿读取失败类别，不携带PhotoKit源身份或系统错误正文。
     nonisolated enum AlbumReadError: Error, Equatable, Sendable { case permission, invalidCatalog }
 
+    typealias LibraryScanner = @MainActor (_ validate: @escaping @MainActor @Sendable () throws -> Void) async throws -> [PhotoBackupScannedAsset]
+    let scanSource: PhotoBackupScanSource
+    var usesNativeLibrarySource: Bool {
+        scanSource == .nativeLibrary
+    }
+
+    private(set) var requiresOrganizationSave = false
+
     var albums: [Album] = []
     var selected: Set<String> = [] {
         didSet {
             if selected != oldValue {
-                markSelectionDraftChanged()
+                markSelectionDraftChanged(organizationOnly: true)
             }
         }
     }
@@ -33,7 +41,7 @@ import Photos
     var excluded: Set<String> = [] {
         didSet {
             if excluded != oldValue {
-                markSelectionDraftChanged()
+                markSelectionDraftChanged(organizationOnly: true)
             }
         }
     }
@@ -88,7 +96,7 @@ import Photos
 
     /// 只暴露当前已加载、无草稿且没有备份/配置写入的门禁，不向组织页面传递账号凭据或私有存储。
     func hasCurrentSavedSelection(using manager: LibraryManagementController) -> Bool {
-        configurationScope == manager.backupScope && configurationScope != nil && !requiresSelectionScan && !running && !configuringAutomatic
+        configurationScope == manager.backupScope && configurationScope != nil && !requiresSelectionScan && !requiresOrganizationSave && !running && !configuringAutomatic
     }
 
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -97,6 +105,7 @@ import Photos
     @ObservationIgnored private let preflight: (any PhotoBackupPreflighting)?
     @ObservationIgnored weak var localMatches: LocalMediaMatchController?
     @ObservationIgnored private let albumLoader: @MainActor () async throws -> AlbumCatalog
+    @ObservationIgnored private let libraryScanner: LibraryScanner
     @ObservationIgnored private let albumScanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private var configurationScope: MediaAccountScope?
     @ObservationIgnored private var applyingConfiguration = false
@@ -118,6 +127,11 @@ import Photos
     @ObservationIgnored private var backgroundSuppressedScopes: Set<String> = []
     @ObservationIgnored private var backgroundTask: Task<Void, Never>?
 
+    /// Production always scans native Photos; isolated legacy fixtures keep their existing initializer contract.
+    static func production(store: SQLiteLibraryIndexStore = .init()) -> PhotoBackupController {
+        .init(store: store, scanSource: .nativeLibrary)
+    }
+
     /// store复用账号存储，exporter控制媒体导出；albumLoader读取当前授权列表，albumScanner按包含/排除ID并集重新取源快照。
     /// 两个可选读取边界的nil使用真实权限/枚举，扫描失败在任何持久化/上传前停止。
     /// authorizationStatus只查询已有授权，自动周期不得请求授权；observeAutomaticPhotos为false时仅关闭系统变更观察供隔离测试。
@@ -126,9 +140,12 @@ import Photos
          albumScanner: (@MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot])? = nil,
          authorizationStatus: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
          observeAutomaticPhotos: Bool = true,
-         preflight: (any PhotoBackupPreflighting)? = nil)
+         preflight: (any PhotoBackupPreflighting)? = nil,
+         scanSource: PhotoBackupScanSource = .selectedAlbums, libraryScanner: LibraryScanner? = nil)
     {
         self.store = store
+        self.scanSource = scanSource
+        self.libraryScanner = libraryScanner ?? { validate in try await Self.libraryAssets(validateContext: validate) }
         self.exporter = exporter
         self.preflight = preflight
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
@@ -165,7 +182,9 @@ import Photos
             if manager.client == nil {
                 statusMessage = "服务器暂不可用；已恢复本机保存的同步进度，连接恢复后可继续。"
             } else if requiresSelectionScan {
-                statusMessage = "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
+                statusMessage = usesNativeLibrarySource ? "Scan the full Photos library before starting backup. Existing tasks are preserved." : "队列已读取；本页相簿选择尚未保存，请重新选择并扫描后再继续。"
+            } else if usesNativeLibrarySource {
+                statusMessage = jobs.isEmpty ? "The full Photos library is ready. No original backup starts automatically." : "Native-library backup tasks restored. Start backup manually to continue."
             } else {
                 statusMessage = jobs.isEmpty ? "选择手机相簿后扫描。不会删除或修改手机原片。" : "已恢复当前账户队列。点击继续后重新查重，不自动重发。"
             }
@@ -190,7 +209,7 @@ import Photos
             guard ids.allSatisfy({ !$0.isEmpty }), Set(ids).count == ids.count else { throw AlbumReadError.invalidCatalog }
             albums = catalog.albums
             hasLoadedAlbums = true
-            statusMessage = catalog.limited ? "仅扫描当前已授权照片；不可用选择须明确移除后重新扫描。" : "相簿已读取；选择后扫描，不会自动上传。"
+            statusMessage = usesNativeLibrarySource ? "Albums are used only for organization. Backup always uses the full Photos library." : catalog.limited ? "仅扫描当前已授权照片；不可用选择须明确移除后重新扫描。" : "相簿已读取；选择后扫描，不会自动上传。"
         } catch {
             guard !running else { return }
             statusMessage = (error as? AlbumReadError) == .permission
@@ -212,8 +231,12 @@ import Photos
         guard !missing.isEmpty else { return }
         selected.subtract(missing)
         excluded.subtract(missing)
-        requiresSelectionScan = true
-        statusMessage = "已移除不可用的本页选择，尚未保存；请重新选择并扫描。备份队列和已上传回执保持不变。"
+        if usesNativeLibrarySource {
+            requiresOrganizationSave = true
+        } else {
+            requiresSelectionScan = true
+        }
+        statusMessage = usesNativeLibrarySource ? "Unavailable organization albums removed from the draft. Save organization settings; backup scope is unchanged." : "已移除不可用的本页选择，尚未保存；请重新选择并扫描。备份队列和已上传回执保持不变。"
     }
 
     /// 真实权限与枚举边界；limited只返回当前授权范围，不保留PHAssetCollection作为日后扫描的旧快照。
@@ -236,6 +259,9 @@ import Photos
     /// 返回持久化任务供调用方等待完整退役；nil表示前置门禁拒绝。Photos枚举异步执行，失败不更新队列。
     @discardableResult
     func scan(using manager: LibraryManagementController) -> Task<Void, Never>? {
+        if usesNativeLibrarySource {
+            return scanLibrary(using: manager)
+        }
         guard !running, !configuringAutomatic, hasLoadedAlbums, !loadingAlbums, !selected.isEmpty, let scope = manager.backupScope else { return nil }
         guard configurationScope == scope else { statusMessage = "请先读取当前账户的备份队列，再扫描相簿。"; return nil }
         let owner = manager.generation
@@ -273,6 +299,104 @@ import Photos
             } catch { showFailure(error, manager: manager, owner: owner) }
         }
         return task
+    }
+
+    /// Explicit metadata-only full-library scan. It neither exports originals nor starts an upload worker.
+    @discardableResult func scanLibrary(using manager: LibraryManagementController) -> Task<Void, Never>? {
+        guard usesNativeLibrarySource, !running, !configuringAutomatic, let scope = manager.backupScope else { return nil }
+        guard configurationScope == scope else { statusMessage = "Load this account's backup queue before scanning the Photos library."; return nil }
+        let authorization = authorizationStatus()
+        guard authorization == .authorized || authorization == .limited else { statusMessage = "Photos permission is required to scan the native library. No upload started."; return nil }
+        let owner = manager.generation, cloud = allowCloud, organizationIncluded = selected, organizationExcluded = excluded
+        let validateContext: @MainActor @Sendable () throws -> Void = {
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            guard self.authorizationStatus() == authorization, self.allowCloud == cloud else { throw AlbumReadError.permission }
+        }
+        running = true
+        statusMessage = "Scanning the authorized Photos library. No originals or uploads."
+        task = Task {
+            defer { running = false; task = nil }
+            do {
+                let assets = try await libraryScanner(validateContext)
+                let scan = try await Self.planLibraryScan(assets)
+                try validateContext()
+                guard selected == organizationIncluded, excluded == organizationExcluded else { throw CancellationError() }
+                let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                    try validateContext()
+                    var journal = try await store.loadPhotoBackups(scope: scope)
+                    try validateContext()
+                    journal.recoverInterrupted()
+                    try journal.applyLibraryScan(scan, allowCloud: cloud)
+                    try journal.saveOrganizationSelection(included: organizationIncluded, excluded: organizationExcluded)
+                    try validateContext()
+                    try await store.savePhotoBackups(journal, scope: scope)
+                    try validateContext()
+                    return journal
+                }
+                try validateContext(); apply(journal, scope: scope)
+                statusMessage = "Photos library scan saved: \(scan.sources.count) items. Existing task states and receipts are preserved. Start backup explicitly to read originals."
+            } catch { showFailure(error, manager: manager, owner: owner) }
+        }
+        return task
+    }
+
+    /// Organization albums are independent preferences in native-library mode, never a backup source filter.
+    func saveOrganizationSelection(using manager: LibraryManagementController) async {
+        guard usesNativeLibrarySource, !running, !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope else { return }
+        let owner = manager.generation, included = selected, exclusions = excluded
+        configuringAutomatic = true
+        defer { configuringAutomatic = false }
+        do {
+            let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                var journal = try await store.loadPhotoBackups(scope: scope)
+                try journal.saveOrganizationSelection(included: included, excluded: exclusions)
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                try await store.savePhotoBackups(journal, scope: scope)
+                return journal
+            }
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+            guard selected == included, excluded == exclusions else { throw CancellationError() }
+            apply(journal, scope: scope, restoreConfiguration: false)
+            requiresOrganizationSave = false
+            statusMessage = "Organization album settings saved. Backup still uses the full Photos library."
+        } catch { showFailure(error, manager: manager, owner: owner) }
+    }
+
+    /// Global PHAsset fetch, not a smart album. Hidden and every burst member follow native authorized inventory.
+    @concurrent static func libraryAssets(validateContext: @escaping @MainActor @Sendable () throws -> Void) async throws -> [PhotoBackupScannedAsset] {
+        try Task.checkCancellation(); try await validateContext()
+        let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard authorization == .authorized || authorization == .limited else { throw AlbumReadError.permission }
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        options.includeHiddenAssets = true; options.includeAllBurstAssets = true
+        let assets = PHAsset.fetchAssets(with: options)
+        var values: [PhotoBackupScannedAsset] = []
+        values.reserveCapacity(assets.count)
+        for index in 0 ..< assets.count {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation(); try await validateContext()
+                guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == authorization else { throw AlbumReadError.permission }
+                await Task.yield()
+            }
+            autoreleasepool {
+                let asset = assets.object(at: index)
+                guard asset.mediaType == .image || asset.mediaType == .video else { return }
+                // Uses the existing Live Photo/RAW+JPEG resource-description rules; never requests resource data.
+                values.append(.init(source: PhotoKitBackupResourceExporter.source(for: asset), capturedAt: asset.creationDate))
+            }
+        }
+        try Task.checkCancellation(); try await validateContext()
+        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == authorization else { throw AlbumReadError.permission }
+        return values
+    }
+
+    @concurrent static func planLibraryScan(_ assets: [PhotoBackupScannedAsset]) async throws -> PhotoBackupLibraryScan {
+        try Task.checkCancellation()
+        let scan = try PhotoBackupLibraryScan.plan(assets)
+        try Task.checkCancellation()
+        return scan
     }
 
     /// ids为包含与排除相簿的并集；先重新确认每个集合可访问，避免旧PHAssetCollection消失被当作空排除。
@@ -337,7 +461,7 @@ import Photos
     /// 返回实际运行任务，nil表示门禁拒绝；调用者必须传递取消并等待退役，不伪装前台active。
     @discardableResult
     func runSystemBackground(using manager: LibraryManagementController) -> Task<Void, Never>? {
-        guard backgroundAutomaticEnabled, backgroundTask == nil, !running, !configuringAutomatic else { return nil }
+        guard !usesNativeLibrarySource, backgroundAutomaticEnabled, backgroundTask == nil, !running, !configuringAutomatic else { return nil }
         backgroundLastResult = nil
         let operation = runSavedQueue(using: manager, mode: .background)
         backgroundTask = operation
@@ -352,6 +476,9 @@ import Photos
     /// manager是当前认证通道；只冷读日志头并发布当前账号的后台同意，不触碰任务状态或照片权限。
     /// 返回保存的同意；存储/代际错误抛出，调用方不得因此开始扫描或上传。
     func refreshBackgroundConsent(using manager: LibraryManagementController) async throws -> Bool {
+        if usesNativeLibrarySource {
+            backgroundAutomaticEnabled = false; return false
+        }
         guard let scope = manager.backupScope else { throw LibraryWriteError.unavailable }
         let owner = manager.generation
         let enabled = try await store.photoBackupBackgroundEnabled(scope: scope)
@@ -387,8 +514,11 @@ import Photos
         guard !running, !configuringAutomatic, !requiresSelectionScan, !manager.busy, let scope = manager.backupScope,
               configurationScope == scope, let client = manager.client else { return nil }
         let authorization = authorizationStatus()
+        if usesNativeLibrarySource, !(authorization == .authorized || authorization == .limited) {
+            statusMessage = "Photos permission is required to start a native-library backup."; return nil
+        }
         if mode.onlyUnattempted {
-            guard !selected.isEmpty else { statusMessage = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
+            guard usesNativeLibrarySource || !selected.isEmpty else { statusMessage = "请先明确选择相簿并扫描保存，再继续未尝试项目。"; return nil }
             guard mode.isBackground || !unattemptedSummary.eligibleJobIDs.isEmpty else { statusMessage = "没有可直接继续的未尝试项目；失败、未知或取消项需单独检查。"; return nil }
             guard !mode.isBackground || (backgroundAutomaticEnabled && !backgroundSuppressedScopes.contains(scope.cacheNamespace)) else { return nil }
             guard authorization == .authorized || authorization == .limited else { statusMessage = "请先确认照片授权，再继续未尝试项目；未启动上传。"; return nil }
@@ -413,21 +543,41 @@ import Photos
                     try Self.validate(manager, owner: owner, scope: scope)
                     // 前一会话可能已失去发布权而不能暂停；屏障后由当前会话接管恢复，不能跳过遗留in-flight。
                     journal.recoverInterrupted()
-                    switch mode {
-                    case let .verification(id): try journal.resumeForVerification(only: id)
-                    case .unattempted, .background:
-                        try Task.checkCancellation()
-                        guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
-                        let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
-                        let snapshots = try await self.albumScanner(selection.included.union(selection.excluded))
-                        let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
-                        try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
-                        guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
-                        if mode.isBackground {
-                            guard self.backgroundAutomaticEnabled else { throw CancellationError() }
-                            try journal.applyBackgroundAlbumScan(scan)
+                    if self.usesNativeLibrarySource {
+                        guard journal.scanSource == .nativeLibrary else { throw PhotoBackupStateError.invalidTransition }
+                        let validateNative: @MainActor @Sendable () throws -> Void = {
+                            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                            guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
+                        }
+                        let assets = try await self.libraryScanner(validateNative)
+                        let scan = try await Self.planLibraryScan(assets)
+                        try validateNative()
+                        if case .verification = mode {
+                            try journal.applyLibraryScan(scan, allowCloud: journal.allowCloud)
+                        }
+                        let onlyID: UUID? = if case let .verification(id) = mode {
+                            id
                         } else {
-                            try journal.resumeUnattempted(scan)
+                            nil
+                        }
+                        try journal.resumeLibraryForVerification(scan, only: onlyID, unattemptedOnly: mode.onlyUnattempted)
+                    } else {
+                        switch mode {
+                        case let .verification(id): try journal.resumeForVerification(only: id)
+                        case .unattempted, .background:
+                            try Task.checkCancellation()
+                            guard self.authorizationStatus() == authorization else { throw AlbumReadError.permission }
+                            let selection = try PhotoBackupAlbumSelection(included: Set(journal.selectedAlbumIDs), excluded: Set(journal.excludedAlbumIDs ?? []))
+                            let snapshots = try await self.albumScanner(selection.included.union(selection.excluded))
+                            let scan = try await Self.planAlbumScan(selection, snapshots: snapshots)
+                            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                            guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
+                            if mode.isBackground {
+                                guard self.backgroundAutomaticEnabled else { throw CancellationError() }
+                                try journal.applyBackgroundAlbumScan(scan)
+                            } else {
+                                try journal.resumeUnattempted(scan)
+                            }
                         }
                     }
                     try await store.savePhotoBackups(journal, scope: scope)
@@ -448,7 +598,7 @@ import Photos
                             preflight: plan,
                             validateContext: {
                                 try Self.validate(manager, owner: owner, scope: scope)
-                                if mode.onlyUnattempted {
+                                if mode.onlyUnattempted || self.usesNativeLibrarySource {
                                     guard self.authorizationStatus() == authorization, !self.requiresSelectionScan else { throw AlbumReadError.permission }
                                 }
                                 if mode.isBackground, !self.backgroundAutomaticEnabled {
@@ -528,8 +678,11 @@ import Photos
 
     /// 已读取账户配置后的包含/排除/iCloud改动都属于未保存草稿；直到成功扫描才解除恢复/重试门禁。
     /// 初始构造不创建草稿；apply恢复配置时会在全部字段赋值后统一清除标记。
-    private func markSelectionDraftChanged() {
+    private func markSelectionDraftChanged(organizationOnly: Bool = false) {
         guard configurationScope != nil, !applyingConfiguration else { return }
+        if usesNativeLibrarySource, organizationOnly {
+            requiresOrganizationSave = true; return
+        }
         requiresSelectionScan = true
         automaticRequested = false
         automaticNetworkRecoveryRequested = false
@@ -544,12 +697,13 @@ import Photos
             selected = Set(journal.selectedAlbumIDs)
             excluded = Set(journal.excludedAlbumIDs ?? [])
             allowCloud = journal.allowCloud
-            requiresSelectionScan = false
+            requiresSelectionScan = usesNativeLibrarySource && journal.scanSource != .nativeLibrary
+            requiresOrganizationSave = false
             applyingConfiguration = false
         }
-        foregroundAutomaticEnabled = journal.foregroundAutomaticEnabled == true
-        foregroundNetworkRecoveryEnabled = journal.foregroundNetworkRecoveryEnabled == true
-        backgroundAutomaticEnabled = journal.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
+        foregroundAutomaticEnabled = !usesNativeLibrarySource && journal.foregroundAutomaticEnabled == true
+        foregroundNetworkRecoveryEnabled = !usesNativeLibrarySource && journal.foregroundNetworkRecoveryEnabled == true
+        backgroundAutomaticEnabled = !usesNativeLibrarySource && journal.backgroundAutomaticEnabled == true && !backgroundSuppressedScopes.contains(scope.cacheNamespace)
         configurationScope = scope
         jobs = journal.jobs
         unattemptedSummary = .init(jobs: journal.jobs)
@@ -668,6 +822,7 @@ extension PhotoBackupController {
     /// 返回本轮退役/自动任务以便测试等待；同条件重复通知复用任务，不并发重扫。
     @discardableResult
     func automaticConditionsChanged(using manager: LibraryManagementController, scope: MediaAccountScope?, active: Bool? = nil) -> Task<Void, Never>? {
+        guard !usesNativeLibrarySource else { return nil }
         let nextActive = active ?? automaticActive
         guard automaticManager !== manager || automaticManagerGeneration != manager.generation || automaticScope != scope || automaticActive != nextActive else {
             return automaticTask
@@ -705,7 +860,8 @@ extension PhotoBackupController {
     /// 只有当前前台/账号接受事件，SQL保存同意仍在原周期内重新核对；同token合并，默认不恢复任何失败。
     @discardableResult
     func networkRouteValidated(using manager: LibraryManagementController, scope: MediaAccountScope?, eventID: UUID) -> Task<Void, Never>? {
-        guard automaticManager === manager, automaticManagerGeneration == manager.generation,
+        guard !usesNativeLibrarySource,
+              automaticManager === manager, automaticManagerGeneration == manager.generation,
               let scope, automaticScope == scope, manager.backupScope == scope,
               !automaticSuppressedScopes.contains(scope.cacheNamespace), !requiresSelectionScan, !configuringAutomatic else { return nil }
         guard lastValidatedNetworkRecoveryEvent != eventID else { return automaticTask }
@@ -723,6 +879,9 @@ extension PhotoBackupController {
     /// enabled为独立的失败重核同意，默认关闭；只保存已有规则，绝不借开关重排失败或扩大iCloud选择。
     /// 关闭先取消并等待旧周期；保存后仅恢复原安全新项扫描，失败仍须新验证网络token才能进入Worker。
     func setForegroundNetworkRecoveryEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        if usesNativeLibrarySource, enabled {
+            statusMessage = "Native-library original backup starts only from your manual backup action."; return
+        }
         guard !configuringAutomatic, let scope = manager.backupScope, configurationScope == scope,
               !enabled || (foregroundAutomaticEnabled && !running && !manager.busy && !requiresSelectionScan) else { return }
         let owner = manager.generation
@@ -760,6 +919,9 @@ extension PhotoBackupController {
     /// enabled为当前账号的独立系统后台同意；启用只使用已保存选择，关闭先取消/等待真实后台任务。
     /// 失败保留恢复资料并显示未确认状态；不修改前台开关或iCloud意愿，不调用stopManually。
     func setBackgroundAutomaticEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        if usesNativeLibrarySource, enabled {
+            statusMessage = "Native-library original backup starts only from your manual backup action."; return
+        }
         guard !configuringAutomatic, let scope = manager.backupScope,
               !enabled || (configurationScope == scope && !running && !manager.busy && !requiresSelectionScan && !selected.isEmpty) else { return }
         let owner = manager.generation
@@ -797,6 +959,9 @@ extension PhotoBackupController {
     /// enabled是对最近保存相簿/iCloud选项的明确同意；关闭先取消并等待真实任务，再持久保存关闭。
     /// 读取/写入错误可见且不上传；未保存草稿只影响页面，不借切换自动开关偷偷保存。
     func setForegroundAutomaticEnabled(_ enabled: Bool, using manager: LibraryManagementController) async {
+        if usesNativeLibrarySource, enabled {
+            statusMessage = "Native-library original backup starts only from your manual backup action."; return
+        }
         // 启用须读取过当前账号配置；冷启动自动周期可能先等待旧任务，明确关闭不能被尚未apply的配置挡回。
         guard !configuringAutomatic, let scope = manager.backupScope,
               !enabled || (configurationScope == scope && !running && !manager.busy && !requiresSelectionScan) else { return }
@@ -868,7 +1033,7 @@ extension PhotoBackupController {
     /// 合并Photos/扫描后的请求；默认关闭、离线、未授权或有当前账号草稿时不进入上传。
     @discardableResult
     private func requestAutomaticWork() -> Task<Void, Never>? {
-        guard foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
+        guard !usesNativeLibrarySource, foregroundAutomaticEnabled, automaticActive, let scope = automaticScope, let manager = automaticManager,
               manager.backupScope == scope, !automaticSuppressedScopes.contains(scope.cacheNamespace),
               !(requiresSelectionScan && configurationScope == scope), !configuringAutomatic,
               !automaticWaitingForNetwork else { return nil }

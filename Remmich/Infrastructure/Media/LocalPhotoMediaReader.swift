@@ -240,7 +240,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
 @MainActor struct PhotoKitLocalPhotoMediaDriver: LocalPhotoMediaRequesting {
     /// localIdentifier限定当前设备；权限不足/对象消失不弹框、不请求文件，返回nil供远端显示回退。
     func observation(for localIdentifier: String) -> LocalPhotoMediaObservation? {
-        guard let access = access(), let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject,
+        guard let access = access(), let asset = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject,
               let identity = identity(asset), let after = self.access(), after == access else { return nil }
         return .init(identity: identity, access: access, adjustmentTime: asset.adjustmentTimestamp, hasAdjustments: asset.hasAdjustments,
                      pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight, duration: asset.duration, mediaSubtypes: asset.mediaSubtypes.rawValue)
@@ -281,7 +281,7 @@ nonisolated struct LocalPhotoMediaRequest: Sendable {
 
     /// expected是本次读取前的最新观察版本；系统调用前再次核对，不使用旧PHAsset实例。
     private func asset(_ expected: LocalPhotoIdentity) -> PHAsset? {
-        guard access() != nil, let asset = PHAsset.fetchAssets(withLocalIdentifiers: [expected.localIdentifier], options: nil).firstObject,
+        guard access() != nil, let asset = PHAsset.fetchAssets(withLocalIdentifiers: [expected.localIdentifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject,
               identity(asset) == expected, access() != nil else { return nil }
         return asset
     }

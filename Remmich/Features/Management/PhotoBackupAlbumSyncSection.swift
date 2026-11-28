@@ -14,7 +14,7 @@ struct PhotoBackupAlbumSyncSection: View {
 
     /// 草稿/忙门使创建与现有组织同样不可执行；保留停止入口，不禁用整个Section。
     private var creationBlocked: Bool {
-        sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan
+        sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || backup.requiresOrganizationSave
     }
 
     /// 只检查当前包含映射；失效目标仍保留UUID标签供明确改选，不让Picker隐式退到同名第一项。
@@ -27,7 +27,7 @@ struct PhotoBackupAlbumSyncSection: View {
     var body: some View {
         Section("相簿同步 · 手动增量补入") {
             Toggle("自动相簿同步（本账户）", isOn: Binding(get: { automatic.enabled }, set: { value in Task { await automatic.setEnabled(value, using: manager) } }))
-                .disabled(automatic.configuring || (!automatic.enabled && (manager.client == nil || backup.requiresSelectionScan || backup.running || backup.configuringAutomatic || sync.state.mappings.isEmpty)))
+                .disabled(automatic.configuring || (!automatic.enabled && (manager.client == nil || backup.requiresSelectionScan || backup.requiresOrganizationSave || backup.running || backup.configuringAutomatic || sync.state.mappings.isEmpty)))
             Text(automatic.status).font(.footnote).foregroundStyle(.secondary)
             Text("默认关闭。开启后在前台，或已开启系统后台备份的有效租约内，将安全新项目补入已映射目标。使用保存包含/排除，不创建相簿，不重放未知/失败/取消项，不为组织上传或下载原片。")
                 .font(.footnote).foregroundStyle(.secondary)
@@ -67,16 +67,16 @@ struct PhotoBackupAlbumSyncSection: View {
                             Text("原目标不可用 · \(saved.targetName) · \(saved.targetID.uuidString.prefix(8))").tag(Optional(saved.targetID))
                         }
                     }
-                    .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan)
+                    .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || backup.requiresOrganizationSave)
                     creationControls(localID: localID)
                 }
                 Button("预览相簿补入计划") { sync.prepare(using: manager, backup: backup) }
-                    .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || sync.state.mappings.isEmpty || unavailableTargets > 0)
+                    .disabled(sync.loading || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || backup.requiresOrganizationSave || sync.state.mappings.isEmpty || unavailableTargets > 0)
                 if sync.prepared {
                     Text("本次最多 \(sync.previewCount) 个逻辑组，\(sync.unmatched) 项待匹配或待完整回执。Live Photo只加入主体；RAW+JPEG需两份原图均确认才算整组完成。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button("确认并立即补入") { confirmationOwner = manager.generation; confirmation = .members }
-                        .disabled(sync.previewCount == 0 || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || unavailableTargets > 0)
+                        .disabled(sync.previewCount == 0 || manager.busy || backup.running || backup.configuringAutomatic || backup.requiresSelectionScan || backup.requiresOrganizationSave || unavailableTargets > 0)
                 }
                 if !sync.state.operations.isEmpty {
                     Text("已有记录：\(sync.state.operations.count { $0.phase == .confirmed }) 组已确认；\(sync.state.operations.count { $0.phase != .confirmed && !$0.confirmedAssetIDs.isEmpty }) 组保留部分确认。未知/中断项须重新预览核查。")

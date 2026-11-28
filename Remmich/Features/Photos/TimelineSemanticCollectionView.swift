@@ -1235,9 +1235,9 @@ final class TimelineSemanticCollectionController: UIViewController, UICollection
             covers.insert(asset, at: 0)
             // 日/月封面优先复用组内已验证本机关联；只看有界候选，不为滚动扫描整库。
             let localCover = item.assetRange.prefix(64).lazy.map { catalog.assets[$0] }.first {
-                input.media.localMediaMatches.association(assetID: $0.id, revision: $0.thumbnailRevision) != nil
+                input.media.localMediaMatches.hasLocalPhotoIdentity(assetID: $0.id, revision: $0.thumbnailRevision)
             } ?? covers.first {
-                input.media.localMediaMatches.association(assetID: $0.id, revision: $0.thumbnailRevision) != nil
+                input.media.localMediaMatches.hasLocalPhotoIdentity(assetID: $0.id, revision: $0.thumbnailRevision)
             }
             if let localCover {
                 covers.removeAll { $0.id == localCover.id }

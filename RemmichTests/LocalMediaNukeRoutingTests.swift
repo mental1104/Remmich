@@ -9,6 +9,29 @@ import UIKit
 /// 真实恢复/匹配Controller→MediaLibraryController→Nuke链；仅替换Photos/远端metadata/字节来源，不复制路由算法。
 @Suite("Local media Nuke routing", .serialized)
 @MainActor struct LocalMediaNukeRoutingTests {
+    /// 生产规则不能由预取优先级或useLocalPhotos参数绕过，也不能以Photos暂不可见推断server-only。
+    @Test(arguments: [true, false])
+    func strictThumbnailPolicyDoesNotFetchImmichAfterLocalMiss(_ hasAuthorizedIdentity: Bool) async throws {
+        let fixture = try await routingFixture(localImage: false, photosObjectExists: false, strictPhotoSourcePolicy: true)
+        defer { fixture.close() }
+        if !hasAuthorizedIdentity {
+            fixture.inventory.authorization = .denied
+        }
+        let request = try #require(fixture.media.imageRequest(for: fixture.descriptor(.thumbnail), priority: .low,
+                                                              useSavedPhotos: false, useLocalPhotos: false))
+        let pipeline = try #require(fixture.media.pipeline)
+        do {
+            _ = try await pipeline.imageTask(with: request).response
+            Issue.record("Unconfirmed Photos source must remain pending.")
+        } catch {
+            let failure = try #require(error as? ImagePipeline.Error)
+            #expect(failure.dataLoadingError is LocalPhotoDisplayEvidencePending)
+        }
+        #expect(fixture.loader.requests.isEmpty)
+        #expect(fixture.reader.originalReads == 0)
+        #expect(fixture.reader.imageReads == (hasAuthorizedIdentity ? 1 : 0))
+    }
+
     /// 已确认存在的Photos对象只由Photos/iCloud提供原图；暂不可读不能切成Immich字节。
     @Test(arguments: [true, false])
     func viewerOriginalUsesExistingPhotosAsOnlySource(_ localOriginal: Bool) async throws {
@@ -353,7 +376,9 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 }
 
 /// 真实原子保存后按共享匹配协议冷恢复；Reader运行时核对当前Photos身份，不直接设置私有map或强制独立扫描。
-@MainActor private func routingFixture(localImage: Bool = true, photosObjectExists: Bool = true, video: Bool = false) async throws -> RoutingFixture {
+@MainActor private func routingFixture(localImage: Bool = true, photosObjectExists: Bool = true, video: Bool = false,
+                                       strictPhotoSourcePolicy: Bool = false) async throws -> RoutingFixture
+{
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("LocalRouting-\(UUID())", isDirectory: true)
     let endpoint = URL(string: "https://routing-\(UUID().uuidString.lowercased()).invalid/prefix/api")!
     let session = routingSession(owner: UUID().uuidString, endpoint: endpoint)
@@ -376,7 +401,8 @@ private nonisolated let routingAssetID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     let remote = RoutingRemote(asset: asset)
     let matches = LocalMediaMatchController(inventory: inventory, metadata: RoutingMetadata(snapshot: snapshot), checksum: RoutingChecksum(),
                                             remote: remote, persistence: store,
-                                            displayPersistence: LocalPhotoDisplayAssociationStore(directory: root.appendingPathComponent("display-matches")), observeChanges: false)
+                                            displayPersistence: LocalPhotoDisplayAssociationStore(directory: root.appendingPathComponent("display-matches")),
+                                            observeChanges: false, strictPhotoSourcePolicy: strictPhotoSourcePolicy)
     let reader = RoutingPhotoReader(localImage: localImage, objectExists: photosObjectExists, inventory: inventory)
     let remotePNG = try #require(reader.remoteSizedImage.pngData())
     let loader = RoutingDataLoader(image: remotePNG)

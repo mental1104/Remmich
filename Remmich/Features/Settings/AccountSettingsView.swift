@@ -982,12 +982,12 @@ struct AccountSettingsView: View {
                 .buttonStyle(.plain)
                 sectionCaption("本机优先浏览").padding(.top, 24)
                 Button { showsBackup = true } label: {
-                    profileValueRow("匹配本机照片与视频", value: "优先本机", symbol: "iphone.and.arrow.forward", showsChevron: true)
+                    profileValueRow("Sync Library", value: L10n.string("Photos and iCloud"), symbol: "iphone.and.arrow.forward", showsChevron: true)
                 }
                 .buttonStyle(.plain)
                 sectionCaption("照片备份").padding(.top, 24)
                 Button { showsBackup = true } label: {
-                    profileValueRow("备份手机照片与视频", value: "手动", symbol: "icloud.and.arrow.up", showsChevron: true)
+                    profileValueRow("Back Up Originals", value: L10n.string("Manual"), symbol: "icloud.and.arrow.up", showsChevron: true)
                 }
                 .buttonStyle(.plain)
             }

@@ -25,6 +25,7 @@ nonisolated struct LocalMediaDisplayCloudIdentity: Decodable, Hashable, Sendable
 /// 已收到冲突/不可解析的身份声明时，保持待核查；不能让上层将其转换为本机不存在后换源。
 nonisolated enum LocalPhotoDisplayEvidencePending: Error, Equatable, Sendable {
     case conflictingCloudIdentitySources, rejectedIdentityMarker, rejectedDisplayIdentity, displayAssociationPersistenceUnavailable
+    case photoSourceNotConfirmed
 }
 
 /// 仅当前可见项的展示证据；两种来源保持分离，诊断只含固定匿名分类。
@@ -33,6 +34,18 @@ nonisolated struct LocalPhotoDisplayEvidenceRecord: Sendable {
     let fullMetadataCandidates: [LocalMediaRemoteCandidate]
     let cloudIdentityCandidates: Set<LocalMediaDisplayCloudIdentity>
     let metadataDiagnostics: Set<String>
+    /// Raw recognized-key presence, independent of successful parsing. Unknown fixture evidence defaults to conservative true.
+    let hasPhotosIdentityDeclarations: Bool
+
+    init(remote: LocalMediaRemoteAsset, fullMetadataCandidates: [LocalMediaRemoteCandidate],
+         cloudIdentityCandidates: Set<LocalMediaDisplayCloudIdentity>, metadataDiagnostics: Set<String>,
+         hasPhotosIdentityDeclarations: Bool = true)
+    {
+        self.remote = remote; self.fullMetadataCandidates = fullMetadataCandidates
+        self.cloudIdentityCandidates = cloudIdentityCandidates; self.metadataDiagnostics = metadataDiagnostics
+        self.hasPhotosIdentityDeclarations = hasPhotosIdentityDeclarations || !fullMetadataCandidates.isEmpty || !cloudIdentityCandidates.isEmpty
+            || !metadataDiagnostics.isDisjoint(with: ["markerPresent", "mobileAppPresent", "backupOriginPresent"])
+    }
 
     var cloudIDs: Set<String> {
         Set(fullMetadataCandidates.map(\.metadata.cloudId)).union(cloudIdentityCandidates.map(\.cloudID))

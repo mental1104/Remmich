@@ -18,6 +18,8 @@ swiftc -swift-version 6 \
   Remmich/Domain/Management/AlbumPublicLink.swift \
   Remmich/Domain/Management/PartnerSharing.swift \
   Remmich/Domain/LocalMedia/LocalMediaMetadataStream.swift \
+  Remmich/Domain/LocalMedia/LocalPhotoDisplayEvidence.swift \
+  Remmich/Domain/LocalMedia/LocalPhotoDisplayIdentityStream.swift \
   Remmich/Domain/Backup/PhotoBackupOrigin.swift \
   Remmich/Domain/LocalMedia/LocalMediaMatch.swift \
   Remmich/Domain/LocalMedia/LocalMediaChecksum.swift \

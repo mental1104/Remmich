@@ -307,7 +307,8 @@ final nonisolated class LibraryMutationClient: Sendable {
         }
         try Task.checkCancellation()
         return .init(remote: remote, fullMetadataCandidates: values.map { .init(assetID: id, metadata: $0) },
-                     cloudIdentityCandidates: identities, metadataDiagnostics: diagnostics)
+                     cloudIdentityCandidates: identities, metadataDiagnostics: diagnostics,
+                     hasPhotosIdentityDeclarations: keys.contains("mobile-app") || keys.contains(LocalMediaDisplayCloudIdentity.metadataKey) || keys.contains(where: { $0.hasPrefix(PhotoBackupOrigin.keyPrefix) }))
     }
 
     /// queries为最多64个不重复nonce的本机完整字节摘要；官方precheck只查现有资源，accept仅返回未命中，绝不上传。
@@ -428,6 +429,78 @@ final nonisolated class LibraryMutationClient: Sendable {
 
     @concurrent func localMediaMetadataSnapshot() async throws -> [LocalMediaRemoteMetadataRecord] {
         try await readLocalMediaMetadata(cloudIDs: nil)
+    }
+
+    /// 展示身份的独立只读快照；HTTP回调只负责有界落盘，Photos匹配必须在完整EOF接受后独立消费。
+    /// 不发送ACK/reset，不读取媒体；回调失败或流截断不返回complete receipt，已落盘前缀不能冒充完整字典。
+    @concurrent func streamPhotoDisplayIdentities(
+        onBatch: @Sendable ([LocalPhotoDisplayIdentityEvent]) async throws -> Void
+    ) async throws -> LocalPhotoDisplayStreamReceipt {
+        try await streamPhotoDisplayIdentities(onBatch: onBatch, onProgress: { _, _ in })
+    }
+
+    /// raw进度包含合法其他key与终止frame；不代表Photos已匹配，不包含任何媒体身份。
+    @concurrent func streamPhotoDisplayIdentities(
+        onBatch: @Sendable ([LocalPhotoDisplayIdentityEvent]) async throws -> Void,
+        onProgress: @Sendable (_ rawRowCount: Int, _ recognizedEventCount: Int) async throws -> Void
+    ) async throws -> LocalPhotoDisplayStreamReceipt {
+        try Task.checkCancellation()
+        let acknowledgements = try await send("GET", ["sync", "ack"], expectedStatus: 200)
+        try LocalPhotoDisplayIdentityStreamDecoder.requireUncheckpointedMetadata(acknowledgements)
+        try Task.checkCancellation()
+        struct Body: Encodable { let types: [String] }
+        var streamRequest = try request("POST", ["sync", "stream"])
+        streamRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        streamRequest.setValue("application/jsonlines+json", forHTTPHeaderField: "Accept")
+        streamRequest.httpBody = try JSONEncoder().encode(Body(types: ["AssetMetadataV1"]))
+        let (bytes, response) = try await session.bytes(for: streamRequest)
+        guard let response = response as? HTTPURLResponse else { throw LocalPhotoDisplayIdentityStreamError.invalidResponse }
+        guard response.statusCode == 200 else { throw LibraryWriteError.http(response.statusCode) }
+        guard response.mimeType?.lowercased() == "application/jsonlines+json" else { throw LocalPhotoDisplayIdentityStreamError.invalidResponse }
+        var decoder = try LocalPhotoDisplayIdentityStreamDecoder()
+        var batch: [LocalPhotoDisplayIdentityEvent] = []
+        batch.reserveCapacity(64)
+        var batchCount = 0, untilCancellationCheck = 65536, lastReportedRawCount = 0
+        for try await byte in bytes {
+            if let event = try decoder.append(byte) {
+                batch.append(event)
+                if batch.count == 64 {
+                    try Task.checkCancellation()
+                    try await onBatch(batch)
+                    try Task.checkCancellation()
+                    batchCount += 1
+                    batch.removeAll(keepingCapacity: true)
+                }
+            }
+            if decoder.rawRowCount - lastReportedRawCount >= 64 {
+                if !batch.isEmpty {
+                    try Task.checkCancellation()
+                    try await onBatch(batch)
+                    try Task.checkCancellation()
+                    batchCount += 1
+                    batch.removeAll(keepingCapacity: true)
+                }
+                try await onProgress(decoder.rawRowCount, decoder.recognizedEventCount)
+                try Task.checkCancellation()
+                lastReportedRawCount = decoder.rawRowCount
+            }
+            untilCancellationCheck -= 1
+            if untilCancellationCheck == 0 {
+                try Task.checkCancellation()
+                untilCancellationCheck = 65536
+            }
+        }
+        try Task.checkCancellation()
+        let receipt = try decoder.finish(batchCount: batchCount + (batch.isEmpty ? 0 : 1))
+        if !batch.isEmpty {
+            try await onBatch(batch)
+            try Task.checkCancellation()
+        }
+        if lastReportedRawCount != receipt.rawRowCount {
+            try await onProgress(receipt.rawRowCount, receipt.recognizedEventCount)
+        }
+        try Task.checkCancellation()
+        return receipt
     }
 
     @concurrent private func readLocalMediaMetadata(cloudIDs: Set<String>?) async throws -> [LocalMediaRemoteMetadataRecord] {

@@ -26,7 +26,7 @@ nonisolated enum PhotoBackupFailure: String, Codable, Sendable {
         switch self {
         case .interrupted: "The previous operation was interrupted. Resume will check server duplicates before retrying."
         case .sourceMissing: "The source is no longer available in the authorized photo library."
-        case .sourceChanged: "The source changed. Scan the selected albums again before uploading this version."
+        case .sourceChanged: "The source changed. Scan the photo library again before uploading this version."
         case .unsupportedResources: "This resource combination cannot be confirmed as a complete backup."
         case .permission: "Photo or server permission is required."
         case .network: "The connection failed. Resume to check duplicates and retry."
@@ -255,13 +255,14 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         let foregroundAutomaticEnabled: Bool?
         let backgroundAutomaticEnabled: Bool?
         let foregroundNetworkRecoveryEnabled: Bool?
+        let scanSource: PhotoBackupScanSource?
 
         /// version/namespace保留恢复格式与账号边界；excludedAlbumIDs缺省nil兼容旧格式，不用存储属性默认值遮蔽解码。
-        /// rawJPEGVersion仅格式3允许且必须为1；其他格式不得偷偷携带双图资料。
+        /// rawJPEGVersion在格式3/4必须为1；格式4还要求显式原生全库范围，旧读取器安全拒绝。
         /// foregroundAutomaticEnabled缺省nil表示默认关闭；旧读取器忽略后只会失去自动启用，不会扩大上传范围。
         /// backgroundAutomaticEnabled为独立系统后台同意；foregroundNetworkRecoveryEnabled为独立前台连接失败重核同意，缺省nil均关闭。
         init(version: Int, namespace: String, selectedAlbumIDs: [String], allowCloud: Bool, excludedAlbumIDs: [String]? = nil, rawJPEGVersion: Int? = nil,
-             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil, foregroundNetworkRecoveryEnabled: Bool? = nil)
+             foregroundAutomaticEnabled: Bool? = nil, backgroundAutomaticEnabled: Bool? = nil, foregroundNetworkRecoveryEnabled: Bool? = nil, scanSource: PhotoBackupScanSource? = nil)
         {
             self.version = version
             self.namespace = namespace
@@ -272,6 +273,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             self.foregroundAutomaticEnabled = foregroundAutomaticEnabled
             self.backgroundAutomaticEnabled = backgroundAutomaticEnabled
             self.foregroundNetworkRecoveryEnabled = foregroundNetworkRecoveryEnabled
+            self.scanSource = scanSource
         }
 
         /// expected来自当前认证scope；未知格式或跨账号日志必须保留并报错，不能被热写覆盖。
@@ -279,13 +281,16 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
             let exclusions = excludedAlbumIDs ?? []
             let validIncludes = !selectedAlbumIDs.isEmpty && selectedAlbumIDs.allSatisfy { !$0.isEmpty }
                 && Set(selectedAlbumIDs).count == selectedAlbumIDs.count
-            guard [1, 2, 3].contains(version), namespace == expected,
+            let nativeLibrary = version == 4 && scanSource == .nativeLibrary
+            guard [1, 2, 3, 4].contains(version), namespace == expected,
+                  version == 4 ? nativeLibrary : scanSource == nil,
+                  !nativeLibrary || (foregroundAutomaticEnabled != true && backgroundAutomaticEnabled != true && foregroundNetworkRecoveryEnabled != true),
                   foregroundAutomaticEnabled != true || validIncludes,
                   backgroundAutomaticEnabled != true || validIncludes,
                   foregroundNetworkRecoveryEnabled != true || validIncludes,
-                  version == 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
+                  version >= 3 ? rawJPEGVersion == 1 : rawJPEGVersion == nil,
                   exclusions.allSatisfy({ !$0.isEmpty }), Set(exclusions).count == exclusions.count,
-                  version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && validIncludes else { throw PhotoBackupStateError.invalidJournal }
+                  version == 1 ? exclusions.isEmpty : excludedAlbumIDs != nil && (nativeLibrary || validIncludes) else { throw PhotoBackupStateError.invalidJournal }
         }
     }
 
@@ -301,6 +306,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     private(set) var backgroundAutomaticEnabled: Bool?
     /// 独立前台网络恢复同意；旧日志缺省关闭，不借原自动开关扩大对失败项的操作范围。
     private(set) var foregroundNetworkRecoveryEnabled: Bool?
+    private(set) var scanSource: PhotoBackupScanSource?
 
     /// namespace来自已认证MediaAccountScope；日志仅属于该账号，不使用email或设备相簿名推断身份。
     init(namespace: String) {
@@ -314,6 +320,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         foregroundAutomaticEnabled = nil
         backgroundAutomaticEnabled = nil
         foregroundNetworkRecoveryEnabled = nil
+        scanSource = nil
     }
 
     /// 从独立日志头与按扫描顺序读取的任务重建冷快照；调用方随后验证当前scope及完整集合。
@@ -328,33 +335,34 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         foregroundAutomaticEnabled = header.foregroundAutomaticEnabled
         backgroundAutomaticEnabled = header.backgroundAutomaticEnabled
         foregroundNetworkRecoveryEnabled = header.foregroundNetworkRecoveryEnabled
+        scanSource = header.scanSource
     }
 
     /// 返回不随任务数增长的日志头；选择相簿列表仅在明确扫描时整体更新。
     var header: Header {
         .init(version: version, namespace: namespace, selectedAlbumIDs: selectedAlbumIDs, allowCloud: allowCloud, excludedAlbumIDs: excludedAlbumIDs,
               rawJPEGVersion: rawJPEGVersion, foregroundAutomaticEnabled: foregroundAutomaticEnabled,
-              backgroundAutomaticEnabled: backgroundAutomaticEnabled, foregroundNetworkRecoveryEnabled: foregroundNetworkRecoveryEnabled)
+              backgroundAutomaticEnabled: backgroundAutomaticEnabled, foregroundNetworkRecoveryEnabled: foregroundNetworkRecoveryEnabled, scanSource: scanSource)
     }
 
     /// enabled是用户对当前已保存选择的明确自动化同意；不修改相簿/iCloud草稿，也不恢复任何任务。
     mutating func setForegroundAutomaticEnabled(_ enabled: Bool) throws {
         try validate(namespace: namespace)
-        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        guard !enabled || (scanSource != .nativeLibrary && !selectedAlbumIDs.isEmpty) else { throw PhotoBackupStateError.invalidJournal }
         foregroundAutomaticEnabled = enabled
     }
 
     /// enabled是当前账号对系统后台的独立同意；不改前台开关、相簿范围、iCloud选项或任务状态。
     mutating func setBackgroundAutomaticEnabled(_ enabled: Bool) throws {
         try validate(namespace: namespace)
-        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        guard !enabled || (scanSource != .nativeLibrary && !selectedAlbumIDs.isEmpty) else { throw PhotoBackupStateError.invalidJournal }
         backgroundAutomaticEnabled = enabled
     }
 
     /// enabled为用户独立同意；只改已有账号日志头，不开启前台/后台规则、不修改保存范围或恢复任务。
     mutating func setForegroundNetworkRecoveryEnabled(_ enabled: Bool) throws {
         try validate(namespace: namespace)
-        guard !enabled || !selectedAlbumIDs.isEmpty else { throw PhotoBackupStateError.invalidJournal }
+        guard !enabled || (scanSource != .nativeLibrary && !selectedAlbumIDs.isEmpty) else { throw PhotoBackupStateError.invalidJournal }
         foregroundNetworkRecoveryEnabled = enabled
     }
 
@@ -426,7 +434,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 首次启用排除升级到格式2，让旧版本明确拒绝而非忽略规则后上传；清空规则也不自动降级格式。
     @discardableResult mutating func applyAlbumScan(_ scan: PhotoBackupAlbumScan, allowCloud: Bool) throws -> Int {
         try validate(namespace: namespace)
-        guard !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        guard scanSource != .nativeLibrary, !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
         guard scan.selection.included.union(scan.selection.excluded).allSatisfy({ !$0.isEmpty }) else {
             throw PhotoBackupStateError.invalidJournal
         }
@@ -443,6 +451,52 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         return try enqueue(scan.sources)
     }
 
+    /// A native scan adds only unseen source versions. Existing history, receipts and task stages are preserved exactly.
+    /// v4 is explicit so older readers reject the native scope rather than treating organization albums as backup scope.
+    @discardableResult mutating func applyLibraryScan(_ scan: PhotoBackupLibraryScan, allowCloud: Bool) throws -> Int {
+        try validate(namespace: namespace)
+        guard !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        let existing = Set(jobs.map(\.source))
+        version = 4; rawJPEGVersion = 1; scanSource = .nativeLibrary
+        excludedAlbumIDs = excludedAlbumIDs ?? []
+        self.allowCloud = allowCloud
+        foregroundAutomaticEnabled = false; backgroundAutomaticEnabled = false; foregroundNetworkRecoveryEnabled = false
+        let additions = scan.sources.filter { !existing.contains($0) }
+        jobs.append(contentsOf: additions.map { PhotoBackupJob(source: $0) })
+        try validate(namespace: namespace)
+        return additions.count
+    }
+
+    /// Organization selection is configuration only in native mode; it never narrows the backup inventory or changes tasks.
+    mutating func saveOrganizationSelection(included: Set<String>, excluded: Set<String>) throws {
+        try validate(namespace: namespace)
+        guard scanSource == .nativeLibrary, included.union(excluded).allSatisfy({ !$0.isEmpty }),
+              !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        selectedAlbumIDs = included.sorted(); excludedAlbumIDs = excluded.sorted()
+        try validate(namespace: namespace)
+    }
+
+    /// User-triggered execution rechecks the native current inventory. Historical states are not changed by scanning alone.
+    mutating func resumeLibraryForVerification(_ scan: PhotoBackupLibraryScan, only id: UUID? = nil, unattemptedOnly: Bool = false) throws {
+        try validate(namespace: namespace)
+        guard scanSource == .nativeLibrary, !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
+        let current = Set(scan.sources), safeIDs = PhotoBackupUnattemptedSummary(jobs: jobs).eligibleJobIDs
+        if let id {
+            guard jobs.contains(where: { $0.id == id && current.contains($0.source) && [.queued, .paused, .failed].contains($0.stage) }) else { throw PhotoBackupStateError.invalidTransition }
+        }
+        for index in jobs.indices {
+            let job = jobs[index]
+            if current.contains(job.source), id == nil || job.id == id, [.queued, .paused, .failed].contains(job.stage),
+               !unattemptedOnly || safeIDs.contains(job.id)
+            {
+                jobs[index].queueForVerification()
+            } else if job.stage == .queued {
+                // A queued historical source not in today's native inventory cannot be exported by this run.
+                jobs[index].pause()
+            }
+        }
+    }
+
     /// expected为当前认证账号namespace；拒绝跨账号、未知版本或重复任务ID的日志，不静默清空。
     func validate(namespace expected: String) throws {
         try header.validate(namespace: expected)
@@ -450,7 +504,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
               Set(jobs.map(\.source)).count == jobs.count else { throw PhotoBackupStateError.invalidJournal }
         for job in jobs {
             try job.validate()
-            guard version == 3 || job.source.kind != .rawJPEG else { throw PhotoBackupStateError.invalidJournal }
+            guard version >= 3 || job.source.kind != .rawJPEG else { throw PhotoBackupStateError.invalidJournal }
         }
     }
 
@@ -458,11 +512,12 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 返回本次新建/重排任务数；旧版本未完成任务取消，避免把不同版本资源拼成Live Photo。
     @discardableResult mutating func enqueue(_ sources: [PhotoBackupSource]) throws -> Int {
         try validate(namespace: namespace)
+        guard scanSource != .nativeLibrary else { throw PhotoBackupStateError.invalidTransition }
         let groups = Dictionary(grouping: sources, by: \.localID)
         guard groups.allSatisfy({ !$0.key.isEmpty && Set($0.value).count == 1 }) else { throw PhotoBackupStateError.invalidJournal }
         // 包含双原图的明确扫描原子升级格式；旧读取器必须先拒绝header，不能漏掉JPEG后继续上传。
         if sources.contains(where: { $0.kind == .rawJPEG }) {
-            version = 3; rawJPEGVersion = 1; excludedAlbumIDs = excludedAlbumIDs ?? []
+            version = max(version, 3); rawJPEGVersion = 1; excludedAlbumIDs = excludedAlbumIDs ?? []
         }
         var indexesByLocalID: [String: [Int]] = [:]
         var indexBySource: [PhotoBackupSource: Int] = [:]
@@ -499,6 +554,7 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// id为nil时明确恢复可重试项；指定id时只运行这一项，其他queued暂停，避免单项重试隐式启动整队。
     /// 单次线性转换供显式恢复使用，不进入逐项上传热循环；完成/取消历史保持不动。
     mutating func resumeForVerification(only id: UUID? = nil) throws {
+        guard scanSource != .nativeLibrary else { throw PhotoBackupStateError.invalidTransition }
         if let id {
             guard jobs.contains(where: { $0.id == id && [.queued, .paused, .failed].contains($0.stage) }) else {
                 throw PhotoBackupStateError.invalidTransition
@@ -519,7 +575,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     /// 返回实际排队数；失败/取消/完成及已尝试暂停保持原样，不再属于当前源快照的安全项仅取消本地任务。
     @discardableResult mutating func resumeUnattempted(_ scan: PhotoBackupAlbumScan) throws -> Int {
         try validate(namespace: namespace)
-        guard !jobs.contains(where: \.stage.isInFlight), Set(selectedAlbumIDs) == scan.selection.included,
+        guard scanSource != .nativeLibrary,
+              !jobs.contains(where: \.stage.isInFlight), Set(selectedAlbumIDs) == scan.selection.included,
               Set(excludedAlbumIDs ?? []) == scan.selection.excluded else { throw PhotoBackupStateError.invalidTransition }
         let summary = PhotoBackupUnattemptedSummary(jobs: jobs)
         let current = Set(scan.sources)

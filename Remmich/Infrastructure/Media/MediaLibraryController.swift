@@ -178,7 +178,7 @@ final class MediaLibraryController {
 
     private var session: AccountSession?
     let management = LibraryManagementController()
-    let photoBackups = PhotoBackupController()
+    let photoBackups = PhotoBackupController.production()
     /// 页面和自动驱动持有同一组织Controller，避免关闭页面后丢失前台自动化或另造成员队列。
     @ObservationIgnored lazy var photoBackupAlbumSync = PhotoBackupAlbumSyncController(matching: localMediaMatches)
     @ObservationIgnored lazy var photoBackupAlbumAutomation = PhotoBackupAlbumAutomation(sync: photoBackupAlbumSync, backup: photoBackups, matching: localMediaMatches)
@@ -227,7 +227,7 @@ final class MediaLibraryController {
     {
         self.imageDataLoader = imageDataLoader
         self.exports = exports ?? MediaExportController()
-        self.localMediaMatches = localMediaMatches ?? LocalMediaMatchController()
+        self.localMediaMatches = localMediaMatches ?? LocalMediaMatchController.production()
         self.localPhotoReader = localPhotoReader
         self.localLivePhotoReader = localLivePhotoReader
         localLivePhotoRemote = remote
@@ -247,7 +247,7 @@ final class MediaLibraryController {
     init(savedPhotosLibrary: SavedPhotosLibrary, scope: MediaAccountScope) {
         self.savedPhotosLibrary = savedPhotosLibrary
         self.scope = scope
-        localMediaMatches = LocalMediaMatchController()
+        localMediaMatches = LocalMediaMatchController.production()
         localPhotoReader = PhotoKitLocalPhotoMediaReader()
         localLivePhotoReader = PhotoKitLocalLivePhotoMediaReader()
         localLivePhotoRemote = nil
@@ -401,6 +401,17 @@ final class MediaLibraryController {
         useSavedPhotos: Bool = true,
         useLocalPhotos: Bool = true
     ) -> ImageRequest? {
+        makeImageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos,
+                         useLocalPhotos: useLocalPhotos, bypassConfirmedPhotoPolicy: false)
+    }
+
+    /// Only the guarded preferred-source reader may create an explicit Immich fallback.
+    private func makeImageRequest(for descriptor: MediaRequestDescriptor, priority: ImageRequest.Priority,
+                                  useSavedPhotos: Bool, useLocalPhotos: Bool,
+                                  bypassConfirmedPhotoPolicy: Bool) -> ImageRequest?
+    {
+        let preferPhotos = useLocalPhotos || (!bypassConfirmedPhotoPolicy
+            && localMediaMatches.requiresConfirmedPhotoSource && descriptor.derivative != .original)
         if useLocalPhotos {
             recordMediaRequestFactoryCall(for: descriptor)
         }
@@ -444,7 +455,7 @@ final class MediaLibraryController {
                 return request
             }
         #endif
-        if useLocalPhotos, let local = localPhotoImageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos) {
+        if preferPhotos, let local = localPhotoImageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos) {
             return local
         }
         var trace: TimelineContentTrace?
@@ -536,11 +547,13 @@ final class MediaLibraryController {
                                         useSavedPhotos: Bool, viewerOriginal: Bool = false) -> ImageRequest?
     {
         guard [.thumbnail, .preview, .fullSize].contains(descriptor.derivative) || (viewerOriginal && descriptor.derivative == .original), let scope, let pipeline,
-              localMediaMatches.enabled else { return nil }
+              localMediaMatches.enabled || localMediaMatches.requiresConfirmedPhotoSource else { return nil }
         let association = localMediaMatches.association(assetID: descriptor.assetID, revision: descriptor.updatedAt)
-        guard association != nil || (priority != .low && management.client != nil) else { return nil }
+        guard association != nil || localMediaMatches.requiresConfirmedPhotoSource
+            || (priority != .low && management.client != nil) else { return nil }
         let accountGeneration = management.generation
-        let fallback = imageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos, useLocalPhotos: false)
+        let fallback = makeImageRequest(for: descriptor, priority: priority, useSavedPhotos: useSavedPhotos,
+                                        useLocalPhotos: false, bypassConfirmedPhotoPolicy: true)
         let fallbackPipeline = photoFallbackPipeline(for: pipeline)
         // 端点代际变化后生成新请求身份，让视图和Nuke重新执行当前上下文，不能合并到已失效的旧读取。
         let localKey = association.map { "\($0.localIdentity.localIdentifier)|\($0.localIdentity.modificationDate?.timeIntervalSinceReferenceDate ?? 0)" } ?? "resolve-visible"
@@ -593,6 +606,10 @@ final class MediaLibraryController {
         if let association {
             return try await readLocalPhotoImage(association, descriptor: descriptor, scope: scope,
                                                  accountGeneration: accountGeneration, fallback: fallback, pipeline: pipeline)
+        }
+        if localMediaMatches.requiresConfirmedPhotoSource {
+            recordThumbnailRoute("result.photoSourcePending", descriptor: descriptor)
+            throw LocalPhotoDisplayEvidencePending.photoSourceNotConfirmed
         }
         recordThumbnailRoute("fallback.noAssociation", descriptor: descriptor)
         guard let fallback else { throw URLError(.resourceUnavailable) }
@@ -684,6 +701,10 @@ final class MediaLibraryController {
             recordThumbnailRoute("result.photoKitUnavailableNoImmichFallback", descriptor: descriptor)
             throw URLError(.resourceUnavailable)
         }
+        if localMediaMatches.requiresConfirmedPhotoSource {
+            recordThumbnailRoute("result.photoSourcePending", descriptor: descriptor)
+            throw LocalPhotoDisplayEvidencePending.photoSourceNotConfirmed
+        }
         recordThumbnailRoute("fallback.photosObjectAbsent", descriptor: descriptor)
         guard let fallback else { throw URLError(.resourceUnavailable) }
         let response = try await pipeline.imageTask(with: fallback).response
@@ -719,17 +740,35 @@ final class MediaLibraryController {
     /// assetID/revision为当前普通视频；仅匹配同版Photos current时返回播放器，nil交给既有缓存/远端路径。
     func localPhotoPlayerItem(assetID: String, revision: Date) async throws -> AVPlayerItem? {
         try Task.checkCancellation()
-        guard let scope, let association = localMediaMatches.association(assetID: assetID, revision: revision) else { return nil }
+        guard let scope else { return nil }
         let accountGeneration = management.generation
         let validate: @MainActor () throws -> Void = {
             try self.validateLocalMediaContext(scope: scope, accountGeneration: accountGeneration)
         }
         try validate()
+        let saved = localMediaMatches.association(assetID: assetID, revision: revision)
+        let association: LocalMediaAssociation? = if let saved {
+            saved
+        } else if localMediaMatches.requiresConfirmedPhotoSource {
+            try await localMediaMatches.resolveDisplayAssociation(assetID: assetID, revision: revision, using: management)
+        } else {
+            nil
+        }
+        try validate()
+        guard let association else {
+            if localMediaMatches.requiresConfirmedPhotoSource {
+                throw LocalPhotoDisplayEvidencePending.photoSourceNotConfirmed
+            }
+            return nil
+        }
         let localObject = try localPhotoReader.currentIdentity(for: association.localIdentity, validateContext: validate)
         let item = try await localPhotoReader.playerItem(for: association.localIdentity, validateContext: validate)
         try validate()
         if localObject != nil, item == nil {
             throw URLError(.resourceUnavailable)
+        }
+        if item == nil, localMediaMatches.requiresConfirmedPhotoSource {
+            throw LocalPhotoDisplayEvidencePending.photoSourceNotConfirmed
         }
         guard localMediaMatches.association(assetID: assetID, revision: revision) == association else { return nil }
         if item != nil {
@@ -1537,6 +1576,7 @@ final class MediaLibraryController {
     }
 
     func handleBackgroundTransition() {
+        localMediaMatches.suspendFullLibraryMatching()
         localMediaMatches.pauseCompletedAssociationRecovery()
         photoBackups.automaticConditionsChanged(using: management, scope: scope, active: false)
         photoBackupAlbumAutomation.conditionsChanged(using: management, scope: scope, active: false)
@@ -1551,6 +1591,7 @@ final class MediaLibraryController {
     func handleForegroundTransition() {
         localMediaMatches.resumeCompletedAssociationRecovery()
         localMediaMatches.restoreAndRefresh(using: management, scope: scope)
+        localMediaMatches.resumeFullLibraryMatching(using: management, userInitiated: false)
         guard let targetPixels = lastTimelineTargetPixels else { return }
         Self.logger.info("App foregrounded; rebuilding timeline residency")
         updateTimelineResidency(lastTimelinePlan, targetPixels: targetPixels)

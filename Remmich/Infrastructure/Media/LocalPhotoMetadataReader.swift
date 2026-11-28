@@ -65,7 +65,10 @@ import Photos
     private static func readAssets(_ ids: [String]) throws -> [LocalPhotoSnapshot] {
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { throw LocalMediaMetadataError.permission }
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: LocalPhotoExplicitAssetQuery.options())
+        #if DEBUG
+            LocalPhotoExplicitAssetQuery.recordBurstCoverage(ids: ids, assets: assets)
+        #endif
         var snapshots: [LocalPhotoSnapshot] = []
         for index in 0 ..< assets.count {
             try Task.checkCancellation()
@@ -115,6 +118,48 @@ import Photos
         }
         return lhs.pixelHeight < rhs.pixelHeight
     }
+}
+
+/// Explicit identifiers already come from the caller's authorized scope. Keep non-representative
+/// burst members visible when an all-assets inventory has explicitly requested those identifiers.
+@MainActor enum LocalPhotoExplicitAssetQuery {
+    nonisolated static func options() -> PHFetchOptions {
+        let options = PHFetchOptions()
+        options.includeHiddenAssets = true
+        options.includeAllBurstAssets = true
+        return options
+    }
+
+    #if DEBUG
+        private nonisolated struct Coverage: Codable {
+            let session: UUID
+            var burstBatchReads = 0
+            var requestedInBurstBatches = 0
+            var returnedWithExplicitOptions = 0
+            var returnedWithDefaultOptions = 0
+            var additionalObjects = 0
+        }
+
+        private static var coverage = Coverage(session: UUID())
+        private static var lastSave = ContinuousClock.now
+
+        /// Anonymous read-attempt counts only. No IDs, filenames, dates or media contents are saved.
+        static func recordBurstCoverage(ids: [String], assets: PHFetchResult<PHAsset>) {
+            guard (0 ..< assets.count).contains(where: { assets.object(at: $0).burstIdentifier != nil }) else { return }
+            let defaultCount = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).count
+            coverage.burstBatchReads += 1
+            coverage.requestedInBurstBatches += ids.count
+            coverage.returnedWithExplicitOptions += assets.count
+            coverage.returnedWithDefaultOptions += defaultCount
+            coverage.additionalObjects += max(0, assets.count - defaultCount)
+            guard coverage.burstBatchReads == 1 || lastSave.duration(to: .now) >= .seconds(1) else { return }
+            lastSave = .now
+            guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+                  let data = try? JSONEncoder().encode(coverage) else { return }
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? data.write(to: directory.appendingPathComponent("photokit-explicit-fetch-coverage.json"), options: .atomic)
+        }
+    #endif
 }
 
 /// 同步映射可能昂贵，在并发执行器上只处理有限ID并返回Sendable值；不让PHAsset/PHCloudIdentifier跨Actor传递。

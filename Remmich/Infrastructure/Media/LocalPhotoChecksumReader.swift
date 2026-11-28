@@ -75,7 +75,7 @@ import UniformTypeIdentifiers
 
     /// id为已观察的本机标识；只获取公开元数据和资源描述，无云映射、媒体下载或系统私有字段。
     private static func readSource(_ id: String) throws -> LocalPhotoChecksumAsset? {
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject, asset.mediaType == .image || asset.mediaType == .video else { return nil }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: LocalPhotoExplicitAssetQuery.options()).firstObject, asset.mediaType == .image || asset.mediaType == .video else { return nil }
         let resources = PHAssetResource.assetResources(for: asset).map(describe).sorted(by: precedes)
         let kind: LocalPhotoIdentity.MediaKind = asset.mediaType == .video ? .video : asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .image
         let snapshot = LocalPhotoSnapshot(identity: .init(localIdentifier: asset.localIdentifier, modificationDate: asset.modificationDate, mediaKind: kind),
@@ -90,7 +90,7 @@ import UniformTypeIdentifiers
     /// 完整源与paired描述的前后比较由checksum执行；不从still证明跳到forVideo或motion读取。
     private static func readBytes(_ identity: LocalPhotoIdentity, _ resource: LocalPhotoChecksumResource) async throws -> LocalPhotoByteDigest {
         try Task.checkCancellation()
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identity.localIdentifier], options: nil).firstObject,
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identity.localIdentifier], options: LocalPhotoExplicitAssetQuery.options()).firstObject,
               asset.modificationDate == identity.modificationDate, !asset.hasAdjustments,
               identity.mediaKind != .livePhoto || (asset.adjustmentTimestamp == nil && resource.descriptor.role == .originalPhoto && resource.format == .image)
         else { throw LocalPhotoChecksumError.sourceChanged }

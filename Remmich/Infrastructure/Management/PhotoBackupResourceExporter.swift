@@ -65,7 +65,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
         }
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { throw PhotoBackupExportError(reason: .permission) }
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject else {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: LocalPhotoExplicitAssetQuery.options()).firstObject else {
             throw PhotoBackupExportError(reason: .sourceMissing)
         }
         try validate(asset, against: source)
@@ -87,7 +87,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
             }
             try Task.checkCancellation()
             // iCloud读取期间可能在其他应用编辑/删除资源；不能将两个不同版本拼成一个备份。
-            guard let current = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject else {
+            guard let current = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: LocalPhotoExplicitAssetQuery.options()).firstObject else {
                 throw PhotoBackupExportError(reason: .sourceMissing)
             }
             try validate(current, against: source)
@@ -195,7 +195,7 @@ nonisolated struct PhotoBackupExportError: Error, Sendable {
         try Task.checkCancellation()
         let permission = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard permission == .authorized || permission == .limited else { throw PhotoBackupExportError(reason: .permission) }
-        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: nil).firstObject else {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [source.localID], options: LocalPhotoExplicitAssetQuery.options()).firstObject else {
             throw PhotoBackupExportError(reason: .sourceMissing)
         }
         guard let modified = source.modifiedAt, modified.timeIntervalSince1970.isFinite,
