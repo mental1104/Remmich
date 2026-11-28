@@ -5,6 +5,7 @@
 "Scan Library" = "Scan Library";
 "Back Up Originals" = "Back Up Originals";
 "Library Sync" = "Library Sync";
+"iCloud 原片读取暂不可用，正在自动重试；进度已保留，可随时暂停。" = "iCloud originals are temporarily unavailable. Retrying with saved progress; you can pause at any time.";
 "Sync Library" = "Sync Library";
 "Scan Library First" = "Scan Library First";
 "Continue Unattempted Backups?" = "Continue Unattempted Backups?";

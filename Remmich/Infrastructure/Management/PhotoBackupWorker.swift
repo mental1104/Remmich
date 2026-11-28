@@ -101,6 +101,14 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                         try await uploadImages(&job, resources: resources, scope: scope, userID: userID, client: client,
                                                metadata: preflight?.uploadMetadata[job.source], validateContext: validateContext)
                     } else {
+                        // 普通原片的字节证明独立于可选云身份；不能因缺cloudID/creationDate跳过fresh校验。
+                        let originalChecksum: String?
+                        if job.source.kind == .photo || job.source.kind == .video {
+                            originalChecksum = try await Self.originalChecksum(resources.primary.file)
+                            try checkContext(validateContext)
+                        } else {
+                            originalChecksum = nil
+                        }
                         if let motion = resources.motion {
                             let receipt = try await client.upload(file: motion.file, filename: motion.name, created: resources.created,
                                                                   modified: resources.modified, favorite: false, hidden: true, livePhotoVideoID: nil)
@@ -118,7 +126,7 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                         guard let primaryID = UUID(uuidString: primary.id), ["created", "duplicate"].contains(primary.status) else {
                             throw LibraryWriteError.malformedResponse
                         }
-                        try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate", checksum: primary.checksum)
+                        try job.recordPrimary(primaryID, duplicate: primary.status == "duplicate", checksum: originalChecksum ?? primary.checksum)
                         try await checkpoint(job, scope: scope, validateContext: validateContext)
                         // created与duplicate都回读真实主体；部分Live Photo回执永远不能替代最终配对核对。
                         let confirmed = try await client.asset(primaryID.uuidString)
@@ -127,6 +135,11 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                               confirmed.type == (job.source.kind == .video ? "VIDEO" : "IMAGE")
                         else {
                             throw LibraryWriteError.malformedResponse
+                        }
+                        if let originalChecksum {
+                            guard confirmed.checksum == originalChecksum, confirmed.isOffline == false else {
+                                throw LibraryWriteError.malformedResponse
+                            }
                         }
                         if job.source.kind == .livePhoto {
                             guard let motionID = job.motionAssetID,
@@ -146,7 +159,7 @@ nonisolated struct PhotoBackupRunResult: Sendable {
                         }
                         if let metadata = preflight?.uploadMetadata[job.source] {
                             // 保存来源前必须确认这份实际摘要仍属于当前资产；只有ID回执不能生成byteVerified=true。
-                            guard let checksum = primary.checksum, confirmed.checksum == checksum, confirmed.isOffline == false else {
+                            guard let checksum = originalChecksum ?? primary.checksum, confirmed.checksum == checksum, confirmed.isOffline == false else {
                                 throw LibraryWriteError.malformedResponse
                             }
                             try await client.recordBackupOrigin(assetID: primaryID, origin: PhotoBackupOrigin(metadata: metadata, checksum: checksum))

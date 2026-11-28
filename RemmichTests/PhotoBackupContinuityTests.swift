@@ -353,6 +353,191 @@ struct PhotoBackupServerMatchingTests {
         }
     }
 
+    /// marker-only证据由新Store提供；同一远端的本机别名分别跳过，不生成字节回执或强关联。
+    @Test @MainActor func displayAliasesSkipOriginalsWithoutCreatingByteProof() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let snapshots = [continuitySnapshot("alias-one", created: 200, cloud: true), continuitySnapshot("alias-two", created: 200, cloud: true)]
+        for value in snapshots {
+            photos.values[value.identity.localIdentifier] = value
+        }
+        let hints = snapshots.map { continuityDisplayAlias($0, remoteID: remoteID) }
+        client.assets[remoteID.uuidString] = continuityAliasRemote(remoteID)
+        let sources = snapshots.map { continuitySource($0.identity.localIdentifier, modified: 200) }
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue(sources); try await store.savePhotoBackups(journal, scope: scope)
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, serverFirst: true, verifiedCheckpoint: { jobs, associations in
+            #expect(associations.isEmpty)
+            try await store.checkpointPhotoBackupMatches(jobs, scope: scope, associations: associations)
+        }, displayAliases: { ids, requestedScope in
+            #expect(ids.count <= 64 && requestedScope == scope)
+            return hints.filter { ids.contains($0.work.localID) }
+        })
+        let plan = try await checker.plan(jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.existing == Set(sources) && plan.checkpointedExisting == Set(sources) && plan.allowed.isEmpty && plan.review.isEmpty)
+        #expect(plan.uploadMetadata.isEmpty && client.savedMatches.isEmpty && client.assetReads.count == 2)
+        let exporter = ContinuityNoExport()
+        let result = try await PhotoBackupWorker(store: store, exporter: exporter).run(
+            scope: scope, userID: scope.userID, allowCloud: true, client: ContinuityNoUpload(), preflight: plan,
+            validateContext: {}, progress: { _, _ in }
+        )
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        let strong = try await store.loadPhotoSyncAssociations(scope: scope)
+        #expect(exporter.calls == 0 && result.skipped == 2 && result.completed == 0 && strong.isEmpty)
+        #expect(cold.jobs.allSatisfy { $0.stage == .existing && $0.attempts == 0 && $0.primaryAssetID == nil && $0.primaryChecksum == nil })
+    }
+
+    /// 单个展示alias不能新增Live/RAW快速跳过，组合资源继续旧预检而不提交alias纯任务断点。
+    @Test(arguments: [PhotoBackupSource.Kind.livePhoto, .rawJPEG])
+    @MainActor func compoundDisplayAliasFallsBackToDedicatedPreflight(_ kind: PhotoBackupSource.Kind) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let snapshot = continuitySnapshot("compound-alias", created: 200, cloud: true, mediaKind: kind == .livePhoto ? .livePhoto : .image)
+        let hint = continuityDisplayAlias(snapshot, remoteID: remoteID)
+        photos.values["compound-alias"] = snapshot; client.assets[remoteID.uuidString] = continuityAliasRemote(remoteID)
+        let pair: PhotoBackupRawJPEGSource? = if kind == .rawJPEG {
+            try PhotoBackupRawJPEGSource(originals: [
+                .init(kind: .alternatePhoto, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 10, pixelHeight: 10),
+                .init(kind: .photo, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 10, pixelHeight: 10),
+            ], hasAdjustments: false, adjustmentTime: nil)
+        } else {
+            nil
+        }
+        let source = PhotoBackupSource(localID: "compound-alias", modifiedAt: snapshot.identity.modificationDate, kind: kind, rawJPEG: pair)
+        var checkpoints = 0
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                   verifiedCheckpoint: { _, _ in checkpoints += 1 }, displayAliases: { _, _ in [hint] })
+        let plan = try await checker.plan(jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.existing.isEmpty && plan.checkpointedExisting.isEmpty && checkpoints == 0)
+        #expect(plan.allowed.union(plan.review) == [source] && client.assetReads.isEmpty && client.savedMatches.isEmpty)
+    }
+
+    /// 本机CloudID或元数据指纹已变时，保存的alias不能替当前原生源授予跳过。
+    @Test(arguments: ["cloud", "fingerprint", "source-kind"])
+    @MainActor func changedNativeIdentityCannotReuseDisplayAlias(_ change: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let original = continuitySnapshot("alias-current", created: 200, cloud: true)
+        let hint = continuityDisplayAlias(original, remoteID: remoteID)
+        photos.values["alias-current"] = change == "cloud" ? original.withCloudIdentity(.resolved("cloud-current-replaced")) : original
+        let evidence = change == "fingerprint" ? PhotoBackupDisplayAliasEvidence(association: hint.association,
+                                                                                 work: .init(localID: hint.work.localID, cloudID: hint.work.cloudID, identityVersion: "stale", evidenceHash: hint.work.evidenceHash, result: .matched, reason: .matched)) : hint
+        let source = PhotoBackupSource(localID: "alias-current", modifiedAt: original.identity.modificationDate, kind: change == "source-kind" ? .video : .photo)
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                   displayAliases: { _, _ in [evidence] })
+        let plan = try await checker.plan(jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.existing.isEmpty && plan.checkpointedExisting.isEmpty && client.assetReads.isEmpty)
+        if change == "source-kind" {
+            #expect(plan.review == [source])
+        } else {
+            #expect(plan.allowed == [source])
+        }
+    }
+
+    /// 有本机证据但fresh资产被拒绝必须独立review，不能回退为无metadata并读取原片。
+    @Test(arguments: ["owner", "type", "trashed", "offline", "unknown-offline", "checksum", "id", "inaccessible"])
+    @MainActor func rejectedDisplayAliasNeverBecomesOriginalPermission(_ fault: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let snapshot = continuitySnapshot("alias-rejected", created: 200, cloud: true)
+        let hint = continuityDisplayAlias(snapshot, remoteID: remoteID)
+        photos.values["alias-rejected"] = snapshot
+        if fault != "inaccessible" {
+            client.assets[remoteID.uuidString] = .init(id: fault == "id" ? UUID() : remoteID,
+                                                       ownerId: fault == "owner" ? UUID() : UUID(uuidString: continuityScope().userID)!, type: fault == "type" ? "VIDEO" : "IMAGE",
+                                                       isTrashed: fault == "trashed", isOffline: fault == "unknown-offline" ? nil : fault == "offline", isEdited: false,
+                                                       checksum: fault == "checksum" ? Data(repeating: 2, count: 20).base64EncodedString() : continuityChecksum,
+                                                       updatedAt: Date(timeIntervalSince1970: 300))
+        }
+        let source = continuitySource("alias-rejected", modified: 200)
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                   displayAliases: { _, _ in [hint] })
+        let plan = try await checker.plan(jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.review == [source] && plan.existing.isEmpty && plan.allowed.isEmpty && plan.checkpointedExisting.isEmpty)
+        #expect(client.assetReads.count == 1 && client.savedMatches.isEmpty)
+    }
+
+    /// GET期间发生Photos变化、取消或账号退役，都不能提交本批alias断点。
+    @Test(arguments: ["source", "cancel", "account"])
+    @MainActor func displayAliasCheckpointRejectsLateNativeOrAccountChange(_ change: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let snapshot = continuitySnapshot("alias-safe", created: 200, cloud: true), source = continuitySource("alias-safe", modified: 200)
+        let hint = continuityDisplayAlias(snapshot, remoteID: remoteID)
+        photos.values["alias-safe"] = snapshot; client.assets[remoteID.uuidString] = continuityAliasRemote(remoteID)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue([source]); try await store.savePhotoBackups(journal, scope: scope)
+        var current = true
+        client.onAsset = {
+            if change == "source" {
+                photos.values["alias-safe"] = snapshot.withCloudIdentity(.resolved("cloud-replaced"))
+            } else {
+                current = false
+            }
+        }
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, verifiedCheckpoint: { jobs, associations in
+            try await store.checkpointPhotoBackupMatches(jobs, scope: scope, associations: associations)
+        }, displayAliases: { _, _ in [hint] })
+        await #expect(throws: (any Error).self) {
+            try await checker.plan(jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {
+                if !current {
+                    if change == "cancel" {
+                        throw CancellationError()
+                    }; throw LibraryWriteError.changedAccount
+                }
+            })
+        }
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        let strong = try await store.loadPhotoSyncAssociations(scope: scope)
+        #expect(cold.jobs.allSatisfy { $0.stage == .queued && $0.attempts == 0 } && strong.isEmpty && client.savedMatches.isEmpty)
+    }
+
+    /// 第二次Photos快照仍相同，但当前别名已撤销时，不能用首次hint提交纯任务existing。
+    @Test @MainActor func displayAliasWithdrawalAfterPhotosRecheckRejectsCheckpoint() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scope = continuityScope(), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        try await store.prepare(scope: scope)
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), remoteID = UUID()
+        let snapshot = continuitySnapshot("alias-withdrawn", created: 200, cloud: true), source = continuitySource("alias-withdrawn", modified: 200)
+        let provider = ContinuityWithdrawnAliasProvider(continuityDisplayAlias(snapshot, remoteID: remoteID))
+        photos.values[source.localID] = snapshot; client.assets[remoteID.uuidString] = continuityAliasRemote(remoteID)
+        var journal = PhotoBackupJournal(namespace: scope.cacheNamespace)
+        try journal.enqueue([source]); try await store.savePhotoBackups(journal, scope: scope)
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, verifiedCheckpoint: { jobs, associations in
+            try await store.checkpointPhotoBackupMatches(jobs, scope: scope, associations: associations)
+        }, displayAliases: { ids, _ in provider.read(ids) })
+        await #expect(throws: LocalMediaMetadataError.sourceChanged) {
+            try await checker.plan(jobs: journal.jobs, scope: scope, client: client, progress: { _, _ in }, validateContext: {})
+        }
+        let cold = try await store.loadPhotoBackups(scope: scope)
+        let strong = try await store.loadPhotoSyncAssociations(scope: scope)
+        #expect(provider.reads == 2 && photos.reads == 2 && client.assetReads.count == 1)
+        #expect(cold.jobs.allSatisfy { $0.stage == .queued && $0.attempts == 0 } && strong.isEmpty && client.savedMatches.isEmpty)
+    }
+
+    /// alias提供器完整返回空时，新源仍进入既有SHA1查重通路，不能被永久needsReview挡住。
+    @Test @MainActor func missingDisplayAliasStillAllowsOriginalChecksum() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), source = continuitySource("alias-missing", modified: 200)
+        photos.values[source.localID] = continuitySnapshot(source.localID, created: 200, cloud: true)
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                   displayAliases: { _, _ in [] })
+        let plan = try await checker.plan(jobs: [.init(source: source)], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.allowed == [source] && plan.review.isEmpty && plan.existing.isEmpty && client.assetReads.isEmpty)
+        #expect(plan.uploadMetadata[source]?.cloudId == "cloud-alias-missing")
+    }
+
     /// 无导入新照片可按原片查重；没有云ID也可备份，只有可解析的公开元组会附加来源上报。
     @Test(arguments: [LocalPhotoCloudIdentity.resolved("cloud-fresh"), .unavailable, .incomplete, .failed])
     @MainActor func admitsUnmatchedSourcesForOriginalChecksum(_ cloud: LocalPhotoCloudIdentity) async throws {
@@ -756,6 +941,38 @@ private nonisolated func continuityScope(other: Bool = false) -> MediaAccountSco
 /// 合成规范SHA1，不对应任何私人媒体。
 private nonisolated var continuityChecksum: String {
     Data(repeating: 1, count: 20).base64EncodedString()
+}
+
+/// 第一次原子读取有效，Photos二次核验后的提交前读取已撤销；状态只属于本例MainActor。
+@MainActor private final class ContinuityWithdrawnAliasProvider {
+    private let hint: PhotoBackupDisplayAliasEvidence
+    private(set) var reads = 0
+    init(_ hint: PhotoBackupDisplayAliasEvidence) {
+        self.hint = hint
+    }
+
+    func read(_ ids: [String]) -> [PhotoBackupDisplayAliasEvidence] {
+        reads += 1
+        return reads == 1 && ids == [hint.work.localID] ? [hint] : []
+    }
+}
+
+/// 合成当前别名及逐项工作证明；不读取真实Photos或服务器元数据。
+private nonisolated func continuityDisplayAlias(_ snapshot: LocalPhotoSnapshot, remoteID: UUID) -> PhotoBackupDisplayAliasEvidence {
+    let cloud: String? = if case let .resolved(value) = snapshot.cloudIdentity {
+        value
+    } else {
+        nil
+    }
+    return .init(association: .init(remoteID: remoteID, remoteRevision: Date(timeIntervalSince1970: 300), localIdentity: snapshot.identity,
+                                    checksum: continuityChecksum, source: .exactCloudIdentity),
+                 work: .init(localID: snapshot.identity.localIdentifier, cloudID: cloud, identityVersion: LocalPhotoDisplayReconciler.identityVersion(snapshot),
+                             evidenceHash: "synthetic-current-evidence", result: .matched, reason: .matched))
+}
+
+private nonisolated func continuityAliasRemote(_ id: UUID) -> LocalMediaRemoteAsset {
+    .init(id: id, ownerId: UUID(uuidString: continuityScope().userID)!, type: "IMAGE", isTrashed: false, isOffline: false,
+          isEdited: false, checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
 }
 
 /// id为合成Photos身份，modified单位为Unix秒；默认对应官方缓存10秒版本。

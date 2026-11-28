@@ -733,7 +733,7 @@ nonisolated enum LocalPhotoDisplayReconcilerState: String, Sendable {
               reason: reason)
     }
 
-    private nonisolated static func identityVersion(_ snapshot: LocalPhotoSnapshot) -> String {
+    nonisolated static func identityVersion(_ snapshot: LocalPhotoSnapshot) -> String {
         let value: [String: Any] = ["localID": snapshot.identity.localIdentifier,
                                     "modified": snapshot.identity.modificationDate?.timeIntervalSinceReferenceDate.bitPattern.description ?? "unknown",
                                     "kind": String(describing: snapshot.identity.mediaKind), "cloudID": cloudID(snapshot) ?? "unknown",

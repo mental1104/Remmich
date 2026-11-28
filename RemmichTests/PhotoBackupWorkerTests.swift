@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import Remmich
@@ -108,6 +109,34 @@ struct PhotoBackupWorkerTests {
         #expect(await transport.primaryPair == nil)
     }
 
+    /// 缺CloudID/creationDate不能构造uploadMetadata；实际导出字节与fresh在线状态仍是完成门禁。
+    @Test(arguments: [PhotoBackupSource.Kind.photo, .video],
+          [BackupPrimaryResponse.valid, .wrongChecksum, .offline, .missingChecksum, .unknownOffline])
+    @MainActor func verifiesOriginalBytesWithoutCloudMetadata(_ kind: PhotoBackupSource.Kind, _ response: BackupPrimaryResponse) async throws {
+        let fixture = try await BackupWorkerFixture(kind: kind)
+        defer { fixture.removeFiles() }
+        let queued = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+        let source = try #require(queued.jobs.first?.source)
+        let plan = PhotoBackupPreflightPlan(allowed: [source], existing: [], review: [])
+        #expect(source.modifiedAt == nil && plan.uploadMetadata.isEmpty)
+        // 伪回执与fresh响应可彼此一致但不等于实际文件，不能用二者自洽替代本地字节证明。
+        let transport = fixture.transport(checksum: response == .wrongChecksum ? Data(repeating: 9, count: 20).base64EncodedString() : nil,
+                                          primaryResponse: response)
+        let result = try await fixture.worker.run(scope: fixture.scope, userID: "synthetic", allowCloud: false,
+                                                  client: transport, preflight: plan, validateContext: {}, progress: { _, _ in })
+        let restored = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+        let succeeds = response == .valid
+        #expect(result.completed == (succeeds ? 1 : 0) && result.duplicates == (succeeds ? 1 : 0))
+        #expect(result.failed == (succeeds ? 0 : 1) && result.stopped == !succeeds)
+        #expect(restored.jobs.first?.stage == (succeeds ? .completed : .failed))
+        #expect(restored.jobs.first?.primaryChecksum == Data(Insecure.SHA1.hash(data: Data("synthetic primary".utf8))).base64EncodedString())
+        #expect(restored.jobs.first?.primaryAssetID == fixture.primaryID)
+        #expect(restored.jobs.first?.failure == (succeeds ? nil : .unconfirmedResponse))
+        #expect(await transport.uploads == 1)
+        #expect(await transport.assetReads == [fixture.primaryID.uuidString])
+        #expect(!FileManager.default.fileExists(atPath: fixture.exportDirectory.path))
+    }
+
     /// 账号发布权在上传期间撤销；旧成功既不能落盘，也不能通过暂停清理修改新一轮工作。
     @Test @MainActor func revokedContextRejectsALateSuccess() async throws {
         let fixture = try await BackupWorkerFixture(kind: .photo)
@@ -180,10 +209,12 @@ struct PhotoBackupWorkerTests {
 
     /// 参数选择当前例故障与可选合成checksum；只传Sendable值，不跨Actor传递整个主线程fixture。
     func transport(mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false,
-                   motionResponse: BackupMotionResponse = .valid, checksum: String? = nil) -> BackupWorkerTransport
+                   motionResponse: BackupMotionResponse = .valid, checksum: String? = nil,
+                   primaryResponse: BackupPrimaryResponse = .valid) -> BackupWorkerTransport
     {
         .init(store: store, scope: scope, motionID: motionID, primaryID: primaryID, kind: kind,
-              mismatch: mismatch, networkFailure: networkFailure, held: held, motionResponse: motionResponse, checksum: checksum)
+              mismatch: mismatch, networkFailure: networkFailure, held: held, motionResponse: motionResponse, checksum: checksum,
+              primaryResponse: primaryResponse)
     }
 }
 
@@ -213,6 +244,7 @@ struct PhotoBackupWorkerTests {
 
 /// 动态资源仅在最终GET中改变状态，模拟上传/查重之后的变化，不伪造主体关联或绕过真实worker。
 nonisolated enum BackupMotionResponse: Equatable, Sendable { case valid, archived, trashed, wrongID, wrongType, wrongOwner }
+nonisolated enum BackupPrimaryResponse: Equatable, Sendable { case valid, wrongChecksum, offline, missingChecksum, unknownOffline }
 
 /// 注入上传回执/网络失败和等待门；真实worker、SQLite及状态转换都不替换。
 private actor BackupWorkerTransport: PhotoBackupUploading {
@@ -226,6 +258,7 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
     let kind: PhotoBackupSource.Kind
     let motionResponse: BackupMotionResponse
     let checksum: String?
+    let primaryResponse: BackupPrimaryResponse
     private var gate: CheckedContinuation<Void, Never>?
     private var observers: [CheckedContinuation<Bool, Never>] = []
     private var didHold = false
@@ -238,12 +271,14 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
 
     /// store/scope为隔离数据库，两个ID为合成回执，kind为主体类型；checksum可验证完整透传，其他参数选择故障。
     init(store: SQLiteLibraryIndexStore, scope: MediaAccountScope, motionID: UUID, primaryID: UUID, kind: PhotoBackupSource.Kind,
-         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false, motionResponse: BackupMotionResponse = .valid, checksum: String? = nil)
+         mismatch: Bool = false, networkFailure: Bool = false, held: Bool = false, motionResponse: BackupMotionResponse = .valid,
+         checksum: String? = nil, primaryResponse: BackupPrimaryResponse = .valid)
     {
         self.store = store; self.scope = scope; self.motionID = motionID; self.primaryID = primaryID; self.kind = kind
         self.mismatch = mismatch; self.networkFailure = networkFailure; self.held = held
         self.motionResponse = motionResponse
-        self.checksum = checksum
+        self.checksum = checksum ?? Data(Insecure.SHA1.hash(data: Data("synthetic primary".utf8))).base64EncodedString()
+        self.primaryResponse = primaryResponse
     }
 
     /// 与生产上传签名一致；读取SQLite证明检查点先于网络，按hidden区分动态/主体回执。
@@ -284,7 +319,9 @@ private actor BackupWorkerTransport: PhotoBackupUploading {
         }
         return .init(id: id, ownerId: "synthetic", isFavorite: false, visibility: "timeline", isTrashed: false,
                      type: kind == .video ? "VIDEO" : "IMAGE", originalFileName: "synthetic.jpg",
-                     livePhotoVideoId: kind == .livePhoto ? (mismatch ? UUID() : motionID).uuidString : nil, exifInfo: nil)
+                     livePhotoVideoId: kind == .livePhoto ? (mismatch ? UUID() : motionID).uuidString : nil, exifInfo: nil,
+                     checksum: primaryResponse == .missingChecksum ? nil : primaryResponse == .wrongChecksum ? Data(repeating: 9, count: 20).base64EncodedString() : checksum,
+                     isOffline: primaryResponse == .unknownOffline ? nil : primaryResponse == .offline)
     }
 
     /// 等待真实upload到达门；若已到达立即返回，不用定时sleep猜测调度。

@@ -3,6 +3,7 @@ import OSLog
 
 /// 导出前整批核查；iCloud元数据交集直接跳过，未匹配新源交给既有Worker按原片摘要查重后备份。
 @MainActor struct PhotoBackupContinuityChecker: PhotoBackupPreflighting {
+    typealias DisplayAliasProvider = @MainActor @Sendable ([String], MediaAccountScope) async throws -> [PhotoBackupDisplayAliasEvidence]
     typealias MatchCheckpoint = @MainActor ([PhotoBackupJob]) async throws -> Void
     typealias VerifiedCheckpoint = @MainActor ([PhotoBackupJob], [LocalMediaAssociation]) async throws -> Void
     private let store: SQLiteLibraryIndexStore
@@ -15,6 +16,7 @@ import OSLog
         checkpointMatches != nil || verifiedCheckpoint != nil
     }
 
+    private let displayAliases: DisplayAliasProvider?
     private let serverFirst: Bool
     private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "BackupPreflight")
 
@@ -22,12 +24,14 @@ import OSLog
     init(store: SQLiteLibraryIndexStore, metadata: any LocalPhotoMetadataReading = PhotoKitLocalPhotoMetadataReader(),
          status: @escaping @MainActor (String.LocalizationValue) -> Void = { _ in },
          phaseProgress: @escaping @MainActor (Int, Int) -> Void = { _, _ in },
-         checkpointMatches: MatchCheckpoint? = nil, serverFirst: Bool = false, verifiedCheckpoint: VerifiedCheckpoint? = nil)
+         checkpointMatches: MatchCheckpoint? = nil, serverFirst: Bool = false, verifiedCheckpoint: VerifiedCheckpoint? = nil,
+         displayAliases: DisplayAliasProvider? = nil)
     {
         self.store = store; self.metadata = metadata; self.status = status
         self.phaseProgress = phaseProgress; self.checkpointMatches = checkpointMatches
         self.serverFirst = serverFirst
         self.verifiedCheckpoint = verifiedCheckpoint
+        self.displayAliases = displayAliases
     }
 
     /// jobs只含待执行版本；verificationIDs仅来自明确单项核查或已验证网络恢复，仍不能授权历史源。
@@ -40,6 +44,10 @@ import OSLog
     {
         try check(validateContext)
         Self.logger.info("Preflight started jobs=\(jobs.count)")
+        if let displayAliases {
+            return try await planWithDisplayAliases(jobs: jobs, scope: scope, client: client, verificationIDs: verificationIDs,
+                                                    provider: displayAliases, progress: progress, validateContext: validateContext)
+        }
         guard let history = try await store.loadPhotoBackupHistory(scope: scope) else {
             return try await planFromServer(jobs: jobs, scope: scope, client: client, verificationIDs: verificationIDs,
                                             progress: progress, validateContext: validateContext)
@@ -133,6 +141,110 @@ import OSLog
         try plan.validate(sources: Set(jobs.map(\.source)))
         try check(validateContext)
         return plan
+    }
+
+    /// 保存的展示别名只授予existing：当前Photos身份和fresh远端均重核，绝不写入字节证明表。
+    /// 没有可复用本机身份的任务仍走原预检；已知身份的远端拒绝独立review，不能误当无映射上传。
+    private func planWithDisplayAliases(jobs: [PhotoBackupJob], scope: MediaAccountScope, client: any PhotoBackupContinuityQuerying,
+                                        verificationIDs: Set<UUID>, provider: DisplayAliasProvider,
+                                        progress: @MainActor (Int, Int) -> Void,
+                                        validateContext: @MainActor () throws -> Void) async throws -> PhotoBackupPreflightPlan
+    {
+        var existing: Set<PhotoBackupSource> = [], review: Set<PhotoBackupSource> = [], checkpointed: Set<PhotoBackupSource> = []
+        var remaining: [PhotoBackupJob] = []
+        progress(0, jobs.count)
+        for offset in stride(from: 0, to: jobs.count, by: 64) {
+            try check(validateContext)
+            let batch = Array(jobs[offset ..< min(offset + 64, jobs.count)])
+            let ids = Array(Set(batch.map(\.source.localID))).sorted()
+            let hints = try await provider(ids, scope)
+            try check(validateContext)
+            guard hints.count <= ids.count, Set(hints.map(\.work.localID)).count == hints.count,
+                  hints.allSatisfy({ ids.contains($0.work.localID) && $0.work.localID == $0.association.localIdentity.localIdentifier })
+            else { throw PhotoBackupContinuityError.incompleteResponse }
+            let byLocal = Dictionary(uniqueKeysWithValues: hints.map { ($0.work.localID, $0) })
+            let snapshots = try await metadata.snapshots(for: ids, validateContext: validateContext)
+            try check(validateContext)
+            guard Set(snapshots.map(\.identity.localIdentifier)).count == snapshots.count,
+                  snapshots.allSatisfy({ ids.contains($0.identity.localIdentifier) }) else { throw PhotoBackupContinuityError.incompleteResponse }
+            let before = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.identity.localIdentifier, $0) })
+            var accepted: [PhotoBackupJob] = []
+            for job in batch {
+                try check(validateContext)
+                let source = job.source
+                guard let hint = byLocal[source.localID], let snapshot = before[source.localID],
+                      hint.work.result == .matched, hint.work.reason == .matched,
+                      hint.association.source == .exactCloudIdentity,
+                      hint.association.localIdentity == snapshot.identity,
+                      snapshot.identity.modificationDate == source.modifiedAt,
+                      Self.sourceKindMatches(source.kind, snapshot.identity.mediaKind),
+                      case let .resolved(cloud) = snapshot.cloudIdentity, cloud == hint.work.cloudID,
+                      hint.work.identityVersion == LocalPhotoDisplayReconciler.identityVersion(snapshot)
+                else { remaining.append(job); continue }
+                let remote: LocalMediaRemoteAsset
+                do { remote = try await client.localMediaAsset(hint.association.remoteID.uuidString) }
+                catch LocalMediaCandidateError.inaccessible { try check(validateContext); review.insert(source); continue }
+                try check(validateContext)
+                guard remote.isOffline == false, remote.checksum == hint.association.checksum,
+                      LocalMediaAssociation.verified(remote: remote, requestedID: hint.association.remoteID, ownerID: scope.userID,
+                                                     local: snapshot.identity, source: .exactCloudIdentity, prefersCurrentPhotos: true) != nil
+                else { review.insert(source); continue }
+                accepted.append(job)
+            }
+            if !accepted.isEmpty {
+                let acceptedIDs = Array(Set(accepted.map(\.source.localID))).sorted()
+                let current = try await metadata.snapshots(for: acceptedIDs, validateContext: validateContext)
+                try check(validateContext)
+                guard current.count == acceptedIDs.count, Set(current.map(\.identity.localIdentifier)) == Set(acceptedIDs),
+                      current.allSatisfy({ before[$0.identity.localIdentifier] == $0 }) else { throw LocalMediaMetadataError.sourceChanged }
+                // Photos复核期间服务端快照可能撤销别名；提交前重新读取同一原子proof，不混合旧/新工作行。
+                try check(validateContext)
+                let refreshed = try await provider(acceptedIDs, scope)
+                try check(validateContext)
+                guard refreshed.count == acceptedIDs.count, Set(refreshed.map(\.work.localID)) == Set(acceptedIDs),
+                      refreshed.allSatisfy({ value in
+                          guard let initial = byLocal[value.work.localID] else { return false }
+                          return value.work.result == .matched && value.work.reason == .matched
+                              && value.association == initial.association
+                              && value.work.localID == value.association.localIdentity.localIdentifier
+                              && value.work.cloudID == initial.work.cloudID
+                              && value.work.identityVersion == initial.work.identityVersion
+                      }) else { throw LocalMediaMetadataError.sourceChanged }
+                // associations保持空：即使checksum字段相同，也未读取本轮原片，不能升级强关联/上传回执。
+                let saved = try await checkpoint(accepted, matches: [:], snapshots: before, associations: [],
+                                                 client: client, validateContext: validateContext)
+                checkpointed.formUnion(saved)
+                existing.formUnion(accepted.map(\.source))
+            }
+            progress(existing.count + review.count, jobs.count)
+            await Task.yield()
+        }
+        let remainingPlan: PhotoBackupPreflightPlan
+        if remaining.isEmpty {
+            remainingPlan = .init(allowed: [], existing: [], review: [])
+        } else {
+            let oldChecker = PhotoBackupContinuityChecker(store: store, metadata: metadata, status: status, phaseProgress: phaseProgress,
+                                                          checkpointMatches: checkpointMatches, serverFirst: serverFirst, verifiedCheckpoint: verifiedCheckpoint)
+            let alreadyClassified = existing.count + review.count
+            remainingPlan = try await oldChecker.plan(jobs: remaining, scope: scope, client: client, verificationIDs: verificationIDs,
+                                                      progress: { done, _ in progress(alreadyClassified + done, jobs.count) }, validateContext: validateContext)
+        }
+        let result = PhotoBackupPreflightPlan(allowed: remainingPlan.allowed, existing: existing.union(remainingPlan.existing),
+                                              review: review.union(remainingPlan.review), uploadMetadata: remainingPlan.uploadMetadata,
+                                              checkpointedExisting: checkpointed.union(remainingPlan.checkpointedExisting))
+        try result.validate(sources: Set(jobs.map(\.source)))
+        try check(validateContext)
+        progress(jobs.count, jobs.count)
+        return result
+    }
+
+    private nonisolated static func sourceKindMatches(_ source: PhotoBackupSource.Kind, _ media: LocalPhotoIdentity.MediaKind) -> Bool {
+        switch source {
+        case .photo: media == .image
+        case .video: media == .video
+        // 一个展示关系不足证明Live动态成员或RAW/JPEG双原图，继续原有专用预检。
+        case .livePhoto, .rawJPEG: false
+        }
     }
 
     /// jobs为当前排队源；读取Photos结构与完整远端关联后返回交集/原片查重许可/待核查分区。

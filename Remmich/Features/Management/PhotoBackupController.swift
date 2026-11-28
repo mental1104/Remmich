@@ -534,6 +534,9 @@ import Photos
                 if mode.isBackground {
                     backgroundTask = nil
                 }
+                if manager.generation == owner, completed > 0 || duplicates > 0 {
+                    localMatches?.originalBackupEvidenceDidChange(using: manager)
+                }
                 manager.publishChanges(ifGeneration: owner)
             }
             do {
@@ -593,7 +596,8 @@ import Photos
                             []
                         }
                         let plan = try await self.prepareContinuity(journal, manager: manager, owner: owner, scope: scope, client: client, verificationIDs: verificationIDs, keepWaiting: !mode.isBackground)
-                        return try await PhotoBackupWorker(store: store, exporter: exporter).run(
+                        return try await PhotoBackupWorker(store: store, exporter: self.retryingExporter(exporter, manager: manager, owner: owner, scope: scope,
+                                                                                                         keepWaiting: !mode.isBackground)).run(
                             scope: scope, userID: client.userID, allowCloud: cloud, client: self.retryingUploader(client, manager: manager, owner: owner, scope: scope, keepWaiting: !mode.isBackground),
                             preflight: plan,
                             validateContext: {
@@ -738,6 +742,19 @@ import Photos
         let reader = PhotoBackupRetryingQueries(base: client, validate: {
             try Self.validate(manager, owner: owner, scope: scope)
         }, status: publishStatus, keepWaiting: keepWaiting, retryMatchedWrites: true)
+        let displayAliases: PhotoBackupContinuityChecker.DisplayAliasProvider? = if usesNativeLibrarySource {
+            { [weak self] (ids: [String], requestedScope: MediaAccountScope) async throws -> [PhotoBackupDisplayAliasEvidence] in
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                guard requestedScope == scope else { throw LibraryWriteError.changedAccount }
+                guard let self else { throw CancellationError() }
+                guard let matches = self.localMatches else { return [] }
+                let evidence = try await matches.backupDisplayAliasEvidence(localIDs: ids, scope: requestedScope)
+                try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+                return evidence
+            }
+        } else {
+            nil
+        }
         let checker = preflight ?? PhotoBackupContinuityChecker(store: store, status: { [weak self] message in
             self?.continuityMessage = message
         }, phaseProgress: { [weak self] done, total in
@@ -749,7 +766,7 @@ import Photos
             processed += jobs.count
             localMatches?.acceptBackupMatches(associations, using: manager)
             statusMessage = "已保存匹配进度 \(processed) 项；中断后可继续剩余项目。"
-        })
+        }, displayAliases: displayAliases)
         let plan = try await checker.plan(jobs: queued, scope: scope, client: reader, verificationIDs: verificationIDs, progress: { [self] done, total in
             phaseDone = done; phaseTotal = total
             continuityMessage = "正在核查 \(done) / \(total) 项，可随时暂停。"
@@ -786,6 +803,16 @@ import Photos
         .init(base: client, retry: .init(keepWaiting: keepWaiting, validate: {
             try Self.validate(manager, owner: owner, scope: scope)
         }, status: { [weak self] message in self?.continuityMessage = message }))
+    }
+
+    private func retryingExporter(_ base: any PhotoBackupResourceExporting, manager: LibraryManagementController, owner: UUID,
+                                  scope: MediaAccountScope, keepWaiting: Bool = true) -> PhotoSyncRetryingExporter
+    {
+        .init(base: base, retry: .init(keepWaiting: keepWaiting, validate: {
+            try Task.checkCancellation(); try Self.validate(manager, owner: owner, scope: scope)
+        }, status: { [weak self] _ in
+            self?.continuityMessage = "iCloud 原片读取暂不可用，正在自动重试；进度已保留，可随时暂停。"
+        }))
     }
 
     /// owner/scope必须仍属于manager当前认证上下文；不检查Task取消，供worker取消清理判断是否仍可落盘。

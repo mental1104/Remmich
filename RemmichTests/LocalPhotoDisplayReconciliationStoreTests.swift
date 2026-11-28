@@ -5,6 +5,33 @@ import Testing
 
 @Suite("Display reconciliation SQLite isolation")
 @MainActor struct LocalPhotoDisplayReconciliationStoreTests {
+    @Test func displayAliasEvidenceRequiresOneCurrentMatchedTupleAndScope() async throws {
+        try await withReconciliationStore { store, scope, _ in
+            let matchedID = UUID(), pendingID = UUID(), visibleID = UUID(), permit = LocalMediaSavePermit()
+            let matched = displayWork("tuple-matched")
+            let pending = displayWork("tuple-pending", result: .pending, reason: .unverified)
+            let requested = [matched.localID, pending.localID, "tuple-visible-only"]
+            let snapshot = try await acceptDisplaySnapshot(store, scope, [displayStage(matchedID, "cloud-tuple-matched"),
+                                                                          displayStage(pendingID, "cloud-tuple-pending"),
+                                                                          displayStage(visibleID, "cloud-tuple-visible")])
+            let matchedLink = displayLink(matchedID, matched.localID)
+            #expect(try await store.mergeLink(displayLink(visibleID, "tuple-visible-only"), scope: scope, access: .full, permit: permit))
+            #expect(try await store.commitBatch([matched, pending], links: [matchedLink],
+                                                checkpoint: aliasCheckpoint(snapshot, processed: 2, total: 3), scope: scope, permit: permit))
+            let evidence = try await store.displayAliasEvidence(localIDs: requested, scope: scope, access: .full)
+            #expect(evidence.count == 1)
+            let tuple = try #require(evidence.first)
+            #expect(tuple.association == matchedLink && tuple.work == matched)
+            #expect(try await store.displayAliasEvidence(localIDs: requested, scope: scope, access: .limited).isEmpty)
+            let otherAccount = displayTestScope(user: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+            #expect(try await store.displayAliasEvidence(localIDs: requested, scope: otherAccount, access: .full).isEmpty)
+            _ = try await acceptDisplaySnapshot(store, scope, [displayStage(matchedID, "changed-cloud"),
+                                                               displayStage(pendingID, "cloud-tuple-pending"),
+                                                               displayStage(visibleID, "cloud-tuple-visible")])
+            #expect(try await store.displayAliasEvidence(localIDs: requested, scope: scope, access: .full).isEmpty)
+        }
+    }
+
     @Test func reusableIDsRecoverMixedInventoriesWithoutBypassingProofOrCounts() async throws {
         try await withReconciliationStore { store, scope, directory in
             let aID = UUID(), bID = UUID(), cID = UUID(), pendingID = UUID(), visibleID = UUID()

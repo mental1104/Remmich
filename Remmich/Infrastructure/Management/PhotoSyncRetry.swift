@@ -1,4 +1,5 @@
 import Foundation
+import Photos
 
 /// 临时服务器故障保持同一任务与检查点；退避封顶，取消和账号变更立即退出。
 @MainActor struct PhotoSyncRetry {
@@ -31,9 +32,30 @@ import Foundation
             return (500 ... 599).contains(code) || code == 408 || code == 429
         }
         let value = error as NSError
+        if value.domain == PHPhotosErrorDomain {
+            // 3164要求用户允许云读取，不能靠重试扩大allowCloud；仅3169是明确的临时网络失败。
+            return value.code == PHPhotosError.Code.networkError.rawValue
+        }
         guard value.domain == NSURLErrorDomain else { return false }
         return [URLError.timedOut, .networkConnectionLost, .notConnectedToInternet,
                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed].contains { $0.rawValue == value.code }
+    }
+}
+
+/// 仅在既有原片读取许可内重新导出同一源；真实Exporter负责每次重验版本及清理失败的私有目录。
+@MainActor struct PhotoSyncRetryingExporter: PhotoBackupResourceExporting {
+    let base: any PhotoBackupResourceExporting
+    let retry: PhotoSyncRetry
+
+    func export(_ source: PhotoBackupSource, allowCloud: Bool) async throws -> PhotoBackupResources {
+        do {
+            return try await retry.call { try await base.export(source, allowCloud: allowCloud) }
+        } catch {
+            guard PhotoSyncRetry.isTransient(error) else { throw error }
+            try Task.checkCancellation(); try retry.validate()
+            // 有限策略耗尽后沿用现有安全网络失败/恢复语义，不保存PhotoKit错误正文。
+            throw PhotoBackupExportError(reason: .network)
+        }
     }
 }
 

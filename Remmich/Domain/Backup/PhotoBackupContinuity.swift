@@ -32,6 +32,12 @@ nonisolated struct PhotoBackupHistory: Codable, Sendable {
     }
 }
 
+/// 当前展示别名及其逐项身份依据；只能授权跳过原片，不能冒充字节备份完成证明。
+nonisolated struct PhotoBackupDisplayAliasEvidence: Sendable {
+    let association: LocalMediaAssociation
+    let work: LocalPhotoDisplayLocalWork
+}
+
 /// 一次整批核查的完整分区；只有allowed源可进入原片导出，existing/review均不生成虚构上传成功回执。
 nonisolated struct PhotoBackupPreflightPlan: Sendable {
     let allowed: Set<PhotoBackupSource>

@@ -104,6 +104,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
     @ObservationIgnored private var fullLibraryEnabledOverride: Bool?
     @ObservationIgnored private var fullLibraryCallbackOwner: UUID?
     @ObservationIgnored private var fullLibraryFlowOwner: UUID?
+    @ObservationIgnored private var fullLibraryEvidenceRefreshRequested = false
     @ObservationIgnored private var displayIndexEpoch = UUID()
     @ObservationIgnored private var fallbackDecisionEpoch = UUID()
     @ObservationIgnored private var fallbackWritePermit = LocalMediaSavePermit()
@@ -118,7 +119,8 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         let store = LocalPhotoDisplayReconciliationStore()
         return LocalMediaMatchController(inventory: PhotoKitDisplayReconciliationInventory(),
                                          displayPersistence: LocalPhotoDisplayAssociationStore(reconciliationStore: store),
-                                         strictPhotoSourcePolicy: true, reconciliationStore: store)
+                                         strictPhotoSourcePolicy: true, reconciliationStore: store,
+                                         reconciliationDiagnosticsURL: URL.documentsDirectory.appendingPathComponent("remmich-photo-reconciliation-diagnostics.json"))
     }
 
     func hasLocalPhotoIdentity(assetID: UUID, revision _: Date) -> Bool {
@@ -185,7 +187,8 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
          persistence: any LocalMediaAssociationPersisting = LocalMediaAssociationStore(),
          displayPersistence: any LocalPhotoDisplayAssociationPersisting = LocalPhotoDisplayAssociationStore(), observeChanges: Bool = true,
          strictPhotoSourcePolicy: Bool = false,
-         reconciliationStore: (any LocalPhotoDisplayReconciliationStoring)? = nil)
+         reconciliationStore: (any LocalPhotoDisplayReconciliationStoring)? = nil,
+         reconciliationDiagnosticsURL: URL? = nil)
     {
         self.inventory = inventory; self.metadata = metadata; self.checksum = checksum; remoteOverride = remote
         self.persistence = persistence; self.displayPersistence = displayPersistence; self.observeChanges = observeChanges
@@ -193,7 +196,8 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         self.reconciliationStore = reconciliationStore
         if let reconciliationStore {
             sourcePolicyReady = false
-            fullLibraryReconciler = LocalPhotoDisplayReconciler(inventory: inventory, metadata: metadata, store: reconciliationStore)
+            fullLibraryReconciler = LocalPhotoDisplayReconciler(inventory: inventory, metadata: metadata, store: reconciliationStore,
+                                                                diagnosticsURL: reconciliationDiagnosticsURL)
         }
     }
 
@@ -214,6 +218,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         let changedScope = scope != nextScope
         self.manager = manager; managerGeneration = manager.generation; scope = nextScope
         if changedScope {
+            fullLibraryEvidenceRefreshRequested = false
             followsBackup = false
             knownDisplayRemoteIDs = []; displayHotOrder = []; declaredPhotoIdentityIDs = []
             fullLibraryUserPaused = fullLibraryReconciler != nil && nextScope.map {
@@ -340,6 +345,39 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
         return startFullLibraryFlow(using: manager, requestPermission: userInitiated)
     }
 
+    /// Hints are metadata identity evidence only. The backup checker revalidates Photos and
+    /// the remote asset; it must not promote these links to original-byte completion proof.
+    func backupDisplayAliasEvidence(localIDs: [String], scope requestedScope: MediaAccountScope) async throws -> [PhotoBackupDisplayAliasEvidence] {
+        guard localIDs.count <= 64, Set(localIDs).count == localIDs.count else { throw LocalPhotoDisplayReconciliationError.invalidBatch }
+        guard !localIDs.isEmpty, fullLibraryReconciler != nil, let reconciliationStore,
+              scope == requestedScope, let manager, managerGeneration == manager.generation else { return [] }
+        let owner = manager.generation, run = generation, expectedAccess = inventory.authorization
+        guard expectedAccess == .full || expectedAccess == .limited else { throw LocalMediaMetadataError.permission }
+        let evidence = try await reconciliationStore.displayAliasEvidence(localIDs: localIDs, scope: requestedScope, access: expectedAccess)
+        try validate(manager, owner: owner, scope: requestedScope, run: run, expectedAccess: expectedAccess, requireOnline: false)
+        let requested = Set(localIDs)
+        guard evidence.count <= 64, Set(evidence.map(\.work.localID)).count == evidence.count,
+              evidence.allSatisfy({ requested.contains($0.work.localID) && $0.work.localID == $0.association.localIdentity.localIdentifier
+                      && $0.work.result == .matched && $0.work.reason == .matched && $0.work.cloudID != nil })
+        else { throw LocalPhotoDisplayReconciliationError.invalidBatch }
+        return evidence
+    }
+
+    /// One coalesced refresh after original backup publishes new identity evidence. It reads
+    /// accepted metadata before changing counts and preserves the user's explicit pause.
+    @discardableResult
+    func originalBackupEvidenceDidChange(using manager: LibraryManagementController) -> Task<Void, Never>? {
+        guard fullLibraryReconciler != nil, self.manager === manager,
+              managerGeneration == manager.generation, let scope, manager.backupScope == scope else { return nil }
+        fullLibraryEvidenceRefreshRequested = true
+        guard enabled, fullLibraryActive, !fullLibraryUserPaused else { return nil }
+        if task != nil {
+            fullLibraryReconciler?.pause()
+            task?.cancel()
+        }
+        return startFullLibraryFlow(using: manager, requestPermission: false)
+    }
+
     private func cacheDisplayAssociation(_ value: LocalMediaAssociation) {
         forgetImmichUnlinked(value.remoteID)
         guard !rejectedDisplayAssociationIDs.contains(value.remoteID) else { return }
@@ -458,7 +496,9 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                 }
                 startMonitoringIfNeeded()
                 guard fullLibraryActive, !fullLibraryUserPaused, let client = manager.client, manager.backupScope == scope else { return }
-                if !requestPermission, [.completed, .needsReview, .waiting, .blocked].contains(worker.state) {
+                if !requestPermission, !fullLibraryEvidenceRefreshRequested,
+                   [.completed, .needsReview, .waiting, .blocked].contains(worker.state)
+                {
                     return
                 }
                 let validateContext: @MainActor @Sendable () throws -> Void = {
@@ -490,6 +530,7 @@ extension LocalMediaMatchController: PhotoBackupAlbumMatchingReading {}
                     revision += 1
                 }
                 if let work = worker.run(scope: scope, remote: client, mode: .resumePersistedIdentities, validateContext: validateContext) {
+                    fullLibraryEvidenceRefreshRequested = false
                     await work.value
                     try validate(manager, owner: owner, scope: scope, run: run, expectedAccess: authorizedAccess, requireOnline: false)
                     total = worker.progress.totalLocal; scanned = worker.progress.processedLocal

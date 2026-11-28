@@ -82,6 +82,8 @@ nonisolated protocol LocalPhotoDisplayReconciliationStoring: Sendable {
     func metadataRows(cloudIDs: Set<String>, scope: MediaAccountScope) async throws -> [LocalPhotoDisplayMetadataRow]
     func metadataRows(assetIDs: [UUID], scope: MediaAccountScope) async throws -> [LocalPhotoDisplayMetadataRow]
     func localWork(localIDs: [String], scope: MediaAccountScope) async throws -> [LocalPhotoDisplayLocalWork]
+    /// One SQLite statement binds the alias and matched work to the same accepted evidence.
+    func displayAliasEvidence(localIDs: [String], scope: MediaAccountScope, access: LocalPhotoLibraryAccess) async throws -> [PhotoBackupDisplayAliasEvidence]
     func checkpoint(scope: MediaAccountScope) async throws -> LocalPhotoDisplayReconciliationCheckpoint?
     func commitBatch(_ rows: [LocalPhotoDisplayLocalWork], links: [LocalMediaAssociation],
                      checkpoint: LocalPhotoDisplayReconciliationCheckpoint, scope: MediaAccountScope,

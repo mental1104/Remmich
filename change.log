@@ -1,3 +1,11 @@
+## 2026-11-28: Connect saved Photos identities to normal original backup
+
+- Native preflight now consumes saved display aliases in batches of at most 64. An atomic SQLite join binds each alias to its matched work; current Photos Cloud ID/version, fresh remote owner/type/status/checksum, a second Photos observation and a final evidence reread must all agree. Valid ordinary-photo/video identities become metadata-only existing jobs without original export or byte-proof promotion. Live Photo and RAW+JPEG retain their dedicated preflight paths.
+- Missing identity still follows the original export/checksum/duplicate-check/upload/fresh-verification pipeline after the user starts backup. The saved iCloud option remains authoritative. PhotoKit's explicit temporary network error retries with the existing cancellable backoff; cloud-access-required, permission and other Photos errors do not broaden consent or silently retry.
+- Ordinary photo/video completion now checks actual exported SHA1 against fresh online server state even when portable origin metadata is unavailable. Successful original backup requests one accepted-metadata reconciliation so counts can converge without clearing explicit matching pause or inventing completed identities.
+- A read-only audit of the running server and PostgreSQL confirmed final managed-upload owner/checksum uniqueness and the configured external-backup advisory-lock path. Precheck is not a reservation; cross-library and post-insert side effects are not globally exactly-once. No server code, data, configuration or deployment was changed.
+- New alias, byte-proof, export-retry and completion-refresh regressions are prepared; this follow-up's final build/device results remain pending. The earlier matching-only build passed 127 focused tests and preserved all 88,473 old matched payload pairs. Real original backup remains a manual UI action.
+
 ## 2026-11-28: Preserve Photos matches across native-library changes
 
 - Native enumeration and explicit-ID metadata/media/export queries now agree on hidden and all-burst coverage. The first 91,263-item iPad pass exposed 2,413 additional burst members omitted by default explicit fetch options; the corrected live reader no longer reported those source-change failures.

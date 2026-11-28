@@ -141,6 +141,23 @@ actor LocalPhotoDisplayReconciliationStore: LocalPhotoDisplayReconciliationStori
         }
     }
 
+    func displayAliasEvidence(localIDs: [String], scope: MediaAccountScope, access: LocalPhotoLibraryAccess) throws -> [PhotoBackupDisplayAliasEvidence] {
+        try Task.checkCancellation()
+        try Self.validateIDs(localIDs)
+        guard !localIDs.isEmpty, access == .full || access == .limited else { return [] }
+        let sql = "SELECT alias_links.payload,w.payload,alias_links.local_id FROM alias_links JOIN local_work w ON w.local_id=alias_links.local_id WHERE w.result='matched' AND alias_links.access=? AND " + Self.currentAliasPredicate + " AND alias_links.local_id IN (" + Self.placeholders(localIDs.count) + ") ORDER BY alias_links.local_id"
+        return try database(scope).query(sql, [.text(access.rawValue)] + localIDs.map(DisplayDBValue.text)) { row in
+            let association = try JSONDecoder().decode(LocalMediaAssociation.self, from: row.data(0))
+            let work = try JSONDecoder().decode(LocalPhotoDisplayLocalWork.self, from: row.data(1))
+            try Self.validateLink(association)
+            guard work.localID == row.string(2), association.localIdentity.localIdentifier == work.localID,
+                  work.result == .matched, work.reason == .matched,
+                  work.cloudID.map(LocalMediaMobileMetadata.isUsableCloudID) == true,
+                  !work.identityVersion.isEmpty, !work.evidenceHash.isEmpty else { throw LocalPhotoDisplayReconciliationError.invalidDatabase }
+            return .init(association: association, work: work)
+        }
+    }
+
     func checkpoint(scope: MediaAccountScope) throws -> LocalPhotoDisplayReconciliationCheckpoint? {
         let db = try database(scope)
         return try readCheckpoint(db)

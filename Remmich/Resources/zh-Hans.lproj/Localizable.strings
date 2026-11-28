@@ -5,6 +5,7 @@
 "Scan Library" = "扫描资料库";
 "Back Up Originals" = "备份原片";
 "Library Sync" = "资料库同步";
+"iCloud 原片读取暂不可用，正在自动重试；进度已保留，可随时暂停。" = "iCloud 原片读取暂不可用，正在自动重试；进度已保留，可随时暂停。";
 "Sync Library" = "同步资料库";
 "Scan Library First" = "请先扫描资料库";
 "Continue Unattempted Backups?" = "继续未尝试的备份项目？";
