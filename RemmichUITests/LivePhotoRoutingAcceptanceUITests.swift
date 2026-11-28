@@ -3,7 +3,8 @@ import XCTest
 /// Opt-in acceptance against the device's existing, signed-in account.
 /// The test runner must receive REMMICH_LIVE_DEVICE_TESTS=1 through its xctestrun environment.
 /// Default CI skips this suite. No fixture arguments, preference suite, account reset, upload,
-/// photo scan, explicit original-load action, privacy-button response, or app termination is performed here.
+/// photo scan, explicit original-load action, privacy-button response, or app termination is performed
+/// by the ordinary read-only cases. The original-backup case has a second explicit opt-in below.
 /// Only anonymous UI state/counts are attached to xcresult; no screenshots, full accessibility
 /// trees, account details, album titles, filenames, or asset identifiers are recorded.
 final class LivePhotoRoutingAcceptanceUITests: XCTestCase {
@@ -15,6 +16,70 @@ final class LivePhotoRoutingAcceptanceUITests: XCTestCase {
         guard ProcessInfo.processInfo.environment["REMMICH_LIVE_DEVICE_TESTS"] == "1" else {
             throw XCTSkip("Live-account device acceptance requires explicit REMMICH_LIVE_DEVICE_TESTS=1.")
         }
+    }
+
+    /// Actual private-library backup, enabled only after the user explicitly authorizes both
+    /// iCloud original downloads and Immich uploads. It uses the normal controls and saved queue;
+    /// no credential, task, receipt or Photos permission is injected or reset by this test.
+    @MainActor func testLiveStartAuthorizedUnmatchedOriginalBackup() throws {
+        guard ProcessInfo.processInfo.environment["REMMICH_LIVE_ORIGINAL_BACKUP"] == "1" else {
+            throw XCTSkip("Actual original backup requires separate REMMICH_LIVE_ORIGINAL_BACKUP=1 consent.")
+        }
+        let app = try activateLiveApp()
+        try openPhotoSync(in: app)
+
+        func reveal(_ identifier: String) throws -> XCUIElement {
+            let control = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            for _ in 0 ..< 5 {
+                if control.exists, control.isHittable {
+                    return control
+                }
+                let surface = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+                guard surface.exists, surface.isHittable else { break }
+                surface.swipeUp()
+                try stopForSystemOrAppAlert(in: app)
+            }
+            guard control.exists, control.isHittable else {
+                throw XCTSkip("The authorized original-backup control is unavailable: \(identifier)")
+            }
+            return control
+        }
+
+        let settings = try reveal("backup-settings-entry")
+        settings.tap()
+        try stopForSystemOrAppAlert(in: app)
+        let cloud = app.switches.matching(identifier: "backup-allow-icloud-originals").firstMatch
+        guard cloud.waitForExistence(timeout: 5), cloud.isHittable, cloud.isEnabled else {
+            throw XCTSkip("The saved iCloud-original option is not available; no backup started.")
+        }
+        switch cloud.value as? String {
+        case "0": cloud.tap()
+        case "1": break
+        default: throw XCTSkip("Unrecognized iCloud-original option; no backup started.")
+        }
+        XCTAssertEqual(cloud.value as? String, "1")
+        try closeKnownSheet(titles: ["Backup Settings", "备份设置"], in: app)
+        let scan = try reveal("backup-scan-library")
+        XCTAssertTrue(scan.isEnabled)
+        scan.tap()
+        // Wait for the metadata-only scan to save its candidate queue. This cannot start originals.
+        let start = app.buttons.matching(identifier: "backup-start-originals").firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: start)
+        guard XCTWaiter.wait(for: [ready], timeout: 180) == .completed else {
+            recordSummary("live-authorized-original-scan-not-ready", app: app)
+            throw XCTSkip("The full-library candidate scan did not produce a runnable queue; no backup started.")
+        }
+        _ = try reveal("backup-start-originals")
+        start.tap()
+        let confirm = app.buttons.matching(identifier: "backup-confirm-originals").firstMatch
+        guard confirm.waitForExistence(timeout: 5), confirm.isHittable else {
+            throw XCTSkip("The original-backup confirmation is unavailable; no backup started.")
+        }
+        confirm.tap()
+        let pause = app.buttons.matching(identifier: "backup-pause-originals").firstMatch
+        XCTAssertTrue(pause.waitForExistence(timeout: 10), "The authorized backup did not enter its running state.")
+        recordSummary("live-authorized-original-backup-started", app: app)
+        // Leave the app in foreground; do not stop, rescan or restart an in-flight original.
     }
 
     /// Reads the saved queue, enables only the shared local-browsing preference if needed,

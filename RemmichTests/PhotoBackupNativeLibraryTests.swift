@@ -6,6 +6,134 @@ import Testing
 
 @Suite("Native full-library backup source")
 @MainActor struct PhotoBackupNativeLibraryTests {
+    @Test func controllerScanQueuesOnlyUnknownOrChangedVersionsWithoutNetworkOrOriginalReads() async throws {
+        try await withNativeBackupFixture { fixture in
+            let stable = nativeScanned("stable", at: 10), changed = nativeScanned("changed", at: 20)
+            let new = nativeScanned("new", at: 30)
+            fixture.driver.assets = [stable, changed, new]
+            fixture.driver.evidence = ["stable": nativeCandidateEvidence(stable.source),
+                                       "changed": nativeCandidateEvidence(nativeScanned("changed", at: 10).source)]
+            fixture.controller.allowCloud = true
+            try await (#require(fixture.controller.scan(using: fixture.manager))).value
+            let saved = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            #expect(saved.allowCloud && saved.scanSource == .nativeLibrary)
+            #expect(Set(saved.jobs.map(\.source)) == Set([changed.source, new.source]))
+            #expect(saved.jobs.allSatisfy { $0.stage == .queued && $0.attempts == 0 })
+            #expect(fixture.controller.scannedNativeCount == 3 && fixture.controller.deferredNativeCount == 1)
+            #expect(fixture.driver.evidenceCalls == 1 && fixture.exporter.calls == 0)
+            #expect(NativeBackupNoNetworkProtocol.requests(host: fixture.endpoint.host!) == 0)
+        }
+    }
+
+    @Test func candidateEvidenceCannotPublishAfterPhotosPermissionChanges() async throws {
+        try await withNativeBackupFixture { fixture in
+            let stable = nativeScanned("stable", at: 10)
+            fixture.driver.assets = [stable]
+            fixture.driver.evidence = ["stable": nativeCandidateEvidence(stable.source)]
+            fixture.driver.beforeEvidenceReturn = { fixture.driver.authorization = .denied }
+            try await (#require(fixture.controller.scan(using: fixture.manager))).value
+            let saved = try await fixture.store.loadPhotoBackups(scope: fixture.scope)
+            #expect(saved.scanSource == nil && saved.jobs.isEmpty)
+            #expect(fixture.exporter.calls == 0 && NativeBackupNoNetworkProtocol.requests(host: fixture.endpoint.host!) == 0)
+        }
+    }
+
+    @Test func deferringEightyThousandNewSourcesDoesNotCreateJobsOrChangeHistory() throws {
+        var journal = try nativeHistory(namespace: "synthetic")
+        let history = try nativeCanonicalJobs(journal.jobs), count = journal.jobs.count
+        let deferred = (0 ..< 80000).map { nativeScanned("deferred-\($0)", at: TimeInterval($0 + 100)) }
+        let candidate = nativeScanned("original-candidate", at: 99)
+        let scan = try PhotoBackupLibraryScan.plan(deferred + [candidate])
+        let deferredSources = Set(deferred.map(\.source)).union(journal.jobs.map(\.source))
+        #expect(try journal.applyLibraryScan(scan, allowCloud: true, deferredSources: deferredSources) == 1)
+        #expect(journal.jobs.count == count + 1 && journal.jobs.last?.source == candidate.source)
+        #expect(journal.jobs.last?.stage == .queued && journal.jobs.last?.attempts == 0)
+        #expect(try nativeCanonicalJobs(Array(journal.jobs.prefix(count))) == history)
+        #expect(journal.scanSource == .nativeLibrary && journal.allowCloud)
+    }
+
+    @Test func candidateLimitedResumePreservesHistoryAndPausesOtherQueuedWork() throws {
+        var journal = try nativeHistory(namespace: "synthetic")
+        let history = try nativeCanonicalJobs(journal.jobs), count = journal.jobs.count
+        let candidate = nativeScanned("candidate", at: 10), excluded = nativeScanned("excluded", at: 11)
+        let scan = try PhotoBackupLibraryScan.plan(journal.jobs.map { .init(source: $0.source, capturedAt: .distantPast) } + [candidate, excluded])
+        try journal.applyLibraryScan(scan, allowCloud: true)
+        try journal.resumeLibraryForVerification(scan, unattemptedOnly: true,
+                                                 candidateLocalIDs: [candidate.source.localID, "failed", "paused-live", "not-in-library"])
+        #expect(try nativeCanonicalJobs(Array(journal.jobs.prefix(count))) == history)
+        #expect(journal.jobs.filter { $0.stage == .queued }.map(\.source) == [candidate.source])
+        let paused = try #require(journal.jobs.first { $0.source == excluded.source })
+        #expect(paused.stage == .paused && paused.attempts == 0 && paused.primaryAssetID == nil && paused.failure == nil)
+        let before = try nativeCanonicalJobs(journal.jobs)
+        #expect(throws: PhotoBackupStateError.invalidTransition) {
+            try journal.resumeLibraryForVerification(scan, only: paused.id, candidateLocalIDs: [candidate.source.localID])
+        }
+        #expect(try nativeCanonicalJobs(journal.jobs) == before)
+        try journal.resumeLibraryForVerification(scan, candidateLocalIDs: [])
+        #expect(!journal.jobs.contains { $0.stage == .queued })
+    }
+
+    @Test func matchingCompoundIdentityOnlyDefersSchedulingWithoutClaimingOriginalCompletion() throws {
+        let pair = try PhotoBackupRawJPEGSource(originals: [
+            .init(kind: .photo, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 100, pixelHeight: 100),
+            .init(kind: .alternatePhoto, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 100, pixelHeight: 100),
+        ], hasAdjustments: false, adjustmentTime: nil)
+        let sources = [nativeScanned("photo", at: 10).source, nativeScanned("video", at: 10, kind: .video).source,
+                       nativeScanned("live", at: 10, kind: .livePhoto).source,
+                       PhotoBackupSource(localID: "raw", modifiedAt: Date(timeIntervalSince1970: 10), kind: .rawJPEG, rawJPEG: pair)]
+        let hints = sources.map { nativeCandidateEvidence($0) }
+        let deferred = try PhotoBackupCandidateSelection.deferredSources(sources: sources, evidence: hints)
+        #expect(deferred == Set(sources))
+        let scan = try PhotoBackupLibraryScan.plan(sources.map { .init(source: $0, capturedAt: .distantPast) })
+        var journal = PhotoBackupJournal(namespace: "synthetic")
+        #expect(try journal.applyLibraryScan(scan, allowCloud: true, deferredSources: deferred) == 0)
+        #expect(journal.jobs.isEmpty)
+        // Live Photo and ordinary image observations are deliberately distinct, even though both remote types are IMAGE.
+        #expect(try PhotoBackupCandidateSelection.deferredSources(sources: [sources[2]],
+                                                                  evidence: [nativeCandidateEvidence(sources[2], media: .image)]).isEmpty)
+    }
+
+    @Test(arguments: ["changed-version", "no-date", "wrong-type", "pending", "unmatched", "no-cloud", "no-version", "strong-only"])
+    func staleOrIncompleteDisplayEvidenceRemainsAnOriginalCandidate(_ fault: String) throws {
+        let source = PhotoBackupSource(localID: "candidate", modifiedAt: fault == "no-date" ? nil : Date(timeIntervalSince1970: 20), kind: .photo)
+        let observed = fault == "changed-version" ? nativeScanned("candidate", at: 10).source : source
+        let hint = nativeCandidateEvidence(observed, media: fault == "wrong-type" ? .video : nil,
+                                           cloudID: fault == "no-cloud" ? nil : "synthetic-cloud",
+                                           identityVersion: fault == "no-version" ? "" : "synthetic-version",
+                                           result: fault == "pending" ? .pending : fault == "unmatched" ? .unmatched : .matched,
+                                           reason: fault == "pending" ? .sourceChanged : fault == "unmatched" ? .noServerIdentity : .matched,
+                                           proof: fault == "strong-only" ? .checksum : .exactCloudIdentity)
+        let deferred = try PhotoBackupCandidateSelection.deferredSources(sources: [source], evidence: [hint])
+        #expect(deferred.isEmpty)
+        var journal = PhotoBackupJournal(namespace: "synthetic")
+        let scan = try PhotoBackupLibraryScan.plan([.init(source: source, capturedAt: .distantPast)])
+        #expect(try journal.applyLibraryScan(scan, allowCloud: true, deferredSources: deferred) == 1)
+        #expect(journal.jobs.first?.source == source && journal.jobs.first?.stage == .queued)
+    }
+
+    @Test func malformedOrConflictingCandidateHintBatchesFailClosed() throws {
+        let source = nativeScanned("candidate", at: 10).source
+        let hint = nativeCandidateEvidence(source)
+        #expect(throws: PhotoBackupContinuityError.incompleteResponse) {
+            _ = try PhotoBackupCandidateSelection.deferredSources(sources: [source, source], evidence: [])
+        }
+        #expect(throws: PhotoBackupContinuityError.incompleteResponse) {
+            _ = try PhotoBackupCandidateSelection.deferredSources(sources: [source], evidence: [nativeCandidateEvidence(nativeScanned("foreign", at: 10).source)])
+        }
+        let conflicting = nativeCandidateEvidence(source)
+        #expect(hint.association.remoteID != conflicting.association.remoteID)
+        #expect(throws: PhotoBackupContinuityError.incompleteResponse) {
+            _ = try PhotoBackupCandidateSelection.deferredSources(sources: [source], evidence: [hint, conflicting])
+        }
+        let wrongLocal = PhotoBackupDisplayAliasEvidence(association: nativeCandidateEvidence(nativeScanned("foreign", at: 10).source).association, work: hint.work)
+        #expect(throws: PhotoBackupContinuityError.incompleteResponse) {
+            _ = try PhotoBackupCandidateSelection.deferredSources(sources: [source], evidence: [wrongLocal])
+        }
+        #expect(throws: PhotoBackupContinuityError.incompleteResponse) {
+            _ = try PhotoBackupCandidateSelection.deferredSources(sources: (0 ..< 65).map { nativeScanned("source-\($0)", at: 10).source }, evidence: [])
+        }
+    }
+
     @Test func conflictingNativeSnapshotCannotBecomeAPlan() throws {
         let journal = try nativeHistory(namespace: "synthetic")
         let history = try nativeCanonicalJobs(journal.jobs)
@@ -158,6 +286,9 @@ import Testing
     var calls = 0, albumCalls = 0
     var assets: [PhotoBackupScannedAsset] = []
     var beforeReturn: (() -> Void)?
+    var evidence: [String: PhotoBackupDisplayAliasEvidence] = [:]
+    var evidenceCalls = 0
+    var beforeEvidenceReturn: (() -> Void)?
 }
 
 @MainActor private final class NativeBackupNeverExporter: PhotoBackupResourceExporting {
@@ -202,6 +333,12 @@ import Testing
                                                authorizationStatus: { driver.authorization }, observeAutomaticPhotos: false,
                                                scanSource: .nativeLibrary, libraryScanner: { validate in
                                                    driver.calls += 1; try validate(); driver.beforeReturn?(); try validate(); return driver.assets
+                                               }, candidateEvidence: { ids, requestedScope in
+                                                   guard requestedScope == scope else { throw LibraryWriteError.changedAccount }
+                                                   driver.evidenceCalls += 1
+                                                   let evidence = ids.compactMap { driver.evidence[$0] }
+                                                   driver.beforeEvidenceReturn?()
+                                                   return evidence
                                                })
         self.root = root; self.endpoint = endpoint; self.scope = scope; self.store = store
         self.manager = manager; self.driver = driver; self.exporter = exporter; self.controller = controller
@@ -209,7 +346,7 @@ import Testing
     }
 
     func close() async {
-        controller.cancel(); driver.beforeReturn = nil; manager.configure(session: nil, endpoint: nil)
+        controller.cancel(); driver.beforeReturn = nil; driver.beforeEvidenceReturn = nil; manager.configure(session: nil, endpoint: nil)
         try? await store.removeAccount(namespace: scope.cacheNamespace)
         try? FileManager.default.removeItem(at: root)
     }
@@ -223,6 +360,29 @@ import Testing
 
 private nonisolated func nativeScanned(_ id: String, at date: TimeInterval, kind: PhotoBackupSource.Kind = .photo) -> PhotoBackupScannedAsset {
     .init(source: .init(localID: id, modifiedAt: Date(timeIntervalSince1970: date), kind: kind), capturedAt: Date(timeIntervalSince1970: date))
+}
+
+private nonisolated func nativeCandidateEvidence(_ source: PhotoBackupSource, media: LocalPhotoIdentity.MediaKind? = nil,
+                                                 cloudID: String? = "synthetic-cloud", identityVersion: String = "synthetic-version",
+                                                 result: LocalPhotoDisplayLocalWork.Result = .matched,
+                                                 reason: LocalPhotoDisplayLocalWork.Reason = .matched,
+                                                 proof: LocalMediaAssociation.Source = .exactCloudIdentity) -> PhotoBackupDisplayAliasEvidence
+{
+    let kind: LocalPhotoIdentity.MediaKind = if let media {
+        media
+    } else if source.kind == .video {
+        .video
+    } else if source.kind == .livePhoto {
+        .livePhoto
+    } else {
+        .image
+    }
+    let association = LocalMediaAssociation(remoteID: UUID(), remoteRevision: Date(timeIntervalSince1970: 100),
+                                            localIdentity: .init(localIdentifier: source.localID, modificationDate: source.modifiedAt, mediaKind: kind),
+                                            checksum: Data(repeating: 1, count: 20).base64EncodedString(), source: proof)
+    let work = LocalPhotoDisplayLocalWork(localID: source.localID, cloudID: cloudID, identityVersion: identityVersion,
+                                          evidenceHash: "synthetic-evidence", result: result, reason: reason)
+    return .init(association: association, work: work)
 }
 
 private nonisolated func nativeCanonicalJobs(_ jobs: [PhotoBackupJob]) throws -> Data {

@@ -778,6 +778,152 @@ struct PhotoBackupServerMatchingTests {
         #expect(plan.existing == [source] && plan.allowed.isEmpty && client.savedMatches == [id: "cloud-known"])
     }
 
+    /// 明确原片核查可以用真实SHA1解决身份歧义/被拒候选；默认仍review，绝不直接existing。
+    @Test(arguments: ["ambiguous", "remote-rejected", "inaccessible"], [PhotoBackupSource.Kind.photo, .video])
+    @MainActor func explicitOriginalVerificationAdmitsUnconfirmedIdentityForChecksum(_ mode: String, _ kind: PhotoBackupSource.Kind) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let id = addServerContinuityCandidate("verify-original", photos: photos, client: client)
+        let snapshot = continuitySnapshot("verify-original", created: 200, cloud: true, mediaKind: kind == .video ? .video : .image)
+        photos.values["verify-original"] = snapshot
+        client.assets[id.uuidString] = try .init(id: id, ownerId: #require(UUID(uuidString: continuityScope().userID)), type: kind == .video ? "VIDEO" : "IMAGE",
+                                                 isTrashed: false, isOffline: mode == "remote-rejected", isEdited: false, checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
+        if mode == "ambiguous" {
+            client.records.append(.init(assetID: UUID(), value: client.records[0].value))
+        }
+        if mode == "inaccessible" {
+            client.assets = [:]
+        }
+        let source = PhotoBackupSource(localID: "verify-original", modifiedAt: snapshot.identity.modificationDate, kind: kind)
+        let job = PhotoBackupJob(source: source), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        let normal = try await PhotoBackupContinuityChecker(store: store, metadata: photos).plan(
+            jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        let explicit = try await PhotoBackupContinuityChecker(store: store, metadata: photos, originalVerificationIDs: [job.id]).plan(
+            jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {}
+        )
+        #expect(normal.review == [source] && normal.allowed.isEmpty && normal.existing.isEmpty)
+        #expect(explicit.allowed == [source] && explicit.existing.isEmpty && explicit.review.isEmpty && explicit.checkpointedExisting.isEmpty)
+        #expect(explicit.uploadMetadata[source]?.cloudId == "cloud-verify-original" && client.savedMatches.isEmpty)
+        #expect(job.stage == .queued && job.attempts == 0 && job.primaryAssetID == nil && job.primaryChecksum == nil)
+    }
+
+    /// 新flag不能独立重放已有尝试或原片回执；旧明确恢复许可仍必需，且结果只是准许重新checksum。
+    @Test @MainActor func explicitOriginalVerificationRetainsAttemptedReceiptGate() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        _ = addServerContinuityCandidate("verify-receipt", photos: photos, client: client)
+        client.records.append(.init(assetID: UUID(), value: client.records[0].value))
+        let source = continuitySource("verify-receipt", modified: 200), store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite"))
+        var job = PhotoBackupJob(source: source)
+        try job.begin(); try job.exported()
+        let receiptID = UUID()
+        try job.recordPrimary(receiptID, duplicate: false, checksum: continuityChecksum)
+        job.fail(.network); job.queueForVerification()
+        let checker = PhotoBackupContinuityChecker(store: store, metadata: photos, originalVerificationIDs: [job.id])
+        let alone = try await checker.plan(jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        let granted = try await checker.plan(jobs: [job], scope: continuityScope(), client: client, verificationIDs: [job.id], progress: { _, _ in }, validateContext: {})
+        #expect(alone.review == [source] && alone.allowed.isEmpty && alone.existing.isEmpty)
+        #expect(granted.allowed == [source] && granted.existing.isEmpty && granted.checkpointedExisting.isEmpty)
+        #expect(job.attempts == 1 && job.primaryAssetID == receiptID && job.primaryChecksum == continuityChecksum && client.savedMatches.isEmpty)
+    }
+
+    /// 已导入旧历史的未命中仍遵守原保守规则，不能借原片核查flag授权重传。
+    @Test @MainActor func explicitOriginalVerificationDoesNotOverrideImportedHistory() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries(), source = continuitySource("imported-verify", modified: 200)
+        photos.values[source.localID] = continuitySnapshot(source.localID, created: 200, cloud: true)
+        let store = SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), job = PhotoBackupJob(source: source)
+        let first = continuitySource("imported-verify-first", modified: 200)
+        try await seedContinuity(store, sources: [first, source])
+        client.missEveryOther = true
+        let plan = try await PhotoBackupContinuityChecker(store: store, metadata: photos, originalVerificationIDs: [job.id]).plan(
+            jobs: [.init(source: first), job], scope: continuityScope(), client: client, verificationIDs: [job.id], progress: { _, _ in }, validateContext: {}
+        )
+        #expect(plan.review == [source] && plan.allowed.isEmpty && plan.existing == [first] && client.savedMatches.isEmpty)
+    }
+
+    /// 当前Photos元组不完整、源版本不同或复合资源不能借此普通原片准入绕过独立合同。
+    @Test(arguments: ["missing-created", "changed-version", "live", "raw"])
+    @MainActor func explicitOriginalVerificationRequiresCompleteCurrentOrdinarySource(_ fault: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        _ = addServerContinuityCandidate("verify-incomplete", photos: photos, client: client)
+        client.records.append(.init(assetID: UUID(), value: client.records[0].value))
+        let kind: PhotoBackupSource.Kind = fault == "live" ? .livePhoto : fault == "raw" ? .rawJPEG : .photo
+        let current = continuitySnapshot("verify-incomplete", created: 200, cloud: true, mediaKind: kind == .livePhoto ? .livePhoto : .image)
+        photos.values["verify-incomplete"] = .init(identity: current.identity, creationDate: fault == "missing-created" ? nil : current.creationDate,
+                                                   adjustmentTime: nil, hasAdjustments: false, latitude: nil, longitude: nil, pixelWidth: 10, pixelHeight: 10,
+                                                   duration: 0, mediaSubtypes: 0, resources: [], cloudIdentity: current.cloudIdentity)
+        let pair: PhotoBackupRawJPEGSource? = if kind == .rawJPEG {
+            try PhotoBackupRawJPEGSource(originals: [
+                .init(kind: .alternatePhoto, uniformTypeIdentifier: "com.adobe.raw-image", originalFilename: "synthetic.dng", pixelWidth: 10, pixelHeight: 10),
+                .init(kind: .photo, uniformTypeIdentifier: "public.jpeg", originalFilename: "synthetic.jpg", pixelWidth: 10, pixelHeight: 10),
+            ], hasAdjustments: false, adjustmentTime: nil)
+        } else {
+            nil
+        }
+        let source = PhotoBackupSource(localID: "verify-incomplete", modifiedAt: Date(timeIntervalSince1970: fault == "changed-version" ? 201 : 200), kind: kind, rawJPEG: pair)
+        let job = PhotoBackupJob(source: source)
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                          originalVerificationIDs: [job.id]).plan(jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.review == [source] && plan.allowed.isEmpty && plan.existing.isEmpty && client.savedMatches.isEmpty)
+    }
+
+    /// 认证HTTP失败及读后Photos/账号/取消变化均继续拒绝整批，不把故障误当成checksum准入。
+    @Test(arguments: ["401", "403", "permission", "account", "cancel", "source"])
+    @MainActor func explicitOriginalVerificationRejectsAuthenticationAndLateContext(_ fault: String) async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        let id = addServerContinuityCandidate("verify-context", photos: photos, client: client)
+        client.assets[id.uuidString] = try .init(id: id, ownerId: #require(UUID(uuidString: continuityScope().userID)), type: "IMAGE", isTrashed: false,
+                                                 isOffline: true, isEdited: false, checksum: continuityChecksum, updatedAt: Date(timeIntervalSince1970: 300))
+        if let code = Int(fault) {
+            client.assetFailure = .http(code)
+        }
+        var current = true
+        client.onAsset = {
+            if fault == "source" {
+                photos.values["verify-context"] = continuitySnapshot("verify-context", created: 201, cloud: true)
+            } else if Int(fault) == nil {
+                current = false
+            }
+        }
+        let source = continuitySource("verify-context", modified: 200), job = PhotoBackupJob(source: source)
+        let checker = PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                   originalVerificationIDs: [job.id])
+        await #expect(throws: (any Error).self) {
+            try await checker.plan(jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {
+                if !current {
+                    if fault == "cancel" {
+                        throw CancellationError()
+                    }
+                    if fault == "permission" {
+                        throw LocalMediaMetadataError.permission
+                    }
+                    throw LibraryWriteError.changedAccount
+                }
+            })
+        }
+        #expect(client.savedMatches.isEmpty && job.stage == .queued && job.primaryAssetID == nil)
+    }
+
+    @Test @MainActor func explicitOriginalVerificationKeepsConfirmedIdentityZeroExport() async throws {
+        let root = continuityRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let photos = ContinuityPhotos(), client = ContinuityQueries()
+        _ = addServerContinuityCandidate("verify-existing", photos: photos, client: client)
+        let source = continuitySource("verify-existing", modified: 200), job = PhotoBackupJob(source: source)
+        let plan = try await PhotoBackupContinuityChecker(store: SQLiteLibraryIndexStore(databaseURL: root.appending(path: "index.sqlite")), metadata: photos,
+                                                          originalVerificationIDs: [job.id]).plan(jobs: [job], scope: continuityScope(), client: client, progress: { _, _ in }, validateContext: {})
+        #expect(plan.existing == [source] && plan.allowed.isEmpty && plan.review.isEmpty && plan.uploadMetadata.isEmpty)
+    }
+
     /// kind选择缺失/歧义/版本/权限状态反例；只有ID相同不能绕过当前源和远端拥有者校验。
     @Test(arguments: ["ambiguous", "version", "missing-metadata", "owner", "trashed", "offline", "edited", "inaccessible"])
     @MainActor func rejectsIncompleteOrStaleServerEvidence(_ kind: String) async throws {
@@ -1042,6 +1188,7 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
     var rejectWrites = false
     var matchBatchSizes: [Int] = []
     var onAsset: (@MainActor () -> Void)?
+    var assetFailure: LibraryWriteError?
     /// queries逐批记录；可模拟完整未命中、协议缺项或网络失败，不返回任何上传许可。
     @MainActor func lookupBackupChecksums(_ queries: [PhotoBackupCachedChecksumQuery]) async throws -> [LocalMediaChecksumLookup] {
         if queries.isEmpty {
@@ -1080,6 +1227,9 @@ private nonisolated func makeContinuitySQLite(_ url: URL) throws {
             throw URLError(.networkConnectionLost)
         }
         onAsset?()
+        if let assetFailure {
+            throw assetFailure
+        }
         guard let value = assets[id] else { throw LocalMediaCandidateError.inaccessible }
         return value
     }

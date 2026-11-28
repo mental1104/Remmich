@@ -17,6 +17,7 @@ import OSLog
     }
 
     private let displayAliases: DisplayAliasProvider?
+    private let originalVerificationIDs: Set<UUID>
     private let serverFirst: Bool
     private static let logger = Logger(subsystem: "io.github.ender-wang.Remmich", category: "BackupPreflight")
 
@@ -25,13 +26,14 @@ import OSLog
          status: @escaping @MainActor (String.LocalizationValue) -> Void = { _ in },
          phaseProgress: @escaping @MainActor (Int, Int) -> Void = { _, _ in },
          checkpointMatches: MatchCheckpoint? = nil, serverFirst: Bool = false, verifiedCheckpoint: VerifiedCheckpoint? = nil,
-         displayAliases: DisplayAliasProvider? = nil)
+         displayAliases: DisplayAliasProvider? = nil, originalVerificationIDs: Set<UUID> = [])
     {
         self.store = store; self.metadata = metadata; self.status = status
         self.phaseProgress = phaseProgress; self.checkpointMatches = checkpointMatches
         self.serverFirst = serverFirst
         self.verifiedCheckpoint = verifiedCheckpoint
         self.displayAliases = displayAliases
+        self.originalVerificationIDs = originalVerificationIDs
     }
 
     /// jobs只含待执行版本；verificationIDs仅来自明确单项核查或已验证网络恢复，仍不能授权历史源。
@@ -183,12 +185,27 @@ import OSLog
                 else { remaining.append(job); continue }
                 let remote: LocalMediaRemoteAsset
                 do { remote = try await client.localMediaAsset(hint.association.remoteID.uuidString) }
-                catch LocalMediaCandidateError.inaccessible { try check(validateContext); review.insert(source); continue }
+                catch LocalMediaCandidateError.inaccessible {
+                    try check(validateContext)
+                    if try permitsOriginalVerification(job, snapshot: snapshot, verificationIDs: verificationIDs) {
+                        remaining.append(job)
+                    } else {
+                        review.insert(source)
+                    }
+                    continue
+                }
                 try check(validateContext)
                 guard remote.isOffline == false, remote.checksum == hint.association.checksum,
                       LocalMediaAssociation.verified(remote: remote, requestedID: hint.association.remoteID, ownerID: scope.userID,
                                                      local: snapshot.identity, source: .exactCloudIdentity, prefersCurrentPhotos: true) != nil
-                else { review.insert(source); continue }
+                else {
+                    if try permitsOriginalVerification(job, snapshot: snapshot, verificationIDs: verificationIDs) {
+                        remaining.append(job)
+                    } else {
+                        review.insert(source)
+                    }
+                    continue
+                }
                 accepted.append(job)
             }
             if !accepted.isEmpty {
@@ -224,7 +241,8 @@ import OSLog
             remainingPlan = .init(allowed: [], existing: [], review: [])
         } else {
             let oldChecker = PhotoBackupContinuityChecker(store: store, metadata: metadata, status: status, phaseProgress: phaseProgress,
-                                                          checkpointMatches: checkpointMatches, serverFirst: serverFirst, verifiedCheckpoint: verifiedCheckpoint)
+                                                          checkpointMatches: checkpointMatches, serverFirst: serverFirst, verifiedCheckpoint: verifiedCheckpoint,
+                                                          originalVerificationIDs: originalVerificationIDs)
             let alreadyClassified = existing.count + review.count
             remainingPlan = try await oldChecker.plan(jobs: remaining, scope: scope, client: client, verificationIDs: verificationIDs,
                                                       progress: { done, _ in progress(alreadyClassified + done, jobs.count) }, validateContext: validateContext)
@@ -362,15 +380,35 @@ import OSLog
             // 官方与自有来源可能保留不同版本；只要求当前公开元组唯一匹配，重复当前候选仍由resolve拒绝。
             guard let cloud, let values = candidates[cloud],
                   case let .candidate(candidate) = try LocalMediaMatch.resolve(expected: snapshot.identity, snapshot: snapshot, candidates: values)
-            else { review.insert(source); continue }
+            else {
+                if try permitsOriginalVerification(job, snapshot: snapshot, verificationIDs: verificationIDs) {
+                    allowed.insert(source)
+                } else {
+                    review.insert(source)
+                }
+                continue
+            }
             let remote: LocalMediaRemoteAsset
             do { remote = try await client.localMediaAsset(candidate.assetID.uuidString) }
-            catch LocalMediaCandidateError.inaccessible { try check(validateContext); review.insert(source); continue }
+            catch LocalMediaCandidateError.inaccessible {
+                try check(validateContext)
+                if try permitsOriginalVerification(job, snapshot: snapshot, verificationIDs: verificationIDs) {
+                    allowed.insert(source)
+                } else {
+                    review.insert(source)
+                }
+                continue
+            }
             try check(validateContext)
             guard let association = LocalMediaAssociation.verified(remote: remote, requestedID: candidate.assetID, ownerID: scope.userID,
                                                                    local: snapshot.identity, source: .mobileMetadata)
             else {
-                review.insert(source); continue
+                if try permitsOriginalVerification(job, snapshot: snapshot, verificationIDs: verificationIDs) {
+                    allowed.insert(source)
+                } else {
+                    review.insert(source)
+                }
+                continue
             }
             existing.insert(source); matches[candidate.assetID] = cloud
             if checkpointsEnabled {
@@ -418,6 +456,20 @@ import OSLog
         }
         Self.logger.info("Preflight finished matched=\(existing.count) allowed=\(allowed.count) review=\(review.count)")
         return plan
+    }
+
+    /// Explicit original-byte verification is separate from ID matching and automatic recovery.
+    /// Only the no-import branch consumes it; old attempted/receipt history still requires its independent verification grant.
+    private func permitsOriginalVerification(_ job: PhotoBackupJob, snapshot: LocalPhotoSnapshot, verificationIDs: Set<UUID>) throws -> Bool {
+        guard originalVerificationIDs.contains(job.id), job.stage == .queued,
+              job.source.kind == .photo || job.source.kind == .video,
+              Self.sourceKindMatches(job.source.kind, snapshot.identity.mediaKind),
+              let modified = job.source.modifiedAt, modified.timeIntervalSince1970.isFinite,
+              snapshot.identity.modificationDate == modified, snapshot.supportsCurrentMetadataMatch,
+              try snapshot.mobileMetadata() != nil else { return false }
+        let untouched = job.attempts == 0 && job.failure == nil && job.primaryAssetID == nil && job.motionAssetID == nil
+            && job.rawReceipt == nil && job.jpegReceipt == nil
+        return untouched || verificationIDs.contains(job.id)
     }
 
     /// 完整远端候选流之后，只提交已fresh核验的有限匹配批次；先复核本机版本、确认标记，再原子保存任务。

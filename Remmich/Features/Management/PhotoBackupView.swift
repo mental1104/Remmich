@@ -43,6 +43,7 @@ struct PhotoBackupView: View {
                     Label(statusTitle, systemImage: backup.running ? "arrow.triangle.2.circlepath" : "icloud")
                         .font(.headline)
                     Text(backup.status)
+                        .accessibilityIdentifier("backup-original-status")
                     Text(backup.continuityStatus).font(.footnote).foregroundStyle(.secondary)
                     if backup.running {
                         if let fraction = backup.progressFraction {
@@ -66,6 +67,7 @@ struct PhotoBackupView: View {
                         Button(L10n.string(backup.foregroundAutomaticEnabled || backup.backgroundAutomaticEnabled ? "Stop & Disable Automatic Backup" : "Pause Backup"), role: .destructive) {
                             Task { await backup.stopManually(using: controller) }
                         }
+                        .accessibilityIdentifier("backup-pause-originals")
                     } else {
                         Button { showsConfiguration = true } label: {
                             LabeledContent("Backup Source") { Text("Entire Photos Library") }
@@ -80,6 +82,7 @@ struct PhotoBackupView: View {
                         Button("Back Up Originals") {
                             resumesUnattempted = false; retryID = nil; confirmationOwner = controller.generation; confirmsResume = true
                         }
+                        .accessibilityIdentifier("backup-start-originals")
                         .disabled(loadingQueue || backup.configuringAutomatic || backup.requiresSelectionScan || !backup.jobs.contains { [.queued, .paused, .failed].contains($0.stage) } || controller.client == nil || controller.busy)
                         DisclosureGroup("Recovery Options") {
                             Button("Continue Unattempted Items") {
@@ -154,6 +157,7 @@ struct PhotoBackupView: View {
                         backup.resume(using: controller, jobID: retryID)
                     }
                 }
+                .accessibilityIdentifier("backup-confirm-originals")
             } message: {
                 if resumesUnattempted {
                     Text("Recheck Photos access and the saved library scan before continuing up to \(backup.unattemptedSummary.eligibleJobIDs.count) unattempted items. The saved iCloud option is used. Failed, uncertain, cancelled, and completed items are retained.")
@@ -325,6 +329,7 @@ struct PhotoBackupView: View {
                 }
                 Section {
                     Toggle("允许下载 iCloud 原片（可能使用移动数据）", isOn: $backup.allowCloud)
+                        .accessibilityIdentifier("backup-allow-icloud-originals")
                         .disabled(loadingQueue)
                 } header: {
                     Text(verbatim: "iCloud")

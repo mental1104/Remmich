@@ -453,7 +453,9 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
 
     /// A native scan adds only unseen source versions. Existing history, receipts and task stages are preserved exactly.
     /// v4 is explicit so older readers reject the native scope rather than treating organization albums as backup scope.
-    @discardableResult mutating func applyLibraryScan(_ scan: PhotoBackupLibraryScan, allowCloud: Bool) throws -> Int {
+    @discardableResult mutating func applyLibraryScan(_ scan: PhotoBackupLibraryScan, allowCloud: Bool,
+                                                      deferredSources: Set<PhotoBackupSource> = []) throws -> Int
+    {
         try validate(namespace: namespace)
         guard !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
         let existing = Set(jobs.map(\.source))
@@ -461,7 +463,8 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
         excludedAlbumIDs = excludedAlbumIDs ?? []
         self.allowCloud = allowCloud
         foregroundAutomaticEnabled = false; backgroundAutomaticEnabled = false; foregroundNetworkRecoveryEnabled = false
-        let additions = scan.sources.filter { !existing.contains($0) }
+        // Display identity only defers new original work; it never changes historical tasks or receipts.
+        let additions = scan.sources.filter { !existing.contains($0) && !deferredSources.contains($0) }
         jobs.append(contentsOf: additions.map { PhotoBackupJob(source: $0) })
         try validate(namespace: namespace)
         return additions.count
@@ -477,21 +480,27 @@ nonisolated struct PhotoBackupJournal: Codable, Sendable {
     }
 
     /// User-triggered execution rechecks the native current inventory. Historical states are not changed by scanning alone.
-    mutating func resumeLibraryForVerification(_ scan: PhotoBackupLibraryScan, only id: UUID? = nil, unattemptedOnly: Bool = false) throws {
+    mutating func resumeLibraryForVerification(_ scan: PhotoBackupLibraryScan, only id: UUID? = nil, unattemptedOnly: Bool = false,
+                                               candidateLocalIDs: Set<String>? = nil) throws
+    {
         try validate(namespace: namespace)
         guard scanSource == .nativeLibrary, !jobs.contains(where: \.stage.isInFlight) else { throw PhotoBackupStateError.invalidTransition }
         let current = Set(scan.sources), safeIDs = PhotoBackupUnattemptedSummary(jobs: jobs).eligibleJobIDs
         if let id {
-            guard jobs.contains(where: { $0.id == id && current.contains($0.source) && [.queued, .paused, .failed].contains($0.stage) }) else { throw PhotoBackupStateError.invalidTransition }
+            guard jobs.contains(where: { $0.id == id && current.contains($0.source)
+                    && (candidateLocalIDs?.contains($0.source.localID) ?? true)
+                    && [.queued, .paused, .failed].contains($0.stage)
+            }) else { throw PhotoBackupStateError.invalidTransition }
         }
         for index in jobs.indices {
             let job = jobs[index]
             if current.contains(job.source), id == nil || job.id == id, [.queued, .paused, .failed].contains(job.stage),
+               candidateLocalIDs?.contains(job.source.localID) ?? true,
                !unattemptedOnly || safeIDs.contains(job.id)
             {
                 jobs[index].queueForVerification()
             } else if job.stage == .queued {
-                // A queued historical source not in today's native inventory cannot be exported by this run.
+                // Out-of-scope queued work is retained as paused, never promoted to an existing/completed backup.
                 jobs[index].pause()
             }
         }

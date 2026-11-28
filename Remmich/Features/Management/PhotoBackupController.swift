@@ -106,6 +106,14 @@ import Photos
     @ObservationIgnored weak var localMatches: LocalMediaMatchController?
     @ObservationIgnored private let albumLoader: @MainActor () async throws -> AlbumCatalog
     @ObservationIgnored private let libraryScanner: LibraryScanner
+    @ObservationIgnored private let candidateEvidence: PhotoBackupContinuityChecker.DisplayAliasProvider?
+    @ObservationIgnored private let diagnosticsURL: URL?
+    @ObservationIgnored private var lastDiagnosticWrite = Date.distantPast
+    @ObservationIgnored private var diagnosticPhase = "idle"
+    private(set) var scannedNativeCount = 0
+    private(set) var deferredNativeCount = 0
+    private(set) var skipped = 0
+    private(set) var review = 0
     @ObservationIgnored private let albumScanner: @MainActor (Set<String>) async throws -> [PhotoBackupAlbumSnapshot]
     @ObservationIgnored private var configurationScope: MediaAccountScope?
     @ObservationIgnored private var applyingConfiguration = false
@@ -129,7 +137,8 @@ import Photos
 
     /// Production always scans native Photos; isolated legacy fixtures keep their existing initializer contract.
     static func production(store: SQLiteLibraryIndexStore = .init()) -> PhotoBackupController {
-        .init(store: store, scanSource: .nativeLibrary)
+        .init(store: store, scanSource: .nativeLibrary,
+              diagnosticsURL: URL.documentsDirectory.appendingPathComponent("remmich-photo-backup-diagnostics.json"))
     }
 
     /// store复用账号存储，exporter控制媒体导出；albumLoader读取当前授权列表，albumScanner按包含/排除ID并集重新取源快照。
@@ -141,11 +150,14 @@ import Photos
          authorizationStatus: @escaping @MainActor () -> PHAuthorizationStatus = { PHPhotoLibrary.authorizationStatus(for: .readWrite) },
          observeAutomaticPhotos: Bool = true,
          preflight: (any PhotoBackupPreflighting)? = nil,
-         scanSource: PhotoBackupScanSource = .selectedAlbums, libraryScanner: LibraryScanner? = nil)
+         scanSource: PhotoBackupScanSource = .selectedAlbums, libraryScanner: LibraryScanner? = nil,
+         candidateEvidence: PhotoBackupContinuityChecker.DisplayAliasProvider? = nil, diagnosticsURL: URL? = nil)
     {
         self.store = store
         self.scanSource = scanSource
         self.libraryScanner = libraryScanner ?? { validate in try await Self.libraryAssets(validateContext: validate) }
+        self.candidateEvidence = candidateEvidence
+        self.diagnosticsURL = diagnosticsURL
         self.exporter = exporter
         self.preflight = preflight
         self.albumLoader = albumLoader ?? Self.readPhotoAlbums
@@ -314,11 +326,14 @@ import Photos
         }
         running = true
         statusMessage = "Scanning the authorized Photos library. No originals or uploads."
+        writeDiagnostics(phase: "scanning", force: true)
         task = Task {
-            defer { running = false; task = nil }
+            defer { running = false; task = nil; writeDiagnostics(phase: "scanFinished", force: true) }
             do {
                 let assets = try await libraryScanner(validateContext)
                 let scan = try await Self.planLibraryScan(assets)
+                try validateContext()
+                let deferred = try await deferredNativeSources(scan, manager: manager, owner: owner, scope: scope, validateContext: validateContext)
                 try validateContext()
                 guard selected == organizationIncluded, excluded == organizationExcluded else { throw CancellationError() }
                 let journal = try await PhotoBackupRunCoordinator.perform(scope: scope) { [store] in
@@ -326,7 +341,7 @@ import Photos
                     var journal = try await store.loadPhotoBackups(scope: scope)
                     try validateContext()
                     journal.recoverInterrupted()
-                    try journal.applyLibraryScan(scan, allowCloud: cloud)
+                    try journal.applyLibraryScan(scan, allowCloud: cloud, deferredSources: deferred)
                     try journal.saveOrganizationSelection(included: organizationIncluded, excluded: organizationExcluded)
                     try validateContext()
                     try await store.savePhotoBackups(journal, scope: scope)
@@ -338,6 +353,35 @@ import Photos
             } catch { showFailure(error, manager: manager, owner: owner) }
         }
         return task
+    }
+
+    /// This is candidate scheduling, not a completed-original receipt. Already matched current
+    /// Photos versions need no new original task; unknown/changed versions retain full preflight.
+    private func deferredNativeSources(_ scan: PhotoBackupLibraryScan, manager: LibraryManagementController, owner: UUID,
+                                       scope: MediaAccountScope, validateContext: @escaping @MainActor @Sendable () throws -> Void) async throws -> Set<PhotoBackupSource>
+    {
+        scannedNativeCount = scan.sources.count; deferredNativeCount = 0
+        var deferred: Set<PhotoBackupSource> = []
+        for offset in stride(from: 0, to: scan.sources.count, by: 64) {
+            try validateContext()
+            let sources = Array(scan.sources[offset ..< min(offset + 64, scan.sources.count)])
+            let evidence: [PhotoBackupDisplayAliasEvidence] = if let candidateEvidence {
+                try await candidateEvidence(sources.map(\.localID), scope)
+            } else if let localMatches {
+                try await localMatches.backupDisplayAliasEvidence(localIDs: sources.map(\.localID), scope: scope)
+            } else {
+                []
+            }
+            try validateContext(); try Self.validate(manager, owner: owner, scope: scope)
+            try deferred.formUnion(PhotoBackupCandidateSelection.deferredSources(sources: sources, evidence: evidence))
+            deferredNativeCount = deferred.count
+            if offset.isMultiple(of: 1024) {
+                writeDiagnostics(phase: "selectingOriginalCandidates")
+                await Task.yield()
+            }
+        }
+        writeDiagnostics(phase: "originalCandidatesSelected", force: true)
+        return deferred
     }
 
     /// Organization albums are independent preferences in native-library mode, never a backup source filter.
@@ -525,12 +569,14 @@ import Photos
         }
         let owner = manager.generation
         running = true
-        completed = 0; duplicates = 0; failed = 0; processed = 0
+        completed = 0; duplicates = 0; failed = 0; processed = 0; skipped = 0; review = 0
         statusMessage = "正在准备备份队列，可随时暂停。"
         continuityMessage = "正在读取并核对已保存的任务。"
+        writeDiagnostics(phase: "preparingBackup", force: true)
         task = Task {
             defer {
                 running = false; task = nil
+                writeDiagnostics(phase: "backupStopped", force: true)
                 if mode.isBackground {
                     backgroundTask = nil
                 }
@@ -555,15 +601,22 @@ import Photos
                         let assets = try await self.libraryScanner(validateNative)
                         let scan = try await Self.planLibraryScan(assets)
                         try validateNative()
+                        let deferred = try await self.deferredNativeSources(scan, manager: manager, owner: owner, scope: scope, validateContext: validateNative)
+                        try validateNative()
                         if case .verification = mode {
-                            try journal.applyLibraryScan(scan, allowCloud: journal.allowCloud)
+                            try journal.applyLibraryScan(scan, allowCloud: journal.allowCloud, deferredSources: deferred)
                         }
                         let onlyID: UUID? = if case let .verification(id) = mode {
                             id
                         } else {
                             nil
                         }
-                        try journal.resumeLibraryForVerification(scan, only: onlyID, unattemptedOnly: mode.onlyUnattempted)
+                        let candidateIDs: Set<String>? = if onlyID == nil {
+                            Set(scan.sources.filter { !deferred.contains($0) }.map(\.localID))
+                        } else {
+                            nil // Explicit single-item verification is never silently deferred by display identity.
+                        }
+                        try journal.resumeLibraryForVerification(scan, only: onlyID, unattemptedOnly: mode.onlyUnattempted, candidateLocalIDs: candidateIDs)
                     } else {
                         switch mode {
                         case let .verification(id): try journal.resumeForVerification(only: id)
@@ -587,6 +640,7 @@ import Photos
                     try Self.validate(manager, owner: owner, scope: scope)
                     self.total = journal.jobs.count { $0.stage == .queued }
                     let cloud = journal.allowCloud
+                    self.writeDiagnostics(phase: "preflighting", force: true)
                     // management占用整个执行周期，防止多个窗口同时通过同一写通道执行队列。
                     return try await manager.perform(publishChange: false) { [journal] _ in
                         let verificationIDs: Set<UUID> = if case let .verification(id) = mode {
@@ -609,10 +663,12 @@ import Photos
                                     throw CancellationError()
                                 }
                             },
-                            progress: { _, result in
+                            progress: { job, result in
                                 self.completed = result.completed; self.duplicates = result.duplicates; self.failed = result.failed
+                                self.skipped = result.skipped; self.review = result.review
                                 self.processed = result.completed + result.failed + result.skipped + result.review
                                 self.statusMessage = "已处理 \(self.processed) 项：新备份 \(result.completed)，已匹配 \(result.skipped)，备份未确认 \(result.review)，失败 \(result.failed)。"
+                                self.writeDiagnostics(phase: job.stage.rawValue)
                             }
                         )
                     }
@@ -766,10 +822,11 @@ import Photos
             processed += jobs.count
             localMatches?.acceptBackupMatches(associations, using: manager)
             statusMessage = "已保存匹配进度 \(processed) 项；中断后可继续剩余项目。"
-        }, displayAliases: displayAliases)
+        }, displayAliases: displayAliases, originalVerificationIDs: usesNativeLibrarySource ? Set(queued.map(\.id)) : [])
         let plan = try await checker.plan(jobs: queued, scope: scope, client: reader, verificationIDs: verificationIDs, progress: { [self] done, total in
             phaseDone = done; phaseTotal = total
             continuityMessage = "正在核查 \(done) / \(total) 项，可随时暂停。"
+            writeDiagnostics(phase: "preflighting")
         }, validateContext: {
             try Self.validate(manager, owner: owner, scope: scope)
         })
@@ -777,6 +834,26 @@ import Photos
         try plan.validate(sources: Set(queued.map(\.source)))
         continuityMessage = "已匹配服务器已有 \(plan.existing.count) 项，待上传 \(plan.allowed.count) 项，备份未确认 \(plan.review.count) 项。"
         return plan
+    }
+
+    /// Debug-only aggregate progress. No photo identifiers, filenames, account details or media
+    /// are recorded. Fixtures default to nil, so they cannot overwrite the signed-in App's file.
+    private func writeDiagnostics(phase: String, force: Bool = false) {
+        #if DEBUG
+            guard let diagnosticsURL else { return }
+            let now = Date()
+            guard force || phase != diagnosticPhase || now.timeIntervalSince(lastDiagnosticWrite) >= 1 else { return }
+            diagnosticPhase = phase; lastDiagnosticWrite = now
+            let values: [String: Any] = ["version": 1, "recordedAt": now.timeIntervalSince1970,
+                                         "running": running, "phase": phase, "allowCloud": allowCloud,
+                                         "nativeTotal": scannedNativeCount, "deferredMatched": deferredNativeCount,
+                                         "total": total, "processed": processed, "completed": completed,
+                                         "duplicates": duplicates, "skipped": skipped, "review": review, "failed": failed,
+                                         "preflighting": preflighting, "phaseDone": phaseDone, "phaseTotal": phaseTotal]
+            if let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]) {
+                try? data.write(to: diagnosticsURL, options: .atomic)
+            }
+        #endif
     }
 
     func matchingAssociations(scope: MediaAccountScope) async throws -> [LocalMediaAssociation] {
